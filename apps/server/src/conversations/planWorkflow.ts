@@ -20,6 +20,8 @@ import {
   V2PlanningLiveProgress,
   type V2PlanningLiveProgressT,
   V2ProposeConversationActionInput,
+  V2ReviewExecutionCheckpoint,
+  type V2ReviewExecutionCheckpointT,
   V2SavePlanCandidateParameters,
   V2SendPlanToQcParameters,
   V2WorkPlanContract,
@@ -34,6 +36,7 @@ import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/datab
 import { findRecurringFindingIds } from "../planning/qcGates.js";
 import type {
   ReviewOnlyChatEvent,
+  ReviewOnlyDurableCheckpoint,
   ReviewOnlyPlanningPausedResult,
   ReviewOnlyPlanningResult,
   ReviewOnlyPlanningTerminalResult,
@@ -211,6 +214,7 @@ interface ReviewRow {
   chat_messages: unknown;
   markdown_artifacts: unknown;
   live_progress: unknown | null;
+  execution_checkpoint: unknown | null;
   seed_plan: unknown;
   plan_content_hash: string;
   result_plan_content_hash: string;
@@ -313,7 +317,7 @@ const reviewColumns = `schema_version, id, project_id, work_item_id, conversatio
   (SELECT round FROM planning_runs WHERE id=planning_run_id) AS rounds_completed,
   (SELECT max_rounds FROM planning_runs WHERE id=planning_run_id) AS max_rounds,
   (SELECT live_progress FROM planning_runs WHERE id=planning_run_id) AS live_progress,
-  round_exchanges, chat_messages, markdown_artifacts, started_at, completed_at,
+  execution_checkpoint, round_exchanges, chat_messages, markdown_artifacts, started_at, completed_at,
   CASE
     WHEN failure_code='adaptererror' THEN coalesce((
       SELECT usage.error_code
@@ -647,7 +651,28 @@ export class ConversationPlanWorkflowService {
     );
   }
 
-  async loadReviewOnlySeed(planningRunId: string): Promise<{
+  private async ownsReviewLease(
+    tx: V2SqlExecutor,
+    planningRunId: string,
+    leaseToken: string | undefined,
+  ): Promise<boolean> {
+    if (!leaseToken) return true;
+    const row = (
+      await tx.query<{ id: string }>(
+        `SELECT id FROM planning_runs
+          WHERE id=$1 AND mode='review_only' AND lease_token=$2
+            AND status IN ('reviewing','revising')
+          FOR UPDATE`,
+        [planningRunId, leaseToken],
+      )
+    ).rows[0];
+    return row !== undefined;
+  }
+
+  async loadReviewOnlySeed(
+    planningRunId: string,
+    leaseToken?: string,
+  ): Promise<{
     reviewId: string;
     usageRequestGroupId: string;
     initiatedByUserId: string;
@@ -666,6 +691,9 @@ export class ConversationPlanWorkflowService {
         )
       ).rows[0];
       if (!row) throw new Error(`review-only run "${planningRunId}" has no frozen seed`);
+      if (!(await this.ownsReviewLease(tx, planningRunId, leaseToken))) {
+        throw new Error(`review-only run "${planningRunId}" no longer owns its lease`);
+      }
       const seedPlan = V2WorkPlanContract.parse(json(row.seed_plan));
       // Called before markReviewOnlyStarted (see executeReviewOnly), so a
       // resumed run still has its paused fields intact here — read them
@@ -681,6 +709,7 @@ export class ConversationPlanWorkflowService {
           : seedPlan;
         const exchanges = json<V2ConversationPlanReviewT["round_exchanges"]>(row.round_exchanges);
         resume = {
+          kind: "human",
           fromRound: Number(row.paused_at_round),
           checkpoint: row.paused_checkpoint,
           plan,
@@ -700,6 +729,34 @@ export class ConversationPlanWorkflowService {
           // "rule for reviewer" ruling.
           forcedAcceptModuleIds: json<string[]>(row.forced_accept_module_ids),
         };
+      } else if (row.status === "running" && row.execution_checkpoint !== null) {
+        const checkpoint = V2ReviewExecutionCheckpoint.parse(json(row.execution_checkpoint));
+        if (
+          canonicalSha256(checkpoint.reviewed_plan) !== checkpoint.reviewed_plan_hash ||
+          canonicalSha256(checkpoint.current_plan) !== checkpoint.current_plan_hash
+        ) {
+          throw new Error(`review-only run "${planningRunId}" has a corrupt checkpoint hash`);
+        }
+        const exchanges = json<V2ConversationPlanReviewT["round_exchanges"]>(row.round_exchanges);
+        resume = {
+          kind: "operational",
+          fromRound: checkpoint.round,
+          checkpoint: checkpoint.completed_step === "review" ? "after_review" : "after_revision",
+          plan: checkpoint.current_plan,
+          operationalReviewedPlan: checkpoint.reviewed_plan,
+          usage: [...checkpoint.usage_events],
+          rounds: exchanges.map((exchange) => ({
+            round: exchange.round,
+            reviewed_plan:
+              exchange.round === checkpoint.round
+                ? checkpoint.reviewed_plan
+                : checkpoint.current_plan,
+            findings: exchange.reviewer.findings,
+            responses: exchange.pm ? exchange.pm.dispositions : null,
+            revised_plan_content_hash: exchange.pm ? exchange.pm.revised_plan_content_hash : null,
+          })),
+          forcedAcceptModuleIds: json<string[]>(row.forced_accept_module_ids),
+        };
       }
       return {
         reviewId: row.id,
@@ -714,7 +771,7 @@ export class ConversationPlanWorkflowService {
     });
   }
 
-  async markReviewOnlyStarted(reviewId: string): Promise<void> {
+  async markReviewOnlyStarted(reviewId: string, leaseToken?: string): Promise<void> {
     await this.transactions.transaction(async (tx) => {
       const review = (
         await tx.query<ReviewRow>(
@@ -723,6 +780,7 @@ export class ConversationPlanWorkflowService {
         )
       ).rows[0];
       if (!review) throw new Error(`unknown conversation plan review "${reviewId}"`);
+      if (!(await this.ownsReviewLease(tx, review.planning_run_id, leaseToken))) return;
       if (review.status === "running") return;
       if (!["queued", "awaiting_human"].includes(review.status)) {
         throw new Error(`plan review "${reviewId}" cannot start from ${review.status}`);
@@ -742,6 +800,7 @@ export class ConversationPlanWorkflowService {
                 paused_checkpoint=NULL, paused_at_round=NULL,
                 findings='[]'::jsonb, dispositions='[]'::jsonb,
                 revised_plan=NULL, revised_plan_content_hash=NULL, revised_plan_version_id=NULL,
+                execution_checkpoint=NULL,
                 result_plan_content_hash=plan_content_hash,
                 updated_at=$2
           WHERE id=$1 AND status IN ('queued', 'awaiting_human')`,
@@ -756,6 +815,7 @@ export class ConversationPlanWorkflowService {
     reviewId: string;
     planningRunId: string;
     rounds: readonly ReviewOnlyRound[];
+    leaseToken?: string;
   }): Promise<void> {
     await this.transactions.transaction(async (tx) => {
       const review = (
@@ -766,6 +826,7 @@ export class ConversationPlanWorkflowService {
         )
       ).rows[0];
       if (!review || review.status !== "running") return;
+      if (!(await this.ownsReviewLease(tx, input.planningRunId, input.leaseToken))) return;
       const exchanges = this.reviewRoundExchanges(review, input.rounds);
       const latest = input.rounds.at(-1);
       const round = latest?.round ?? 0;
@@ -824,10 +885,66 @@ export class ConversationPlanWorkflowService {
     });
   }
 
+  async recordReviewOnlyCheckpoint(input: {
+    reviewId: string;
+    planningRunId: string;
+    checkpoint: ReviewOnlyDurableCheckpoint;
+    leaseToken?: string;
+  }): Promise<void> {
+    await this.transactions.transaction(async (tx) => {
+      const review = (
+        await tx.query<ReviewRow>(
+          `SELECT ${reviewColumns} FROM conversation_plan_reviews
+            WHERE id=$1 AND planning_run_id=$2 FOR UPDATE`,
+          [input.reviewId, input.planningRunId],
+        )
+      ).rows[0];
+      if (!review || review.status !== "running") return;
+      if (!(await this.ownsReviewLease(tx, input.planningRunId, input.leaseToken))) return;
+
+      const existing =
+        review.execution_checkpoint === null
+          ? null
+          : V2ReviewExecutionCheckpoint.parse(json(review.execution_checkpoint));
+      if (existing?.completed_request_id === input.checkpoint.completed_request_id) return;
+      const ordinal = (round: number, step: "review" | "revision") =>
+        round * 2 + (step === "revision" ? 1 : 0);
+      if (
+        existing &&
+        ordinal(existing.round, existing.completed_step) >=
+          ordinal(input.checkpoint.round, input.checkpoint.completed_step)
+      ) {
+        return;
+      }
+
+      const now = this.now().toISOString();
+      const checkpoint: V2ReviewExecutionCheckpointT = V2ReviewExecutionCheckpoint.parse({
+        schema_version: 1,
+        completed_step: input.checkpoint.completed_step,
+        round: input.checkpoint.round,
+        reviewed_plan: input.checkpoint.reviewed_plan,
+        reviewed_plan_hash: canonicalSha256(input.checkpoint.reviewed_plan),
+        current_plan: input.checkpoint.current_plan,
+        current_plan_hash: canonicalSha256(input.checkpoint.current_plan),
+        completed_request_id: input.checkpoint.completed_request_id,
+        usage_events: [...input.checkpoint.usage],
+        checkpointed_at: now,
+      });
+      const exchanges = this.reviewRoundExchanges(review, input.checkpoint.rounds);
+      await tx.query(
+        `UPDATE conversation_plan_reviews
+            SET execution_checkpoint=$2::jsonb, round_exchanges=$3::jsonb, updated_at=$4
+          WHERE id=$1 AND status='running'`,
+        [review.id, JSON.stringify(checkpoint), JSON.stringify(exchanges), now],
+      );
+    });
+  }
+
   async recordReviewOnlyStage(input: {
     reviewId: string;
     planningRunId: string;
     event: ReviewOnlyProgressEvent;
+    leaseToken?: string;
   }): Promise<void> {
     await this.transactions.transaction(async (tx) => {
       const review = (
@@ -838,6 +955,7 @@ export class ConversationPlanWorkflowService {
         )
       ).rows[0];
       if (!review || !["queued", "running", "awaiting_human"].includes(review.status)) return;
+      if (!(await this.ownsReviewLease(tx, input.planningRunId, input.leaseToken))) return;
 
       const now = this.now().toISOString();
       const previous =
@@ -873,6 +991,7 @@ export class ConversationPlanWorkflowService {
     reviewId: string;
     planningRunId: string;
     event: ReviewOnlyChatEvent;
+    leaseToken?: string;
   }): Promise<void> {
     await this.transactions.transaction(async (tx) => {
       const review = (
@@ -883,6 +1002,7 @@ export class ConversationPlanWorkflowService {
         )
       ).rows[0];
       if (!review || review.status !== "running") return;
+      if (!(await this.ownsReviewLease(tx, input.planningRunId, input.leaseToken))) return;
       await this.appendReviewChatEvent(tx, review, input.event, "automatic");
     });
   }
@@ -930,6 +1050,7 @@ export class ConversationPlanWorkflowService {
             SET status='cancelled', completed_at=$2, cancelled_by_user_id=$3,
                 cancellation_reason=$4, updated_at=$2,
                 paused_checkpoint=NULL, paused_at_round=NULL,
+                execution_checkpoint=NULL,
                 findings='[]'::jsonb, dispositions='[]'::jsonb,
                 revised_plan=NULL, revised_plan_content_hash=NULL, revised_plan_version_id=NULL,
                 result_plan_content_hash=plan_content_hash
@@ -1592,6 +1713,7 @@ export class ConversationPlanWorkflowService {
     reviewId: string;
     planningRunId: string;
     result: ReviewOnlyPlanningPausedResult;
+    leaseToken?: string;
   }): Promise<void> {
     await this.transactions.transaction(async (tx) => {
       const review = (
@@ -1606,6 +1728,7 @@ export class ConversationPlanWorkflowService {
       // cancelled out from under the run, or otherwise terminal) means this
       // paused result is stale and must not override real state.
       if (review.status !== "running") return;
+      if (!(await this.ownsReviewLease(tx, input.planningRunId, input.leaseToken))) return;
 
       const pausedPlan = V2WorkPlanContract.parse(input.result.plan);
       const pausedHash = canonicalSha256(pausedPlan);
@@ -1661,7 +1784,7 @@ export class ConversationPlanWorkflowService {
                 result_plan_content_hash=$7,
                 findings=$8::jsonb, dispositions=$9::jsonb,
                 round_exchanges=$10::jsonb,
-                updated_at=$11
+                execution_checkpoint=NULL, updated_at=$11
           WHERE id=$1 AND status='running'`,
         [
           review.id,
@@ -1698,6 +1821,7 @@ export class ConversationPlanWorkflowService {
     planningRunId: string;
     result: ReviewOnlyPlanningResult;
     totalCostUsd: number;
+    leaseToken?: string;
   }): Promise<void> {
     if (input.result.status === "paused") {
       throw new Error("completeReviewOnly does not handle a paused review-only result");
@@ -1716,6 +1840,7 @@ export class ConversationPlanWorkflowService {
       if (review.status !== "running") {
         throw new Error(`review-only completion requires running, got ${review.status}`);
       }
+      if (!(await this.ownsReviewLease(tx, input.planningRunId, input.leaseToken))) return;
       const seedVersion = await this.planById(tx, review.plan_version_id, true);
       const work = await this.lockWork(tx, review.project_id, review.work_item_id);
       await this.assertConversation(
@@ -1811,7 +1936,7 @@ export class ConversationPlanWorkflowService {
                 revised_plan_content_hash=$7,
                 revised_plan_version_id=$8,
                 round_exchanges=$9::jsonb,
-                completed_at=$10, updated_at=$10
+                execution_checkpoint=NULL, completed_at=$10, updated_at=$10
           WHERE id=$1 AND status='running'`,
         [
           review.id,
@@ -1853,7 +1978,7 @@ export class ConversationPlanWorkflowService {
     });
   }
 
-  async failReviewOnly(planningRunId: string, error: unknown): Promise<void> {
+  async failReviewOnly(planningRunId: string, error: unknown, leaseToken?: string): Promise<void> {
     await this.transactions.transaction(async (tx) => {
       const review = (
         await tx.query<ReviewRow>(
@@ -1864,6 +1989,7 @@ export class ConversationPlanWorkflowService {
       ).rows[0];
       if (!review || ["converged", "cap_reached", "failed", "cancelled"].includes(review.status))
         return;
+      if (!(await this.ownsReviewLease(tx, planningRunId, leaseToken))) return;
       const code = errorCode(error);
       const now = this.now().toISOString();
       await tx.query(
@@ -1883,6 +2009,7 @@ export class ConversationPlanWorkflowService {
         `UPDATE conversation_plan_reviews
             SET status='failed', failure_code=$2, completed_at=$3, updated_at=$3,
                 paused_checkpoint=NULL, paused_at_round=NULL,
+                execution_checkpoint=NULL,
                 findings='[]'::jsonb, dispositions='[]'::jsonb,
                 revised_plan=NULL, revised_plan_content_hash=NULL, revised_plan_version_id=NULL,
                 result_plan_content_hash=plan_content_hash
@@ -3495,6 +3622,17 @@ export class ConversationPlanWorkflowService {
     event: ReviewOnlyChatEvent | (Omit<ReviewOnlyChatEvent, "speaker"> & { speaker: "human" }),
     source: "automatic" | "manual",
   ): Promise<void> {
+    const existingMessages = json<V2ConversationPlanReviewT["chat_messages"]>(review.chat_messages);
+    if (
+      existingMessages.some(
+        (message) =>
+          message.request_id === event.request_id &&
+          message.speaker === event.speaker &&
+          message.kind === event.kind,
+      )
+    ) {
+      return;
+    }
     const now = this.now().toISOString();
     const message = {
       id: this.makeId("qc_chat_message"),

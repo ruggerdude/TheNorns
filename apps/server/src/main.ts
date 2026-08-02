@@ -256,6 +256,7 @@ let deviceControlOptions:
   | undefined;
 let deviceWssAuthentication: DeviceWssAuthenticationService | undefined;
 let legacyRepositoryClaimsOptions: { service: LegacyRepositoryClaimService } | undefined;
+const applicationShutdown: { close?: () => Promise<void> } = {};
 
 const publicOrigin =
   process.env.NORNS_PUBLIC_ORIGIN ??
@@ -836,7 +837,8 @@ if (databaseUrl) {
         if (shutdownRequested) return;
         shutdownRequested = true;
         if (debateWorkerTimer) clearInterval(debateWorkerTimer);
-        void Promise.all(flushers.map((f) => f.stop()))
+        void Promise.resolve(applicationShutdown.close?.())
+          .then(() => Promise.all(flushers.map((f) => f.stop())))
           .then(() => persistenceLease?.release())
           .then(() => databasePool?.end())
           .then(() => process.exit(0));
@@ -1105,6 +1107,7 @@ const server = await buildServer({
       graphVersion: demoSession.graph.version,
     }),
 });
+applicationShutdown.close = () => server.app.close();
 
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.NORNS_HOST ?? (isProd ? "0.0.0.0" : "127.0.0.1");

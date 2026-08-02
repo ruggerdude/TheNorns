@@ -1123,6 +1123,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   let conversationPmUpdateTimer: ReturnType<typeof setInterval> | undefined;
   let usageBudgetEvaluationTimer: ReturnType<typeof setInterval> | undefined;
   let conversationKickoffTimer: ReturnType<typeof setInterval> | undefined;
+  let planningWorkerTimer: ReturnType<typeof setInterval> | undefined;
+  let planningWorkerForShutdown: PlanningRunWorker | null = null;
   // EXECUTION E12 — declared here, assigned far below where PhaseLaunchService
   // is constructed, so the onClose hook can clear it alongside its siblings.
   let phaseQueueDrainTimer: ReturnType<typeof setInterval> | undefined;
@@ -1414,6 +1416,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     if (phaseQueueDrainTimer) clearInterval(phaseQueueDrainTimer);
     if (usageBudgetEvaluationTimer) clearInterval(usageBudgetEvaluationTimer);
     if (conversationKickoffTimer) clearInterval(conversationKickoffTimer);
+    if (planningWorkerTimer) clearInterval(planningWorkerTimer);
+    await planningWorkerForShutdown?.drain();
     conversationTurns?.abortAll();
     workspaceBroker.close();
   });
@@ -6424,25 +6428,19 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         resolveModels: resolvePlanningModels,
         ...(reviewWorkflow
           ? {
-              loadReviewOnlySeed: (runId: string) => reviewWorkflow.loadReviewOnlySeed(runId),
-              markReviewOnlyStarted: (reviewId: string) =>
-                reviewWorkflow.markReviewOnlyStarted(reviewId),
+              loadReviewOnlySeed: (runId: string, leaseToken?: string) =>
+                reviewWorkflow.loadReviewOnlySeed(runId, leaseToken),
+              markReviewOnlyStarted: (reviewId: string, leaseToken?: string) =>
+                reviewWorkflow.markReviewOnlyStarted(reviewId, leaseToken),
               recordReviewOnlyProgress: (input) => reviewWorkflow.recordReviewOnlyProgress(input),
+              recordReviewOnlyCheckpoint: (input) =>
+                reviewWorkflow.recordReviewOnlyCheckpoint(input),
               recordReviewOnlyChatEvent: (input) => reviewWorkflow.recordReviewOnlyChatEvent(input),
               recordReviewOnlyStage: (input) => reviewWorkflow.recordReviewOnlyStage(input),
-              completeReviewOnly: (input: {
-                reviewId: string;
-                planningRunId: string;
-                result: import("./planning/reviewOnlySession.js").ReviewOnlyPlanningResult;
-                totalCostUsd: number;
-              }) => reviewWorkflow.completeReviewOnly(input),
-              pauseReviewOnly: (input: {
-                reviewId: string;
-                planningRunId: string;
-                result: import("./planning/reviewOnlySession.js").ReviewOnlyPlanningPausedResult;
-              }) => reviewWorkflow.pauseReviewOnly(input),
-              failReviewOnly: (runId: string, error: unknown) =>
-                reviewWorkflow.failReviewOnly(runId, error),
+              completeReviewOnly: (input) => reviewWorkflow.completeReviewOnly(input),
+              pauseReviewOnly: (input) => reviewWorkflow.pauseReviewOnly(input),
+              failReviewOnly: (runId: string, error: unknown, leaseToken?: string) =>
+                reviewWorkflow.failReviewOnly(runId, error, leaseToken),
             }
           : {}),
         ...(options.planningRuns.executionKickoff
@@ -6486,6 +6484,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           };
         },
       });
+      planningWorkerForShutdown = planningWorker;
       executeReviewNow = (runId) => planningWorker.runNow(runId);
       cancelReviewNow = (runId) => planningWorker.cancelReview(runId);
 
@@ -6526,11 +6525,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         });
       }
 
-      // A restarted process can never resume a run that was mid-flight when
-      // it died (runPlanning() isn't itself resumable mid-round), so any run
-      // left in a non-terminal state is marked failed with a truthful reason
-      // rather than left silently stuck. Single-instance MVP: see
-      // PlanningRunWorker's module comment for the multi-instance caveat.
+      // Review-only QC resumes from durable provider-step checkpoints. Other
+      // legacy planning modes still use truthful terminal reconciliation.
       void planningWorker.reconcileOrphans().catch(() => undefined);
 
       // The common case has no poll latency (the POST handler below kicks
@@ -6538,7 +6534,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       // a run is never silently stranded if that immediate kick is lost to a
       // crash between insert and dispatch.
       let planningTickInFlight = false;
-      const planningWorkerTimer = setInterval(() => {
+      planningWorkerTimer = setInterval(() => {
         if (planningTickInFlight) return;
         planningTickInFlight = true;
         void planningWorker

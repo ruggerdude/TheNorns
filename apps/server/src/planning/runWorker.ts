@@ -4,14 +4,12 @@
 // per-round progress via the loop's onRound hook and a definitive terminal
 // result/failure when the loop returns.
 //
-// This does NOT make runPlanning() itself resumable mid-round: if the
-// process dies while a run is in flight, nothing here restarts it from
-// where it left off. What it guarantees instead is truthfulness — on
-// startup, reconcileOrphans() marks any run left in a non-terminal state as
-// failed with an honest reason, rather than leaving it silently stuck. That
-// tradeoff assumes a single running instance, per the MVP scope; a
-// multi-instance or rolling deploy would need lease-expiry-based recovery
-// instead of the blanket "reconcile at boot" sweep used here.
+// General planning runs still fail truthfully when interrupted mid-round.
+// Review-only QC is restart-safe at provider-step boundaries: normalized
+// reviewer/revision output is checkpointed with the exact current plan, an
+// expired lease is requeued, and a new claim resumes after that step. A call
+// that was still in flight at process death may be repeated because providers
+// do not expose a portable idempotency guarantee.
 import { randomUUID } from "node:crypto";
 import type { ImagePart, LlmAdapter, ProviderName } from "@norns/adapters";
 import { type CodexReasoningEffortT, PlanContract, type PlanContractT } from "@norns/contracts";
@@ -21,6 +19,7 @@ import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import {
   type QcMode,
   type ReviewOnlyChatEvent,
+  type ReviewOnlyDurableCheckpoint,
   type ReviewOnlyPlanningPausedResult,
   type ReviewOnlyPlanningResult,
   type ReviewOnlyProgressEvent,
@@ -70,6 +69,9 @@ export interface PlanningStaffingInput {
 export interface PlanningRunWorkerOptions {
   now?: () => Date;
   leaseMs?: number;
+  /** Short renewable lease for review-only work so a hard crash recovers
+   * promptly without allowing a rolling-deploy peer to steal a live call. */
+  reviewLeaseMs?: number;
   /** Delay before retrying a kickoff seam that threw before returning. */
   kickoffRetryMs?: number;
   /**
@@ -109,7 +111,10 @@ export interface PlanningRunWorkerOptions {
     projectId: string,
     attachmentIds: readonly string[],
   ) => Promise<readonly ImagePart[]>;
-  loadReviewOnlySeed?: (runId: string) => Promise<{
+  loadReviewOnlySeed?: (
+    runId: string,
+    leaseToken?: string,
+  ) => Promise<{
     reviewId: string;
     usageRequestGroupId: string;
     initiatedByUserId: string;
@@ -122,27 +127,37 @@ export interface PlanningRunWorkerOptions {
      *  round exchanges) — never re-derived from current project settings. */
     resume?: ReviewOnlyResumeState;
   }>;
-  markReviewOnlyStarted?: (reviewId: string) => Promise<void>;
+  markReviewOnlyStarted?: (reviewId: string, leaseToken?: string) => Promise<void>;
   recordReviewOnlyProgress?: (input: {
     reviewId: string;
     planningRunId: string;
     rounds: readonly ReviewOnlyRound[];
+    leaseToken?: string;
+  }) => Promise<void>;
+  recordReviewOnlyCheckpoint?: (input: {
+    reviewId: string;
+    planningRunId: string;
+    checkpoint: ReviewOnlyDurableCheckpoint;
+    leaseToken?: string;
   }) => Promise<void>;
   recordReviewOnlyChatEvent?: (input: {
     reviewId: string;
     planningRunId: string;
     event: ReviewOnlyChatEvent;
+    leaseToken?: string;
   }) => Promise<void>;
   recordReviewOnlyStage?: (input: {
     reviewId: string;
     planningRunId: string;
     event: ReviewOnlyProgressEvent;
+    leaseToken?: string;
   }) => Promise<void>;
   completeReviewOnly?: (input: {
     reviewId: string;
     planningRunId: string;
     result: ReviewOnlyPlanningResult;
     totalCostUsd: number;
+    leaseToken?: string;
   }) => Promise<void>;
   /** A gate parked the review durably — distinct from complete/fail. See
    *  "Durability: a gate parks, it does not wait" (QC-PAUSE-POINTS.md). */
@@ -150,8 +165,9 @@ export interface PlanningRunWorkerOptions {
     reviewId: string;
     planningRunId: string;
     result: ReviewOnlyPlanningPausedResult;
+    leaseToken?: string;
   }) => Promise<void>;
-  failReviewOnly?: (planningRunId: string, error: unknown) => Promise<void>;
+  failReviewOnly?: (planningRunId: string, error: unknown, leaseToken?: string) => Promise<void>;
 }
 
 interface ClaimedPlanningRunRow {
@@ -168,6 +184,7 @@ interface ClaimedPlanningRunRow {
   objective: string;
   max_rounds: number;
   lease_token: string;
+  execution_attempt: number;
   /** FRONT DOOR P4: objective attachment ids to inject in round 1. */
   attachment_ids: string[] | string;
   /** PHASE TAB P1: implementation-provider constraint for staffing. */
@@ -305,8 +322,13 @@ function safeJsonArray(value: string): unknown[] {
 export class PlanningRunWorker {
   private readonly now: () => Date;
   private readonly leaseMs: number;
+  private readonly reviewLeaseMs: number;
   private readonly kickoffRetryMs: number;
-  private readonly activeReviewControllers = new Map<string, AbortController>();
+  private readonly activeReviewControllers = new Map<
+    string,
+    { controller: AbortController; leaseToken: string }
+  >();
+  private draining = false;
 
   constructor(
     private readonly transactions: V2TransactionRunner,
@@ -315,13 +337,52 @@ export class PlanningRunWorker {
   ) {
     this.now = options.now ?? (() => new Date());
     this.leaseMs = options.leaseMs ?? 10 * 60_000;
+    this.reviewLeaseMs = options.reviewLeaseMs ?? 45_000;
     this.kickoffRetryMs = options.kickoffRetryMs ?? 30_000;
   }
 
   cancelReview(runId: string): boolean {
-    const controller = this.activeReviewControllers.get(runId);
-    controller?.abort();
-    return controller !== undefined;
+    const active = this.activeReviewControllers.get(runId);
+    active?.controller.abort();
+    return active !== undefined;
+  }
+
+  /** Stop accepting work and durably release every review claim owned by this
+   * process. The lease-token predicate fences late provider callbacks. */
+  async drain(): Promise<void> {
+    this.draining = true;
+    const active = [...this.activeReviewControllers.entries()];
+    if (active.length > 0) {
+      await this.transactions.transaction(async (tx) => {
+        for (const [runId, claim] of active) {
+          await tx.query(
+            `UPDATE planning_runs
+                SET status='queued', error=NULL, live_progress=NULL,
+                    lease_token=NULL, leased_until=NULL, updated_at=$3
+              WHERE id=$1 AND mode='review_only' AND lease_token=$2
+                AND status IN ('drafting','reviewing','revising')`,
+            [runId, claim.leaseToken, this.now().toISOString()],
+          );
+        }
+      });
+      for (const [, claim] of active) claim.controller.abort();
+    }
+  }
+
+  private async recoverExpiredReviewOnly(): Promise<number> {
+    return this.transactions.transaction(async (tx) => {
+      const recovered = await tx.query<{ id: string }>(
+        `UPDATE planning_runs
+            SET status='queued', error=NULL, live_progress=NULL,
+                lease_token=NULL, leased_until=NULL, updated_at=$1
+          WHERE mode='review_only'
+            AND status IN ('drafting','reviewing','revising')
+            AND (leased_until IS NULL OR leased_until <= $1)
+          RETURNING id`,
+        [this.now().toISOString()],
+      );
+      return recovered.rows.length;
+    });
   }
 
   /** Call once at startup, before any tick(). See the module-level note on
@@ -351,38 +412,17 @@ export class PlanningRunWorker {
          RETURNING id`,
         [this.now().toISOString()],
       );
-      // A parked review-only run holds no lease and is not abandoned — it is
-      // deliberately sitting at 'awaiting_human', outside this filter, and
-      // must not be swept up and force-failed here (QC-PAUSE-POINTS.md,
-      // "A parked review holds no lease, so lease-expiry recovery must not
-      // treat awaiting_human runs as abandoned").
-      const reviewOnly = await tx.query<{ id: string }>(
-        `SELECT id
-           FROM planning_runs
-          WHERE mode = 'review_only'
-            AND status IN ('drafting','reviewing','revising')
-          ORDER BY created_at, id`,
-      );
       return {
         count: planning.rows.length + kickoff.rows.length,
-        reviewOnlyIds: reviewOnly.rows.map((row) => row.id),
       };
     });
-    const failReviewOnly = this.options.failReviewOnly;
-    if (reconciled.reviewOnlyIds.length > 0 && !failReviewOnly) {
-      throw new Error("review-only orphan recovery is not configured");
-    }
-    for (const runId of reconciled.reviewOnlyIds) {
-      await failReviewOnly?.(
-        runId,
-        new Error("orphaned: server restarted before the review completed"),
-      );
-    }
-    return reconciled.count + reconciled.reviewOnlyIds.length;
+    return reconciled.count + (await this.recoverExpiredReviewOnly());
   }
 
   /** Processes at most one planning run or pending quick kickoff. */
   async tick(): Promise<"idle" | "processed"> {
+    if (this.draining) return "idle";
+    await this.recoverExpiredReviewOnly();
     const claim = await this.claim();
     if (claim) {
       await this.execute(claim);
@@ -395,6 +435,7 @@ export class PlanningRunWorker {
    *  creation so the common case has no poll latency). No-ops if the run is
    *  no longer queued (e.g. a concurrent tick already claimed it). */
   async runNow(runId: string): Promise<"processed" | "not_found"> {
+    if (this.draining) return "not_found";
     const claim = await this.claim(runId);
     if (claim) {
       await this.execute(claim);
@@ -407,6 +448,7 @@ export class PlanningRunWorker {
     const leaseToken = randomUUID();
     const now = this.now();
     const leasedUntil = new Date(now.getTime() + this.leaseMs).toISOString();
+    const reviewLeasedUntil = new Date(now.getTime() + this.reviewLeaseMs).toISOString();
     return this.transactions.transaction(async (tx) => {
       const sql = runId
         ? `WITH next_run AS (
@@ -414,10 +456,15 @@ export class PlanningRunWorker {
            )
            UPDATE planning_runs SET
              status = CASE planning_runs.mode WHEN 'review_only' THEN 'reviewing' ELSE 'drafting' END,
-             lease_token = $1, leased_until = $2, updated_at = $3
+             execution_attempt = planning_runs.execution_attempt + 1,
+             lease_token = $1,
+             leased_until = CASE WHEN planning_runs.mode='review_only'
+               THEN $5::timestamptz ELSE $2::timestamptz END,
+             updated_at = $3
            FROM next_run WHERE planning_runs.id = next_run.id
            RETURNING planning_runs.id, planning_runs.project_id, planning_runs.objective,
-             planning_runs.max_rounds, planning_runs.lease_token, planning_runs.attachment_ids,
+             planning_runs.max_rounds, planning_runs.lease_token, planning_runs.execution_attempt,
+             planning_runs.attachment_ids,
              planning_runs.worker_providers, planning_runs.revision_seed, planning_runs.transcript,
              planning_runs.mode, planning_runs.requested_by,
              planning_runs.pm_provider, planning_runs.pm_model, planning_runs.pm_reasoning_effort,
@@ -429,18 +476,23 @@ export class PlanningRunWorker {
            )
            UPDATE planning_runs SET
              status = CASE planning_runs.mode WHEN 'review_only' THEN 'reviewing' ELSE 'drafting' END,
-             lease_token = $1, leased_until = $2, updated_at = $3
+             execution_attempt = planning_runs.execution_attempt + 1,
+             lease_token = $1,
+             leased_until = CASE WHEN planning_runs.mode='review_only'
+               THEN $4::timestamptz ELSE $2::timestamptz END,
+             updated_at = $3
            FROM next_run WHERE planning_runs.id = next_run.id
            RETURNING planning_runs.id, planning_runs.project_id, planning_runs.objective,
-             planning_runs.max_rounds, planning_runs.lease_token, planning_runs.attachment_ids,
+             planning_runs.max_rounds, planning_runs.lease_token, planning_runs.execution_attempt,
+             planning_runs.attachment_ids,
              planning_runs.worker_providers, planning_runs.revision_seed, planning_runs.transcript,
              planning_runs.mode, planning_runs.requested_by,
              planning_runs.pm_provider, planning_runs.pm_model, planning_runs.pm_reasoning_effort,
              planning_runs.agent_provider, planning_runs.agent_model,
              planning_runs.agent_reasoning_effort`;
       const params = runId
-        ? [leaseToken, leasedUntil, now.toISOString(), runId]
-        : [leaseToken, leasedUntil, now.toISOString()];
+        ? [leaseToken, leasedUntil, now.toISOString(), runId, reviewLeasedUntil]
+        : [leaseToken, leasedUntil, now.toISOString(), reviewLeasedUntil];
       const result = await tx.query<ClaimedPlanningRunRow>(sql, params);
       return result.rows[0] ?? null;
     });
@@ -478,7 +530,7 @@ export class PlanningRunWorker {
       }
     } catch (error) {
       if (reviewOnly && this.options.failReviewOnly) {
-        await this.options.failReviewOnly(claim.id, error);
+        await this.options.failReviewOnly(claim.id, error, claim.lease_token);
       } else {
         await this.fail(claim, error);
       }
@@ -492,7 +544,7 @@ export class PlanningRunWorker {
       reviewer = quick ? null : this.createAdapter(models.reviewer.provider, models.reviewer.model);
     } catch (error) {
       if (reviewOnly && this.options.failReviewOnly) {
-        await this.options.failReviewOnly(claim.id, error);
+        await this.options.failReviewOnly(claim.id, error, claim.lease_token);
       } else {
         await this.fail(claim, error);
       }
@@ -660,7 +712,17 @@ export class PlanningRunWorker {
     models: ResolvedPlanningModels,
   ): Promise<void> {
     const controller = new AbortController();
-    this.activeReviewControllers.set(claim.id, controller);
+    this.activeReviewControllers.set(claim.id, {
+      controller,
+      leaseToken: claim.lease_token,
+    });
+    const heartbeat = setInterval(
+      () => {
+        void this.renewReviewLease(claim).catch(() => undefined);
+      },
+      Math.max(1_000, Math.floor(this.reviewLeaseMs / 3)),
+    );
+    heartbeat.unref?.();
     try {
       if (
         !reviewer ||
@@ -672,7 +734,7 @@ export class PlanningRunWorker {
       ) {
         throw new Error("review-only planning workflow is not configured");
       }
-      const seed = await this.options.loadReviewOnlySeed(claim.id);
+      const seed = await this.options.loadReviewOnlySeed(claim.id, claim.lease_token);
       const preparingRound = seed.resume
         ? seed.resume.checkpoint === "after_review"
           ? seed.resume.fromRound
@@ -681,6 +743,7 @@ export class PlanningRunWorker {
       await this.options.recordReviewOnlyStage?.({
         reviewId: seed.reviewId,
         planningRunId: claim.id,
+        leaseToken: claim.lease_token,
         event: {
           stage: "preparing",
           round: preparingRound,
@@ -689,7 +752,7 @@ export class PlanningRunWorker {
           model: reviewer.model,
         },
       });
-      await this.options.markReviewOnlyStarted(seed.reviewId);
+      await this.options.markReviewOnlyStarted(seed.reviewId, claim.lease_token);
       const result = await runReviewOnlyPlanning({
         pm,
         reviewer,
@@ -702,7 +765,15 @@ export class PlanningRunWorker {
         signal: controller.signal,
         qcMode: seed.qcMode,
         allowUnadjudicatedRebuttals: seed.allowUnadjudicatedRebuttals,
+        executionAttempt: claim.execution_attempt,
         ...(seed.resume ? { resume: seed.resume } : {}),
+        onCheckpoint: (checkpoint: ReviewOnlyDurableCheckpoint) =>
+          this.options.recordReviewOnlyCheckpoint?.({
+            reviewId: seed.reviewId,
+            planningRunId: claim.id,
+            checkpoint,
+            leaseToken: claim.lease_token,
+          }),
         ...(this.options.recordReviewOnlyProgress
           ? {
               onProgress: (rounds: readonly ReviewOnlyRound[]) =>
@@ -710,6 +781,7 @@ export class PlanningRunWorker {
                   reviewId: seed.reviewId,
                   planningRunId: claim.id,
                   rounds,
+                  leaseToken: claim.lease_token,
                 }),
             }
           : {}),
@@ -720,6 +792,7 @@ export class PlanningRunWorker {
                   reviewId: seed.reviewId,
                   planningRunId: claim.id,
                   event,
+                  leaseToken: claim.lease_token,
                 }),
             }
           : {}),
@@ -730,6 +803,7 @@ export class PlanningRunWorker {
                   reviewId: seed.reviewId,
                   planningRunId: claim.id,
                   event,
+                  leaseToken: claim.lease_token,
                 }),
             }
           : {}),
@@ -744,6 +818,7 @@ export class PlanningRunWorker {
           reviewId: seed.reviewId,
           planningRunId: claim.id,
           result,
+          leaseToken: claim.lease_token,
         });
         return;
       }
@@ -756,13 +831,31 @@ export class PlanningRunWorker {
         planningRunId: claim.id,
         result,
         totalCostUsd,
+        leaseToken: claim.lease_token,
       });
     } catch (error) {
-      await this.options.failReviewOnly?.(claim.id, error);
+      if (!(this.draining && controller.signal.aborted)) {
+        await this.options.failReviewOnly?.(claim.id, error, claim.lease_token);
+      }
     } finally {
+      clearInterval(heartbeat);
       this.activeReviewControllers.delete(claim.id);
     }
     void models;
+  }
+
+  private async renewReviewLease(claim: ClaimedPlanningRunRow): Promise<void> {
+    const now = this.now();
+    const leasedUntil = new Date(now.getTime() + this.reviewLeaseMs).toISOString();
+    await this.transactions.transaction(async (tx) => {
+      await tx.query(
+        `UPDATE planning_runs
+            SET leased_until=$3, updated_at=$4
+          WHERE id=$1 AND mode='review_only' AND lease_token=$2
+            AND status IN ('reviewing','revising')`,
+        [claim.id, claim.lease_token, leasedUntil, now.toISOString()],
+      );
+    });
   }
 
   /**

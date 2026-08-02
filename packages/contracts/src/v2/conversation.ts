@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { PlanContract, PlanModule, validatePlan } from "../plan.js";
 import { FindingResponse, ReviewFinding } from "../review.js";
+import { UsageEvent } from "../usage.js";
 import {
   V2Actor,
   V2EntityId,
@@ -1877,6 +1878,28 @@ export const V2WorkPlanContract = z
     }
   });
 export type V2WorkPlanContractT = z.infer<typeof V2WorkPlanContract>;
+
+/**
+ * Internal restart checkpoint for the review-only QC worker. Human pause
+ * state remains represented by paused_checkpoint/paused_at_round; this
+ * envelope records the last provider step whose normalized output is safely
+ * persisted and can therefore be skipped after a process restart.
+ */
+export const V2ReviewExecutionCheckpoint = z
+  .object({
+    schema_version: z.literal(1),
+    completed_step: z.enum(["review", "revision"]),
+    round: z.number().int().min(1).max(5),
+    reviewed_plan: V2WorkPlanContract,
+    reviewed_plan_hash: V2Sha256Hex,
+    current_plan: V2WorkPlanContract,
+    current_plan_hash: V2Sha256Hex,
+    completed_request_id: V2NonEmptyString,
+    usage_events: z.array(UsageEvent),
+    checkpointed_at: V2IsoDateTime,
+  })
+  .strict();
+export type V2ReviewExecutionCheckpointT = z.infer<typeof V2ReviewExecutionCheckpoint>;
 
 export const V2WorkPlanVersionStatus = z.enum([
   "candidate",

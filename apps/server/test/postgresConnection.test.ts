@@ -146,6 +146,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             qc_last_human_message_at: true,
             qc_mode_provenance_columns: true,
             planning_live_progress_columns: true,
+            qc_restart_checkpoint_columns: true,
           },
         ],
       }),
@@ -264,7 +265,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "conversation_plan_reviews QC pause columns, work_plan_versions.origin, " +
         "conversation_plan_reviews adjudication columns, " +
         "conversation_plan_reviews.last_human_message_at, " +
-        "conversation_plan_reviews qc_mode provenance columns, planning live_progress columns. " +
+        "conversation_plan_reviews qc_mode provenance columns, planning live_progress columns, " +
+        "QC restart checkpoint columns. " +
         "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
     });
   });
@@ -338,7 +340,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
           "conversation_plan_reviews QC pause columns, work_plan_versions.origin, " +
           "conversation_plan_reviews adjudication columns, " +
           "conversation_plan_reviews.last_human_message_at, " +
-          "conversation_plan_reviews qc_mode provenance columns, planning live_progress columns. " +
+          "conversation_plan_reviews qc_mode provenance columns, planning live_progress columns, " +
+          "QC restart checkpoint columns. " +
           "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
       },
     );
@@ -416,8 +419,26 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "conversation_plan_reviews QC pause columns, work_plan_versions.origin, " +
         "conversation_plan_reviews adjudication columns, " +
         "conversation_plan_reviews.last_human_message_at, " +
-        "conversation_plan_reviews qc_mode provenance columns, planning live_progress columns. " +
+        "conversation_plan_reviews qc_mode provenance columns, planning live_progress columns, " +
+        "QC restart checkpoint columns. " +
         "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
     });
+  });
+
+  it("fails closed when QC restart checkpoint columns are missing", async () => {
+    const missingRestartCheckpoints = {
+      query: async () => ({
+        rows: [{ qc_restart_checkpoint_columns: false }],
+      }),
+    };
+
+    await expect(
+      assertCurrentRuntimeSchema(missingRestartCheckpoints as never),
+    ).rejects.toMatchObject({
+      code: "runtime_schema_outdated",
+    });
+    await expect(assertCurrentRuntimeSchema(missingRestartCheckpoints as never)).rejects.toThrow(
+      /QC restart checkpoint columns/,
+    );
   });
 });

@@ -41,10 +41,17 @@ export type QcMode = V2QcModeT;
 export type ReviewOnlyCheckpoint = "after_review" | "after_revision" | "adjudication";
 
 export interface ReviewOnlyResumeState {
+  /** Human resumes preserve the existing gate semantics. Operational resumes
+   * replay the deterministic decision immediately after the provider step
+   * named by checkpoint without calling that provider again. */
+  kind?: "human" | "operational";
   fromRound: number;
   checkpoint: ReviewOnlyCheckpoint;
   plan: V2WorkPlanContractT;
   rounds: ReviewOnlyRound[];
+  operationalReviewedPlan?: V2WorkPlanContractT;
+  /** Provider usage already captured by an operational checkpoint. */
+  usage?: UsageEventT[];
   // ponytail: note is accepted but not threaded into the next pass's prompt
   // yet — wiring it to the right channel/round needs the steering machinery
   // this phase intentionally does not build.
@@ -106,6 +113,16 @@ export interface ReviewOnlyProgressEvent {
   model: string;
 }
 
+export interface ReviewOnlyDurableCheckpoint {
+  completed_step: "review" | "revision";
+  round: number;
+  reviewed_plan: V2WorkPlanContractT;
+  current_plan: V2WorkPlanContractT;
+  completed_request_id: string;
+  rounds: readonly ReviewOnlyRound[];
+  usage: readonly UsageEventT[];
+}
+
 export interface ReviewOnlyPlanningOptions {
   pm: LlmAdapter;
   reviewer: LlmAdapter;
@@ -126,8 +143,52 @@ export interface ReviewOnlyPlanningOptions {
    * at round 1. */
   resume?: ReviewOnlyResumeState;
   onProgress?: (rounds: readonly ReviewOnlyRound[]) => void | Promise<void>;
+  onCheckpoint?: (checkpoint: ReviewOnlyDurableCheckpoint) => void | Promise<void>;
   onChatEvent?: (event: ReviewOnlyChatEvent) => void | Promise<void>;
   onStage?: (event: ReviewOnlyProgressEvent) => void | Promise<void>;
+  /** Durable claim number used only to keep repeated post-restart provider
+   * requests distinct in telemetry and transcript evidence. */
+  executionAttempt?: number;
+}
+
+function gateCForRound(input: {
+  rounds: readonly ReviewOnlyRound[];
+  record: ReviewOnlyRound;
+  reviewedPlan: V2WorkPlanContractT;
+  revisedPlan: V2WorkPlanContractT;
+  allowUnadjudicatedRebuttals: boolean;
+  forcedAcceptModuleIds: readonly string[];
+}): GateCFinding[] {
+  const priorRebuttedShouldFixModuleIds = input.rounds.slice(0, -1).flatMap((prior) =>
+    (prior.responses ?? []).flatMap((response) => {
+      if (response.disposition !== "rebut") return [];
+      const finding = prior.findings[response.finding_index];
+      return finding && finding.severity === "should_fix" && finding.module_id !== null
+        ? [finding.module_id]
+        : [];
+    }),
+  );
+  return detectGateC({
+    findings: input.record.findings.map((finding, index) => ({
+      id: String(index),
+      index,
+      severity: finding.severity,
+      module_id: finding.module_id,
+      finding: finding.finding,
+      recommendation: finding.recommendation,
+    })),
+    dispositions: (input.record.responses ?? []).map((response) => ({
+      finding_id: String(response.finding_index),
+      finding_index: response.finding_index,
+      disposition: response.disposition,
+      rationale: response.rationale,
+    })),
+    planBefore: input.reviewedPlan,
+    planAfter: input.revisedPlan,
+    allowUnadjudicatedRebuttals: input.allowUnadjudicatedRebuttals,
+    priorRebuttedShouldFixModuleIds,
+    forcedAcceptModuleIds: [...input.forcedAcceptModuleIds],
+  });
 }
 
 function reviewOnlySystem(base: string, frozenContext: unknown): string {
@@ -253,7 +314,7 @@ async function completeStructuredWithRepair<T>(
     onStage?: (event: ReviewOnlyProgressEvent) => void | Promise<void>;
     markdown(value: T): string;
   },
-): Promise<StructuredResult<T> & { progress_attempt: number }> {
+): Promise<StructuredResult<T> & { progress_attempt: number; progress_request_id: string }> {
   const maxAttempts = 2;
   let prompt = request.prompt;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
@@ -307,7 +368,7 @@ async function completeStructuredWithRepair<T>(
         artifact_markdown: chat.markdown(result.value),
         artifact_valid: true,
       });
-      return { ...result, progress_attempt: attempt + 1 };
+      return { ...result, progress_attempt: attempt + 1, progress_request_id: requestId };
     } catch (error) {
       if (error instanceof AdapterError && error.metadata?.response_text?.trim()) {
         await chat.onEvent?.({
@@ -383,7 +444,7 @@ export async function runReviewOnlyPlanning(
   // dispute is moot) or does, in which case the same-module dumb match below
   // forces the PM's disposition and the finding is never re-adjudicated.
   const forcedAcceptModuleIds = new Set(resume?.forcedAcceptModuleIds ?? []);
-  const usage: UsageEventT[] = [];
+  const usage: UsageEventT[] = resume?.usage ? [...resume.usage] : [];
   const rounds: ReviewOnlyRound[] = resume ? [...resume.rounds] : [];
   const meter = {
     projectId: options.projectId,
@@ -391,6 +452,64 @@ export async function runReviewOnlyPlanning(
   };
   const reviewerPrompt = reviewOnlySystem(reviewerSystem([]), options.frozenContext);
   const revisionSystem = reviewOnlySystem(pmSystem([]), options.frozenContext);
+  const operationalResume = resume?.kind === "operational";
+
+  // A revision checkpoint is written before deterministic Gate C/cap/cadence
+  // evaluation. Re-run that pure decision logic after a restart, then either
+  // stop or advance to the next reviewer without repeating the completed PM
+  // call. Human resumes deliberately retain their pre-existing semantics.
+  if (operationalResume && resume.checkpoint === "after_revision") {
+    const record = rounds.find((candidate) => candidate.round === resume.fromRound);
+    if (!record || record.responses === null) {
+      throw new Error(
+        `operational revision checkpoint expects a completed round ${resume.fromRound}`,
+      );
+    }
+    const reviewedPlan = V2WorkPlanContract.parse(
+      resume.operationalReviewedPlan ?? record.reviewed_plan,
+    );
+    const gateCFindings = gateCForRound({
+      rounds,
+      record,
+      reviewedPlan,
+      revisedPlan: plan,
+      allowUnadjudicatedRebuttals,
+      forcedAcceptModuleIds: [...forcedAcceptModuleIds],
+    });
+    if (gateCFindings.length > 0) {
+      return {
+        status: "paused",
+        paused_checkpoint: "adjudication",
+        paused_at_round: resume.fromRound,
+        plan: reviewedPlan,
+        rounds: [...rounds],
+        gate_c_findings: gateCFindings,
+        usage,
+      };
+    }
+    if (resume.fromRound === options.maxRounds) {
+      return {
+        status: "cap_reached",
+        rounds: resume.fromRound,
+        seed_plan: seedPlan,
+        final_plan: plan,
+        result_plan_content_hash: canonicalSha256(plan),
+        final_plan_markdown: finalPlanMarkdown(plan),
+        review_rounds: rounds,
+        usage,
+      };
+    }
+    if (qcMode === "gated_each_round" || qcMode === "gated_each_step") {
+      return {
+        status: "paused",
+        paused_checkpoint: "after_revision",
+        paused_at_round: resume.fromRound,
+        plan,
+        rounds: [...rounds],
+        usage,
+      };
+    }
+  }
 
   // Resuming at "after_review" re-enters the same round the reviewer already
   // produced findings for; "after_revision" and "adjudication" both advance
@@ -419,9 +538,35 @@ export async function runReviewOnlyPlanning(
       record = resumedRecord;
       reviewedPlan = record.reviewed_plan;
       findings = record.findings;
+      if (operationalResume) {
+        if (mustFixCount(findings) === 0) {
+          return {
+            status: "converged",
+            rounds: round,
+            seed_plan: seedPlan,
+            final_plan: plan,
+            result_plan_content_hash: canonicalSha256(plan),
+            final_plan_markdown: finalPlanMarkdown(plan),
+            review_rounds: rounds,
+            usage,
+          };
+        }
+        if (qcMode === "gated_each_step" || qcMode === "gated_when_contested") {
+          return {
+            status: "paused",
+            paused_checkpoint: "after_review",
+            paused_at_round: round,
+            plan: reviewedPlan,
+            rounds: [...rounds],
+            usage,
+          };
+        }
+      }
     } else {
       reviewedPlan = plan;
-      const reviewRequestId = `${options.telemetryGroupId}:review:${round}`;
+      const reviewRequestId = `${options.telemetryGroupId}:review:${round}${
+        options.executionAttempt === undefined ? "" : `:exec:${options.executionAttempt}`
+      }`;
       const review = await completeStructuredWithRepair(
         options.reviewer,
         {
@@ -452,6 +597,15 @@ export async function runReviewOnlyPlanning(
         revised_plan_content_hash: null,
       };
       rounds.push(record);
+      await options.onCheckpoint?.({
+        completed_step: "review",
+        round,
+        reviewed_plan: reviewedPlan,
+        current_plan: reviewedPlan,
+        completed_request_id: review.progress_request_id,
+        rounds,
+        usage,
+      });
       await options.onStage?.({
         stage: "saving",
         round,
@@ -484,7 +638,9 @@ export async function runReviewOnlyPlanning(
       }
     }
 
-    const revisionRequestId = `${options.telemetryGroupId}:revision:${round}`;
+    const revisionRequestId = `${options.telemetryGroupId}:revision:${round}${
+      options.executionAttempt === undefined ? "" : `:exec:${options.executionAttempt}`
+    }`;
     const revision = await completeStructuredWithRepair(
       options.pm,
       {
@@ -548,6 +704,15 @@ export async function runReviewOnlyPlanning(
     record.responses = [...revision.value.responses];
     plan = V2WorkPlanContract.parse(revision.value.plan);
     record.revised_plan_content_hash = canonicalSha256(plan);
+    await options.onCheckpoint?.({
+      completed_step: "revision",
+      round,
+      reviewed_plan: reviewedPlan,
+      current_plan: plan,
+      completed_request_id: revision.progress_request_id,
+      rounds,
+      usage,
+    });
     await options.onStage?.({
       stage: "saving",
       round,
@@ -560,34 +725,12 @@ export async function runReviewOnlyPlanning(
     // Same-module dumb match against every earlier round's rebutted
     // should_fix findings (never the current round, already excluded by
     // slice(0, -1) since `record` is always the last entry by this point).
-    const priorRebuttedShouldFixModuleIds = rounds.slice(0, -1).flatMap((prior) =>
-      (prior.responses ?? []).flatMap((response) => {
-        if (response.disposition !== "rebut") return [];
-        const finding = prior.findings[response.finding_index];
-        return finding && finding.severity === "should_fix" && finding.module_id !== null
-          ? [finding.module_id]
-          : [];
-      }),
-    );
-    const gateCFindings = detectGateC({
-      findings: findings.map((finding, index) => ({
-        id: String(index),
-        index,
-        severity: finding.severity,
-        module_id: finding.module_id,
-        finding: finding.finding,
-        recommendation: finding.recommendation,
-      })),
-      dispositions: revision.value.responses.map((response) => ({
-        finding_id: String(response.finding_index),
-        finding_index: response.finding_index,
-        disposition: response.disposition,
-        rationale: response.rationale,
-      })),
-      planBefore: reviewedPlan,
-      planAfter: plan,
+    const gateCFindings = gateCForRound({
+      rounds,
+      record,
+      reviewedPlan,
+      revisedPlan: plan,
       allowUnadjudicatedRebuttals,
-      priorRebuttedShouldFixModuleIds,
       forcedAcceptModuleIds: [...forcedAcceptModuleIds],
     });
     if (gateCFindings.length > 0) {

@@ -4169,6 +4169,7 @@ export const globalRuleSettings = pgTable(
 const conversationPlanningRuns = pgTable("planning_runs", {
   id: text("id").notNull(),
   projectId: text("project_id").notNull(),
+  executionAttempt: integer("execution_attempt").notNull().default(0),
 });
 
 const conversationAttachments = pgTable("attachments", {
@@ -5036,6 +5037,7 @@ export const conversationPlanReviews = pgTable(
     roundExchanges: jsonb("round_exchanges").notNull().default([]),
     chatMessages: jsonb("chat_messages").notNull().default([]),
     markdownArtifacts: jsonb("markdown_artifacts").notNull().default([]),
+    executionCheckpoint: jsonb("execution_checkpoint"),
     revisedPlan: jsonb("revised_plan"),
     revisedPlanContentHash: text("revised_plan_content_hash"),
     revisedPlanVersionId: text("revised_plan_version_id"),

@@ -5,14 +5,23 @@
 // production UPDATE statements (and their DB triggers/CHECK constraints),
 // not a seeded row.
 import { PGlite } from "@electric-sql/pglite";
-import { FakeAdapter, type LlmAdapter, type ProviderName } from "@norns/adapters";
+import {
+  AdapterError,
+  type CompletionRequest,
+  FakeAdapter,
+  type LlmAdapter,
+  type ProviderName,
+  type StructuredResult,
+} from "@norns/adapters";
 import { type V2QcModeT, V2WorkPlanContract, type V2WorkPlanContractT } from "@norns/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { z } from "zod";
 import { ConversationPlanWorkflowService } from "../src/conversations/planWorkflow.js";
 import { PostgresConversationRepository } from "../src/conversations/repository.js";
 import { ConversationService } from "../src/conversations/service.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
+import { runReviewOnlyPlanning } from "../src/planning/reviewOnlySession.js";
 import { PlanningRunWorker } from "../src/planning/runWorker.js";
 
 function plan(objective: string, moduleDescription: string): V2WorkPlanContractT {
@@ -78,6 +87,28 @@ const hollowMustFix = {
   finding: "Clarify the objective.",
   recommendation: "State the objective precisely.",
 };
+
+class BlockingReviewer extends FakeAdapter {
+  private startedResolve!: () => void;
+  readonly started = new Promise<void>((resolve) => {
+    this.startedResolve = resolve;
+  });
+
+  override async completeStructured<T>(
+    request: CompletionRequest,
+    _schema: z.ZodType<T>,
+    _schemaName: string,
+  ): Promise<StructuredResult<T>> {
+    this.startedResolve();
+    return new Promise<StructuredResult<T>>((_resolve, reject) => {
+      request.signal?.addEventListener(
+        "abort",
+        () => reject(new AdapterError("cancelled", "request aborted for graceful drain")),
+        { once: true },
+      );
+    });
+  }
+}
 
 describe.sequential("QC pause and resume (QCP-1B)", () => {
   let pg: PGlite;
@@ -156,6 +187,7 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
         loadReviewOnlySeed: (runId) => workflow.loadReviewOnlySeed(runId),
         markReviewOnlyStarted: (reviewId) => workflow.markReviewOnlyStarted(reviewId),
         recordReviewOnlyProgress: (input) => workflow.recordReviewOnlyProgress(input),
+        recordReviewOnlyCheckpoint: (input) => workflow.recordReviewOnlyCheckpoint(input),
         recordReviewOnlyChatEvent: (input) => workflow.recordReviewOnlyChatEvent(input),
         completeReviewOnly: (input) => workflow.completeReviewOnly(input),
         pauseReviewOnly: (input) => workflow.pauseReviewOnly(input),
@@ -513,5 +545,248 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
     expect(afterRevision.status).toBe("awaiting_human");
     expect(afterRevision.paused_checkpoint).toBe("after_revision");
     expect(afterRevision.dispositions).toHaveLength(1);
+  });
+
+  it("recovers after a durable reviewer checkpoint without repeating the reviewer", async () => {
+    const sent = await sendToQc("restart-review", 1, "automatic");
+    const leaseToken = "dead-review-lease";
+    await pg.query(
+      `UPDATE planning_runs
+          SET status='reviewing', lease_token=$2, leased_until=$3, execution_attempt=1
+        WHERE id=$1`,
+      [sent.planningRunId, leaseToken, new Date(Date.now() + 60_000).toISOString()],
+    );
+    await workflow.markReviewOnlyStarted(sent.reviewId, leaseToken);
+    const seed = await workflow.loadReviewOnlySeed(sent.planningRunId, leaseToken);
+    reviewerV1.enqueue({ findings: [hollowMustFix] });
+
+    await expect(
+      runReviewOnlyPlanning({
+        pm,
+        reviewer: reviewerV1,
+        projectId,
+        initiatedByUserId: owner.id,
+        seedPlan: seed.seedPlan,
+        frozenContext: seed.frozenContext,
+        telemetryGroupId: seed.usageRequestGroupId,
+        maxRounds: 1,
+        qcMode: "automatic",
+        executionAttempt: 1,
+        onCheckpoint: async (checkpoint) => {
+          await workflow.recordReviewOnlyCheckpoint({
+            reviewId: sent.reviewId,
+            planningRunId: sent.planningRunId,
+            checkpoint,
+            leaseToken,
+          });
+          throw new Error("simulated process death after reviewer checkpoint");
+        },
+      }),
+    ).rejects.toThrow("simulated process death");
+
+    const savedCheckpoint = await pg.query<{
+      execution_checkpoint: { usage_events: Array<{ estimated_cost_usd: number }> };
+    }>("SELECT execution_checkpoint FROM conversation_plan_reviews WHERE id=$1", [sent.reviewId]);
+    expect(savedCheckpoint.rows[0]?.execution_checkpoint.usage_events).toHaveLength(1);
+    expect(await worker.reconcileOrphans()).toBe(0);
+    expect((await planningRunRow(sent.planningRunId)).status).toBe("reviewing");
+
+    await pg.query("UPDATE planning_runs SET leased_until=$2 WHERE id=$1", [
+      sent.planningRunId,
+      new Date(Date.now() - 1_000).toISOString(),
+    ]);
+    expect(await worker.reconcileOrphans()).toBe(1);
+    pm.enqueue({
+      responses: [{ finding_index: 0, disposition: "accept", rationale: "Recovered." }],
+      plan: plan(
+        "Objective restart-review",
+        "Deliver the durable workflow with restart recovery clarified.",
+      ),
+    });
+    await worker.runNow(sent.planningRunId);
+
+    expect(reviewerV1.requests).toHaveLength(1);
+    expect(pm.requests).toHaveLength(1);
+    const recovered = await reviewRow(sent.reviewId);
+    expect(recovered.status).toBe("cap_reached");
+    const checkpoint = await pg.query<{ execution_checkpoint: unknown | null }>(
+      "SELECT execution_checkpoint FROM conversation_plan_reviews WHERE id=$1",
+      [sent.reviewId],
+    );
+    expect(checkpoint.rows[0]?.execution_checkpoint).toBeNull();
+    const completedRun = await pg.query<{ total_cost_usd: number }>(
+      "SELECT total_cost_usd::float8 AS total_cost_usd FROM planning_runs WHERE id=$1",
+      [sent.planningRunId],
+    );
+    expect(completedRun.rows[0]?.total_cost_usd).toBeGreaterThan(
+      savedCheckpoint.rows[0]?.execution_checkpoint.usage_events[0]?.estimated_cost_usd ?? 0,
+    );
+  });
+
+  it("recovers after a durable revision checkpoint without repeating the PM", async () => {
+    const sent = await sendToQc("restart-revision", 2, "automatic");
+    const leaseToken = "dead-revision-lease";
+    await pg.query(
+      `UPDATE planning_runs
+          SET status='reviewing', lease_token=$2, leased_until=$3, execution_attempt=1
+        WHERE id=$1`,
+      [sent.planningRunId, leaseToken, new Date(Date.now() + 60_000).toISOString()],
+    );
+    await workflow.markReviewOnlyStarted(sent.reviewId, leaseToken);
+    const seed = await workflow.loadReviewOnlySeed(sent.planningRunId, leaseToken);
+    reviewerV1.enqueue({ findings: [hollowMustFix] });
+    pm.enqueue({
+      responses: [{ finding_index: 0, disposition: "accept", rationale: "Addressed." }],
+      plan: plan(
+        "Objective restart-revision",
+        "Deliver the durable workflow with a persisted revision checkpoint.",
+      ),
+    });
+
+    await expect(
+      runReviewOnlyPlanning({
+        pm,
+        reviewer: reviewerV1,
+        projectId,
+        initiatedByUserId: owner.id,
+        seedPlan: seed.seedPlan,
+        frozenContext: seed.frozenContext,
+        telemetryGroupId: seed.usageRequestGroupId,
+        maxRounds: 2,
+        qcMode: "automatic",
+        executionAttempt: 1,
+        onCheckpoint: async (checkpoint) => {
+          await workflow.recordReviewOnlyCheckpoint({
+            reviewId: sent.reviewId,
+            planningRunId: sent.planningRunId,
+            checkpoint,
+            leaseToken,
+          });
+          if (checkpoint.completed_step === "revision") {
+            throw new Error("simulated process death after revision checkpoint");
+          }
+        },
+      }),
+    ).rejects.toThrow("simulated process death");
+
+    await pg.query("UPDATE planning_runs SET leased_until=$2 WHERE id=$1", [
+      sent.planningRunId,
+      new Date(Date.now() - 1_000).toISOString(),
+    ]);
+    expect(await worker.reconcileOrphans()).toBe(1);
+    reviewerV1.enqueue({ findings: [] });
+    await worker.runNow(sent.planningRunId);
+
+    expect(reviewerV1.requests).toHaveLength(2);
+    expect(pm.requests).toHaveLength(1);
+    expect((await reviewRow(sent.reviewId)).status).toBe("converged");
+  });
+
+  it("deduplicates replayed automatic chat responses and their Markdown artifact", async () => {
+    const sent = await sendToQc("restart-chat", 1, "automatic");
+    const leaseToken = "chat-lease";
+    await pg.query(
+      `UPDATE planning_runs
+          SET status='reviewing', lease_token=$2, leased_until=$3, execution_attempt=1
+        WHERE id=$1`,
+      [sent.planningRunId, leaseToken, new Date(Date.now() + 60_000).toISOString()],
+    );
+    await workflow.markReviewOnlyStarted(sent.reviewId, leaseToken);
+    const input = {
+      reviewId: sent.reviewId,
+      planningRunId: sent.planningRunId,
+      leaseToken,
+      event: {
+        request_id: "restart-chat:review:1:exec:1",
+        channel: "reviewer" as const,
+        round: 1,
+        attempt: 1,
+        speaker: "reviewer" as const,
+        kind: "response" as const,
+        content: '{"findings":[]}',
+        error_code: null,
+        artifact_markdown: "# Reviewer response\n\nNo findings.",
+        artifact_valid: true,
+      },
+    };
+    await workflow.recordReviewOnlyChatEvent(input);
+    await workflow.recordReviewOnlyChatEvent(input);
+
+    const evidence = await pg.query<{
+      chat_messages: unknown[];
+      markdown_artifacts: unknown[];
+    }>("SELECT chat_messages, markdown_artifacts FROM conversation_plan_reviews WHERE id=$1", [
+      sent.reviewId,
+    ]);
+    expect(evidence.rows[0]?.chat_messages).toHaveLength(1);
+    expect(evidence.rows[0]?.markdown_artifacts).toHaveLength(1);
+    const artifacts = await pg.query<{ count: number }>(
+      "SELECT count(*)::int AS count FROM artifacts WHERE project_id=$1 AND kind='qc_review_markdown'",
+      [projectId],
+    );
+    expect(artifacts.rows[0]?.count).toBe(1);
+  });
+
+  it("graceful drain requeues the matching claim and fences its late callbacks", async () => {
+    const sent = await sendToQc("restart-drain", 1, "automatic");
+    const blockingReviewer = new BlockingReviewer("openai", "gpt-5.6-sol");
+    const drainingWorker = new PlanningRunWorker(
+      transactions,
+      (provider: ProviderName): LlmAdapter => (provider === "anthropic" ? pm : blockingReviewer),
+      {
+        resolveModels: async () => {
+          throw new Error("review-only runs use pinned models");
+        },
+        loadReviewOnlySeed: (runId, leaseToken) => workflow.loadReviewOnlySeed(runId, leaseToken),
+        markReviewOnlyStarted: (reviewId, leaseToken) =>
+          workflow.markReviewOnlyStarted(reviewId, leaseToken),
+        recordReviewOnlyCheckpoint: (input) => workflow.recordReviewOnlyCheckpoint(input),
+        recordReviewOnlyProgress: (input) => workflow.recordReviewOnlyProgress(input),
+        recordReviewOnlyChatEvent: (input) => workflow.recordReviewOnlyChatEvent(input),
+        recordReviewOnlyStage: (input) => workflow.recordReviewOnlyStage(input),
+        completeReviewOnly: (input) => workflow.completeReviewOnly(input),
+        pauseReviewOnly: (input) => workflow.pauseReviewOnly(input),
+        failReviewOnly: (runId, error, leaseToken) =>
+          workflow.failReviewOnly(runId, error, leaseToken),
+      },
+    );
+    const execution = drainingWorker.runNow(sent.planningRunId);
+    await blockingReviewer.started;
+    const claimed = await pg.query<{ lease_token: string }>(
+      "SELECT lease_token FROM planning_runs WHERE id=$1",
+      [sent.planningRunId],
+    );
+    const oldLease = claimed.rows[0]?.lease_token;
+    if (!oldLease) throw new Error("review claim did not acquire a lease");
+
+    await drainingWorker.drain();
+    await execution;
+    const run = await planningRunRow(sent.planningRunId);
+    expect(run).toMatchObject({ status: "queued", lease_token: null, leased_until: null });
+    expect((await reviewRow(sent.reviewId)).status).toBe("running");
+
+    await workflow.recordReviewOnlyChatEvent({
+      reviewId: sent.reviewId,
+      planningRunId: sent.planningRunId,
+      leaseToken: oldLease,
+      event: {
+        request_id: "late-old-claim",
+        channel: "reviewer",
+        round: 1,
+        attempt: 1,
+        speaker: "reviewer",
+        kind: "response",
+        content: '{"findings":[]}',
+        error_code: null,
+      },
+    });
+    const evidence = await pg.query<{ chat_messages: Array<{ request_id: string }> }>(
+      "SELECT chat_messages FROM conversation_plan_reviews WHERE id=$1",
+      [sent.reviewId],
+    );
+    expect(evidence.rows[0]?.chat_messages).toHaveLength(1);
+    expect(
+      evidence.rows[0]?.chat_messages.some((message) => message.request_id === "late-old-claim"),
+    ).toBe(false);
   });
 });

@@ -490,6 +490,12 @@ export const PLANNING_LIVE_PROGRESS_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const QC_RESTART_CHECKPOINTS_MIGRATION_NAME = "0076_qc_restart_checkpoints";
+export const QC_RESTART_CHECKPOINTS_MIGRATION_URL = new URL(
+  "../../../drizzle/0076_qc_restart_checkpoints.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -820,6 +826,10 @@ export async function loadQcPausedRoundBoundMigrationSql(): Promise<string> {
 
 export async function loadPlanningLiveProgressMigrationSql(): Promise<string> {
   return readFile(PLANNING_LIVE_PROGRESS_MIGRATION_URL, "utf8");
+}
+
+export async function loadQcRestartCheckpointsMigrationSql(): Promise<string> {
+  return readFile(QC_RESTART_CHECKPOINTS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1293,6 +1303,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: PLANNING_LIVE_PROGRESS_MIGRATION_NAME,
       sql: await loadPlanningLiveProgressMigrationSql(),
+    },
+    {
+      name: QC_RESTART_CHECKPOINTS_MIGRATION_NAME,
+      sql: await loadQcRestartCheckpointsMigrationSql(),
     },
   ];
 }
