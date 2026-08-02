@@ -125,9 +125,10 @@ describe("conversation QC card", () => {
 
     const rendered = render(<ConversationQcCard planVersion={null} review={activeReview} />);
     try {
-      expect(screen.getByText("Round 2 of 3 · Repairing · Attempt 2")).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Round 2 of 3" })).toBeInTheDocument();
+      expect(screen.getByText("anthropic is correcting a response")).toBeInTheDocument();
       expect(screen.getByText("anthropic · claude-opus-4-8")).toBeInTheDocument();
-      expect(screen.getByText("Stage 0:45 · Total 2:00")).toBeInTheDocument();
+      expect(screen.getByText(/Stage 0:45 · Total 2:00/)).toBeInTheDocument();
       expect(screen.getByRole("progressbar", { name: "QC review progress" })).toHaveAttribute(
         "aria-valuetext",
         "Round 2 of 3 · Repairing · Attempt 2 · anthropic · claude-opus-4-8 · Stage 0:45 · Total 2:00",
@@ -136,7 +137,7 @@ describe("conversation QC card", () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1_000);
       });
-      expect(screen.getByText("Stage 0:46 · Total 2:01")).toBeInTheDocument();
+      expect(screen.getByText(/Stage 0:46 · Total 2:01/)).toBeInTheDocument();
     } finally {
       rendered.unmount();
       vi.useRealTimers();
@@ -174,7 +175,8 @@ describe("conversation QC card", () => {
       />,
     );
 
-    expect(screen.getByText("Round 1 of 3 · waiting for the QC reviewer")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Round 1 of 3" })).toBeInTheDocument();
+    expect(screen.getByText("Independent reviewer is checking the plan")).toBeInTheDocument();
   });
 
   it("shows the exact review receipt, findings, recommendations, and PM dispositions", () => {
@@ -310,7 +312,7 @@ describe("conversation QC card", () => {
       screen.getByText("Cancellation attribution was added to the review receipt."),
     ).toBeInTheDocument();
 
-    fireEvent.click(screen.getByText("Review controls"));
+    fireEvent.click(screen.getByText("Run details"));
     fireEvent.click(screen.getByRole("button", { name: "Stop QC" }));
     fireEvent.change(screen.getByLabelText("Why are you stopping QC?"), {
       target: { value: "The plan needs a different architecture." },

@@ -1774,9 +1774,7 @@ describe("conversation workspace", () => {
     );
 
     await userEvent.click(await screen.findByRole("button", { name: "QC" }));
-    expect(
-      await screen.findByRole("heading", { name: "Quality review is in progress" }),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: /^Round 1 of / })).toBeInTheDocument();
     expect(screen.getAllByTestId("conversation-qc-card")).toHaveLength(1);
 
     const historyPanel = screen.getByText("Previous attempts").closest("details");
@@ -2725,7 +2723,7 @@ describe("conversation workspace", () => {
       await Promise.resolve();
     });
     fireEvent.click(screen.getByRole("button", { name: "QC" }));
-    expect(screen.getByText("Round 2 of 3 · waiting to start")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Round 2 of 3" })).toBeInTheDocument();
     expect(detailCalls).toBe(1);
 
     await act(async () => {

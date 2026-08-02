@@ -205,7 +205,7 @@ function qcStatusDescription(review: V2ConversationPlanReviewT): string {
   if (review.status === "queued")
     return "The plan is waiting for the independent reviewer to begin.";
   if (review.status === "running") {
-    return "The reviewer and planning manager are checking the plan. You do not need to do anything right now.";
+    return "No action is needed. QC will pause here only if your decision is required.";
   }
   if (review.status === "awaiting_human") {
     if (review.paused_checkpoint === "after_revision") {
@@ -558,40 +558,39 @@ function QcIssueBrief({
   );
 }
 
-function qcPhaseIndex(review: V2ConversationPlanReviewT): number {
-  if (["converged", "cap_reached", "failed", "cancelled"].includes(review.status)) return 3;
-  if (review.status === "awaiting_human") return 3;
-  const latest = review.round_exchanges.at(-1) ?? null;
-  if (!latest) return 0;
-  if (!latest.pm && latest.reviewer.findings.length > 0) return 1;
-  return 2;
+function qcActiveRound(
+  review: V2ConversationPlanReviewT,
+  progress: ReviewLiveProgress | null,
+): number {
+  const recordedRound = progress?.round;
+  if (recordedRound !== null && recordedRound !== undefined) {
+    return Math.max(1, Math.min(recordedRound, review.max_rounds));
+  }
+  const terminal = ["converged", "cap_reached", "failed", "cancelled"].includes(review.status);
+  const inferred = terminal
+    ? Math.max(1, review.rounds_completed)
+    : Math.max(1, review.rounds_completed + 1);
+  return Math.min(inferred, review.max_rounds);
 }
 
-function QcPhaseTrack({ review }: { review: V2ConversationPlanReviewT }): React.ReactElement {
-  const current = qcPhaseIndex(review);
-  const phases = [
-    ["Independent review", "Reviewer checks the plan"],
-    ["Planning response", "PM accepts or rebuts"],
-    ["Resolution", "Plan and findings converge"],
-    ["Decision", "You approve the outcome"],
-  ] as const;
-  return (
-    <ol className="conversation-qc-phase-track" aria-label="QC phases">
-      {phases.map(([label, detail], index) => (
-        <li
-          key={label}
-          className={index < current ? "is-complete" : index === current ? "is-current" : undefined}
-          aria-current={index === current ? "step" : undefined}
-        >
-          <span>{index < current ? "✓" : index + 1}</span>
-          <div>
-            <strong>{label}</strong>
-            <small>{detail}</small>
-          </div>
-        </li>
-      ))}
-    </ol>
-  );
+function qcRoundStageTitle(
+  review: V2ConversationPlanReviewT,
+  progress: ReviewLiveProgress | null,
+  owner: { value: string; detail: string },
+): string {
+  if (["converged", "cap_reached", "failed", "cancelled"].includes(review.status)) {
+    return qcStatusTitle(review);
+  }
+  if (review.status === "awaiting_human") return "Waiting for your decision";
+  if (review.status === "queued") return "Waiting to start this round";
+  if (!progress) return `${owner.value} is ${owner.detail.toLowerCase()}`;
+  if (progress.stage === "reviewing") return "Independent reviewer is checking the plan";
+  if (progress.stage === "revising") return "Planning manager is revising the plan";
+  if (progress.stage === "repairing") return `${owner.value} is correcting a response`;
+  if (progress.stage === "validating") return "QC is validating this round";
+  if (progress.stage === "saving") return "QC is saving this round";
+  if (progress.stage === "generating") return `${owner.value} is preparing a response`;
+  return "QC is preparing this round";
 }
 
 function QcConversationLog({
@@ -1617,6 +1616,23 @@ export function ConversationQcCard({
   const activeFindings = visibleFindings.filter(
     (finding) => finding.severity !== "suggestion",
   ).length;
+  const activeRound = qcActiveRound(review, liveProgress);
+  const roundStageTitle = qcRoundStageTitle(review, liveProgress, owner);
+  const roundHeading = terminal
+    ? `${review.rounds_completed} of ${review.max_rounds} rounds used`
+    : `Round ${activeRound} of ${review.max_rounds}`;
+  const roundEyebrow = terminal
+    ? "Review summary"
+    : review.status === "awaiting_human"
+      ? "Paused in"
+      : "Current round";
+  const statusLabel = terminal
+    ? review.status.replaceAll("_", " ")
+    : review.status === "awaiting_human"
+      ? "Decision needed"
+      : liveProgress
+        ? LIVE_STAGE_LABELS[liveProgress.stage]
+        : review.status;
   const primaryDecision =
     actions.approve && ["converged", "cap_reached"].includes(review.status)
       ? actions.approve
@@ -1630,96 +1646,136 @@ export function ConversationQcCard({
     >
       <div className="conversation-qc-pinned">
         <header className="conversation-qc-identity">
-          <div>
-            <span className="eyebrow">Quality control</span>
-            <span>
-              Plan {planVersion ? `version ${planVersion.version}` : review.plan_version_id} ·
-              Attempt {review.attempt_number}
-            </span>
-          </div>
-          <Badge tone={statusTone(review.status)}>{review.status.replaceAll("_", " ")}</Badge>
+          <span>
+            Plan {planVersion ? `version ${planVersion.version}` : review.plan_version_id} · QC
+            attempt {review.attempt_number}
+          </span>
         </header>
 
-        <QcPhaseTrack review={review} />
-
-        <div className="conversation-qc-command-grid">
-          <section className="conversation-qc-truth" aria-labelledby={titleId}>
+        <section className="conversation-qc-round-focus" aria-labelledby={titleId}>
+          <header>
+            <div>
+              <span className="eyebrow">{roundEyebrow}</span>
+              <h3 id={titleId}>{roundHeading}</h3>
+            </div>
+            <Badge tone={statusTone(review.status)}>{statusLabel}</Badge>
+          </header>
+          <div className="conversation-qc-round-stage">
             <span
               className={`conversation-qc-truth-marker is-${review.status}`}
               aria-hidden="true"
             />
             <div>
-              <span className="eyebrow">Current status</span>
-              <h3 id={titleId}>{qcStatusTitle(review)}</h3>
+              <strong>{roundStageTitle}</strong>
               <p>{qcStatusDescription(review)}</p>
-              <div className="conversation-qc-current-work" aria-live="polite">
-                <span>
-                  <small>Happening now</small>
-                  <strong>{terminal ? review.status.replaceAll("_", " ") : progressLabel}</strong>
-                  {!terminal && liveProgress?.provider && liveProgress.model ? (
-                    <small>
-                      {liveProgress.provider} · {liveProgress.model}
-                    </small>
-                  ) : null}
-                </span>
-                <span>
-                  <small>What happens next</small>
-                  <strong>{nextStep.value}</strong>
-                </span>
-              </div>
             </div>
-          </section>
+          </div>
+          <footer className="conversation-qc-round-summary" aria-live="polite">
+            <span>
+              <small>
+                {terminal || review.status === "awaiting_human" ? "Decision owner" : "Working now"}
+              </small>
+              <strong>{owner.value}</strong>
+              <small>
+                {!terminal && liveProgress?.provider && liveProgress.model
+                  ? `${liveProgress.provider} · ${liveProgress.model}`
+                  : owner.detail}
+              </small>
+            </span>
+            <span>
+              <small>
+                {terminal
+                  ? "Run duration"
+                  : review.status === "awaiting_human"
+                    ? "Time status"
+                    : "Estimated remaining"}
+              </small>
+              <strong>{remaining.value}</strong>
+              <small>{remaining.detail}</small>
+            </span>
+          </footer>
+        </section>
 
-          <aside className="conversation-qc-run-facts" aria-label="Run at a glance">
-            <span className="eyebrow">Run at a glance</span>
-            <dl>
-              <div>
-                <dt>Current owner</dt>
-                <dd>{owner.value}</dd>
-                <small>{owner.detail}</small>
-              </div>
-              <div>
-                <dt>Time remaining</dt>
-                <dd>{remaining.value}</dd>
-                <small>{remaining.detail}</small>
-              </div>
-              <div>
-                <dt>Review rounds</dt>
-                <dd>
-                  {review.rounds_completed} of {review.max_rounds}
-                </dd>
-                <small>{timingLabel || "No timing recorded yet"}</small>
-              </div>
-              <div>
-                <dt>Findings</dt>
-                <dd>{visibleFindings.length}</dd>
-                <small>{activeFindings} substantive</small>
-              </div>
-            </dl>
-          </aside>
-        </div>
+        <details className="conversation-qc-run-details">
+          <summary>
+            <span>Run details</span>
+            <small>
+              {timingLabel || "Timing not recorded"} · {visibleFindings.length} finding
+              {visibleFindings.length === 1 ? "" : "s"}
+            </small>
+          </summary>
+          <dl>
+            <div>
+              <dt>Status</dt>
+              <dd>{qcStatusTitle(review)}</dd>
+            </div>
+            <div>
+              <dt>Next</dt>
+              <dd>{nextStep.value}</dd>
+              <small>{nextStep.detail}</small>
+            </div>
+            <div>
+              <dt>Round activity</dt>
+              <dd>{terminal ? review.status.replaceAll("_", " ") : progressLabel}</dd>
+            </div>
+            <div>
+              <dt>Findings</dt>
+              <dd>
+                {visibleFindings.length} total · {activeFindings} substantive
+              </dd>
+            </div>
+          </dl>
+          {!terminal && !waived && review.status !== "awaiting_human" ? (
+            <div className="conversation-qc-run-controls">
+              <QcCadenceControl review={review} busy={busy} onPatch={onPatch} />
+              {onCancel ? (
+                <section className="conversation-qc-controls">
+                  {stopping ? (
+                    <>
+                      <label htmlFor={`${titleId}-stop-reason`}>Why are you stopping QC?</label>
+                      <TextArea
+                        id={`${titleId}-stop-reason`}
+                        value={reason}
+                        maxLength={500}
+                        disabled={busy}
+                        onChange={(event) => setReason(event.target.value)}
+                      />
+                      <div>
+                        <Button disabled={busy} onClick={() => setStopping(false)}>
+                          Keep QC running
+                        </Button>
+                        <Button
+                          variant="danger"
+                          disabled={busy || !reason.trim()}
+                          onClick={() => void onCancel(review, reason.trim())}
+                        >
+                          {busy ? "Stopping…" : "Confirm stop QC"}
+                        </Button>
+                      </div>
+                    </>
+                  ) : (
+                    <Button variant="danger" disabled={busy} onClick={() => setStopping(true)}>
+                      Stop QC
+                    </Button>
+                  )}
+                </section>
+              ) : null}
+            </div>
+          ) : null}
+        </details>
 
         {!terminal ? (
-          <>
-            <progress
-              className="sr-only"
-              aria-label="QC review progress"
-              max={100}
-              value={review.rounds_completed > 0 ? percent : undefined}
-              aria-valuetext={`${progressLabel}${
-                liveProgress?.provider && liveProgress.model
-                  ? ` · ${liveProgress.provider} · ${liveProgress.model}`
-                  : ""
-              }${timingLabel ? ` · ${timingLabel}` : ""}`}
-            />
-            <div
-              className="conversation-qc-progress-track"
-              aria-hidden="true"
-              data-indeterminate={review.rounds_completed === 0}
-            >
-              <span style={{ width: `${percent}%` }} />
-            </div>
-          </>
+          <progress
+            className="sr-only"
+            aria-label="QC review progress"
+            max={100}
+            value={review.rounds_completed > 0 ? percent : undefined}
+            aria-valuetext={`${progressLabel}${
+              liveProgress?.provider && liveProgress.model
+                ? ` · ${liveProgress.provider} · ${liveProgress.model}`
+                : ""
+            }${timingLabel ? ` · ${timingLabel}` : ""}`}
+          />
         ) : null}
         {review.status === "failed" ? (
           <output className="conversation-qc-failure" role="alert">
@@ -1755,47 +1811,6 @@ export function ConversationQcCard({
             onCancel={onCancel}
             onAdjudicate={onAdjudicate}
           />
-        ) : null}
-
-        {!terminal && !waived && review.status !== "awaiting_human" ? (
-          <details className="conversation-qc-running-tools">
-            <summary>Review controls</summary>
-            <div>
-              <QcCadenceControl review={review} busy={busy} onPatch={onPatch} />
-              {onCancel ? (
-                <section className="conversation-qc-controls">
-                  {stopping ? (
-                    <>
-                      <label htmlFor={`${titleId}-stop-reason`}>Why are you stopping QC?</label>
-                      <TextArea
-                        id={`${titleId}-stop-reason`}
-                        value={reason}
-                        maxLength={500}
-                        disabled={busy}
-                        onChange={(event) => setReason(event.target.value)}
-                      />
-                      <div>
-                        <Button disabled={busy} onClick={() => setStopping(false)}>
-                          Keep QC running
-                        </Button>
-                        <Button
-                          variant="danger"
-                          disabled={busy || !reason.trim()}
-                          onClick={() => void onCancel(review, reason.trim())}
-                        >
-                          {busy ? "Stopping…" : "Confirm stop QC"}
-                        </Button>
-                      </div>
-                    </>
-                  ) : (
-                    <Button variant="danger" disabled={busy} onClick={() => setStopping(true)}>
-                      Stop QC
-                    </Button>
-                  )}
-                </section>
-              ) : null}
-            </div>
-          </details>
         ) : null}
 
         {terminal && onConfirmAction ? (
@@ -1897,11 +1912,9 @@ export function ConversationQcCard({
       </div>
 
       <section className="conversation-qc-audit-launch">
-        <span>
-          <strong>Need to inspect the back-and-forth?</strong>
-          <small>Open the audit trail without losing the current status or decision.</small>
-        </span>
-        <Button onClick={() => setAuditOpen(true)}>Open audit trail · {evidenceCount}</Button>
+        <Button className="btn-small" onClick={() => setAuditOpen(true)}>
+          Open audit trail · {evidenceCount}
+        </Button>
       </section>
 
       {auditOpen ? (

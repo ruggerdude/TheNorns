@@ -1968,14 +1968,7 @@ function ConversationQcActivity({
   return (
     <section className="conversation-qc-activity" aria-label="QC activity">
       <header className="conversation-qc-room-header">
-        <div>
-          <span className="eyebrow">Quality control</span>
-          <h2>QC control room</h2>
-          <p>One live source of truth for this plan review.</p>
-        </div>
-        <span>
-          Live attempt {latest.attempt_number} of {ordered.length}
-        </span>
+        <h2>QC control room</h2>
       </header>
       <div className="conversation-qc-live-run">
         <ConversationQcCard
