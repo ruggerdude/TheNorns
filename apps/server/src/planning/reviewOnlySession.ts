@@ -67,6 +67,10 @@ export interface ReviewOnlyResumeState {
   // yet — wiring it to the right channel/round needs the steering machinery
   // this phase intentionally does not build.
   note?: { channel: "reviewer" | "pm"; message: string };
+  /** Local finding indices accepted by the human at the after-review triage
+   * gate. Rejected findings remain in the durable round evidence but are not
+   * sent to the planning manager as revision instructions. */
+  acceptedFindingIndices?: number[];
   // QCP-3A: module_ids a human has ruled "for the reviewer" on at Gate C
   // adjudication. The finding stands and cannot be rebutted again — enforced
   // below by excluding these modules from Gate C entirely (detectGateC), not
@@ -997,7 +1001,7 @@ export async function runReviewOnlyPlanning(
       reviewedPlan = record.reviewed_plan;
       findings = record.findings;
       if (operationalResume) {
-        if (mustFixCount(findings) === 0) {
+        if (findings.length === 0) {
           return {
             status: "converged",
             rounds: round,
@@ -1073,7 +1077,7 @@ export async function runReviewOnlyPlanning(
         model: options.reviewer.model,
       });
       await options.onProgress?.(rounds);
-      if (mustFixCount(findings) === 0) {
+      if (findings.length === 0) {
         return {
           status: "converged",
           rounds: round,
@@ -1097,6 +1101,21 @@ export async function runReviewOnlyPlanning(
       }
     }
 
+    const acceptedFindingIndices =
+      round === startRound && skipReviewerAtStart && resume?.acceptedFindingIndices
+        ? [...resume.acceptedFindingIndices]
+        : findings.map((_, index) => index);
+    const revisionFindings = acceptedFindingIndices.map((index) => {
+      const finding = findings[index];
+      if (!finding) {
+        throw new PlanningError(
+          "plan_invalid",
+          `human triage referenced unknown finding index ${index}`,
+        );
+      }
+      return finding;
+    });
+
     const revisionRequestId = `${options.telemetryGroupId}:revision:${round}${
       options.executionAttempt === undefined ? "" : `:exec:${options.executionAttempt}`
     }`;
@@ -1106,11 +1125,11 @@ export async function runReviewOnlyPlanning(
         options.pm,
         {
           system: revisionSystem,
-          prompt: revisionPrompt(reviewedPlan, findings),
+          prompt: revisionPrompt(reviewedPlan, revisionFindings),
           ...meter,
           ...(options.signal ? { signal: options.signal } : {}),
         },
-        legacyRevisionSchemaFor(reviewedPlan, findings),
+        legacyRevisionSchemaFor(reviewedPlan, revisionFindings),
         "plan_revision",
         requestId,
         (failedUsage) => usage.push(failedUsage),
@@ -1145,12 +1164,12 @@ export async function runReviewOnlyPlanning(
           options.pm,
           {
             system: revisionSystem,
-            prompt: targetedRevisionPrompt(reviewedPlan, findings),
+            prompt: targetedRevisionPrompt(reviewedPlan, revisionFindings),
             maxTokens: TARGETED_REVISION_MAX_OUTPUT_TOKENS,
             ...meter,
             ...(options.signal ? { signal: options.signal } : {}),
           },
-          targetedRevisionSchemaFor(reviewedPlan, findings),
+          targetedRevisionSchemaFor(reviewedPlan, revisionFindings),
           "targeted_plan_revision",
           revisionRequestId,
           (failedUsage) => usage.push(failedUsage),
@@ -1160,7 +1179,7 @@ export async function runReviewOnlyPlanning(
             ...(options.onChatEvent ? { onEvent: options.onChatEvent } : {}),
             ...(options.onStage ? { onStage: options.onStage } : {}),
             markdown: (value) => {
-              const materialized = applyTargetedQcRevision(reviewedPlan, value, findings);
+              const materialized = applyTargetedQcRevision(reviewedPlan, value, revisionFindings);
               return targetedRevisionMarkdown(round, value, materialized);
             },
             repairInstruction:
@@ -1171,7 +1190,7 @@ export async function runReviewOnlyPlanning(
         );
         usage.push(targeted.usage);
         revisionResponses = [...targeted.value.responses];
-        revisedPlan = applyTargetedQcRevision(reviewedPlan, targeted.value, findings);
+        revisedPlan = applyTargetedQcRevision(reviewedPlan, targeted.value, revisionFindings);
         revisionProgressAttempt = targeted.progress_attempt;
         revisionProgressRequestId = targeted.progress_request_id;
       } catch (error) {
@@ -1212,9 +1231,13 @@ export async function runReviewOnlyPlanning(
     // reverse. The honest record — verbatim PM response plus the standing
     // ruling attached by module_id — is assembled downstream in
     // planWorkflow.ts's flattenReviewEvidence.
+    const remappedResponses = revisionResponses.map((response) => ({
+      ...response,
+      finding_index: acceptedFindingIndices[response.finding_index] ?? -1,
+    }));
     const answered = new Set<number>();
-    for (const response of revisionResponses) {
-      if (response.finding_index >= findings.length) {
+    for (const response of remappedResponses) {
+      if (response.finding_index < 0 || response.finding_index >= findings.length) {
         throw new PlanningError(
           "missing_dispositions",
           `PM disposition references unknown finding index ${response.finding_index}`,
@@ -1228,8 +1251,11 @@ export async function runReviewOnlyPlanning(
       }
       answered.add(response.finding_index);
     }
-    const missing = findings
-      .map((finding, index) => ({ finding, index }))
+    const missing = revisionFindings
+      .map((finding, localIndex) => ({
+        finding,
+        index: acceptedFindingIndices[localIndex] as number,
+      }))
       .filter(({ finding, index }) => finding.severity === "must_fix" && !answered.has(index));
     if (missing.length > 0) {
       throw new PlanningError(
@@ -1237,7 +1263,7 @@ export async function runReviewOnlyPlanning(
         `PM left must-fix findings without a disposition: ${missing.map(({ index }) => index).join(", ")}`,
       );
     }
-    record.responses = [...revisionResponses];
+    record.responses = remappedResponses;
     plan = revisedPlan;
     record.revised_plan_content_hash = canonicalSha256(plan);
     await options.onCheckpoint?.({

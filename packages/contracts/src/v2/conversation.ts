@@ -2220,6 +2220,19 @@ export const V2ConversationPlanReviewFinding = z
   .strict();
 export type V2ConversationPlanReviewFindingT = z.infer<typeof V2ConversationPlanReviewFinding>;
 
+export const V2ConversationPlanReviewFindingDecision = z
+  .object({
+    finding_id: V2EntityId,
+    finding_index: nonNegativeInteger,
+    decision: z.enum(["accept", "reject"]),
+    decided_by_user_id: V2EntityId,
+    decided_at: V2IsoDateTime,
+  })
+  .strict();
+export type V2ConversationPlanReviewFindingDecisionT = z.infer<
+  typeof V2ConversationPlanReviewFindingDecision
+>;
+
 export const V2ConversationPlanReviewDispositionAdjudication = z
   .object({
     decided_by_user_id: z.string().min(1),
@@ -2379,6 +2392,7 @@ export const V2ConversationPlanReview = z
     result_plan_content_hash: V2Sha256Hex,
     context_manifest: V2ConversationPlanReviewContextManifest,
     findings: z.array(V2ConversationPlanReviewFinding),
+    finding_decisions: z.array(V2ConversationPlanReviewFindingDecision).optional(),
     dispositions: z.array(V2ConversationPlanReviewDisposition),
     revised_plan_version_id: V2EntityId.nullable(),
     // Set only while status === "awaiting_human"; identifies which gate parked
@@ -2551,6 +2565,25 @@ export const V2ConversationPlanReview = z
       findingIndices.add(finding.index);
       findingById.set(finding.id, finding);
     }
+    const decidedFindingIds = new Set<string>();
+    for (const decision of review.finding_decisions ?? []) {
+      if (decidedFindingIds.has(decision.finding_id)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["finding_decisions"],
+          message: "each finding can have only one human decision",
+        });
+      }
+      decidedFindingIds.add(decision.finding_id);
+      const finding = findingById.get(decision.finding_id);
+      if (finding && finding.index !== decision.finding_index) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["finding_decisions"],
+          message: "finding decisions must reference the exact finding id and index",
+        });
+      }
+    }
     const dispositionIds = new Set<string>();
     const dispositionIndices = new Set<number>();
     for (const disposition of review.dispositions) {
@@ -2582,7 +2615,12 @@ export const V2ConversationPlanReview = z
     // rule, since it only checks that a disposition is attached.
     if (["converged", "cap_reached"].includes(review.status)) {
       const undisposedMustFix = review.findings.filter(
-        (finding) => finding.severity === "must_fix" && !dispositionIds.has(finding.id),
+        (finding) =>
+          finding.severity === "must_fix" &&
+          !dispositionIds.has(finding.id) &&
+          !(review.finding_decisions ?? []).some(
+            (decision) => decision.finding_id === finding.id && decision.decision === "reject",
+          ),
       );
       if (undisposedMustFix.length > 0) {
         ctx.addIssue({

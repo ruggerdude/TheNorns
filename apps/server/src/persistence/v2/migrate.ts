@@ -502,6 +502,12 @@ export const QC_TARGETED_REVISIONS_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const QC_FINDING_TRIAGE_MIGRATION_NAME = "0078_qc_finding_triage";
+export const QC_FINDING_TRIAGE_MIGRATION_URL = new URL(
+  "../../../drizzle/0078_qc_finding_triage.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -840,6 +846,10 @@ export async function loadQcRestartCheckpointsMigrationSql(): Promise<string> {
 
 export async function loadQcTargetedRevisionsMigrationSql(): Promise<string> {
   return readFile(QC_TARGETED_REVISIONS_MIGRATION_URL, "utf8");
+}
+
+export async function loadQcFindingTriageMigrationSql(): Promise<string> {
+  return readFile(QC_FINDING_TRIAGE_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1321,6 +1331,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: QC_TARGETED_REVISIONS_MIGRATION_NAME,
       sql: await loadQcTargetedRevisionsMigrationSql(),
+    },
+    {
+      name: QC_FINDING_TRIAGE_MIGRATION_NAME,
+      sql: await loadQcFindingTriageMigrationSql(),
     },
   ];
 }

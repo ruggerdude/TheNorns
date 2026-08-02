@@ -850,6 +850,69 @@ describe("review-only conversational planning", () => {
     ]);
   });
 
+  it("sends only human-accepted findings to the PM and preserves their original indices", async () => {
+    const seed = envelope();
+    const revised = envelope(
+      "Ship the planning conversation",
+      "Deliver the strict workflow with a measurable verification tolerance.",
+    );
+    const pm = new FakeAdapter("anthropic");
+    const reviewer = new FakeAdapter("openai");
+    pm.enqueue({
+      responses: [
+        { finding_index: 0, disposition: "accept", rationale: "Added the accepted tolerance." },
+      ],
+      plan: revised,
+    });
+    const findings = [
+      {
+        severity: "must_fix" as const,
+        module_id: null,
+        finding: "Add a deployment target.",
+        recommendation: "Choose a public host.",
+      },
+      {
+        severity: "must_fix" as const,
+        module_id: "contracts",
+        finding: "Define a verification tolerance.",
+        recommendation: "Add a measurable threshold.",
+      },
+    ];
+
+    const result = await runReviewOnlyPlanning({
+      pm,
+      reviewer,
+      projectId: "project-review-only",
+      initiatedByUserId: "user-review-only",
+      seedPlan: seed,
+      frozenContext: {},
+      telemetryGroupId: "review-only-selected-findings",
+      maxRounds: 1,
+      resume: {
+        fromRound: 1,
+        checkpoint: "after_review",
+        plan: seed,
+        rounds: [
+          {
+            round: 1,
+            reviewed_plan: seed,
+            findings,
+            responses: null,
+            revised_plan_content_hash: null,
+          },
+        ],
+        acceptedFindingIndices: [1],
+      },
+    });
+
+    expect(pm.requests[0]?.prompt).not.toContain("Add a deployment target");
+    expect(pm.requests[0]?.prompt).toContain("Define a verification tolerance");
+    assertTerminal(result);
+    expect(result.review_rounds[0]?.responses).toEqual([
+      { finding_index: 1, disposition: "accept", rationale: "Added the accepted tolerance." },
+    ]);
+  });
+
   it("materializes a base-hash-pinned targeted revision without mutating its input", () => {
     const seed = envelope();
     const before = structuredClone(seed);

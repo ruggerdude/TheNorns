@@ -226,6 +226,7 @@ interface ReviewRow {
   context_manifest: unknown;
   context_hash: string;
   findings: unknown;
+  finding_decisions: unknown;
   dispositions: unknown;
   revised_plan: unknown | null;
   revised_plan_content_hash: string | null;
@@ -264,6 +265,14 @@ interface AdjudicationRecord {
   module_id: string | null;
   ruling: "reviewer" | "pm" | "supplied_fact";
   rationale: string;
+  decided_by_user_id: string;
+  decided_at: string;
+}
+
+interface FindingDecisionRecord {
+  finding_id: string;
+  finding_index: number;
+  decision: "accept" | "reject";
   decided_by_user_id: string;
   decided_at: string;
 }
@@ -313,7 +322,7 @@ const reviewColumns = `schema_version, id, project_id, work_item_id, conversatio
   pm_provider, pm_model, reviewer_provider, reviewer_model, review_mode, revision_format, status, seed_plan,
   usage_request_group_id,
   plan_content_hash, result_plan_content_hash, context_receipt, context_manifest,
-  context_hash, findings, dispositions, revised_plan, revised_plan_content_hash,
+  context_hash, findings, finding_decisions, dispositions, revised_plan, revised_plan_content_hash,
   revised_plan_version_id, paused_checkpoint, paused_at_round, resume_idempotency_key,
   qc_mode, qc_mode_source, qc_mode_changed_at_round, qc_mode_changed_by_user_id,
   allow_unadjudicated_rebuttals, human_steered_rounds,
@@ -436,6 +445,7 @@ function toReview(row: ReviewRow): V2ConversationPlanReviewT {
     result_plan_content_hash: row.result_plan_content_hash,
     context_manifest: { entries: manifest.entries, context_hash: row.context_hash },
     findings: json(row.findings),
+    finding_decisions: json(row.finding_decisions),
     dispositions: json(row.dispositions),
     revised_plan_version_id: row.revised_plan_version_id,
     paused_checkpoint: row.paused_checkpoint,
@@ -714,6 +724,15 @@ export class ConversationPlanWorkflowService {
           ? (await this.planById(tx, row.revised_plan_version_id, false)).plan
           : seedPlan;
         const exchanges = json<V2ConversationPlanReviewT["round_exchanges"]>(row.round_exchanges);
+        const priorFindingCount = exchanges
+          .filter((exchange) => exchange.round < Number(row.paused_at_round))
+          .reduce((total, exchange) => total + exchange.reviewer.findings.length, 0);
+        const acceptedFindingIndices = json<FindingDecisionRecord[]>(row.finding_decisions)
+          .filter(
+            (decision) =>
+              decision.decision === "accept" && decision.finding_index >= priorFindingCount,
+          )
+          .map((decision) => decision.finding_index - priorFindingCount);
         resume = {
           kind: "human",
           fromRound: Number(row.paused_at_round),
@@ -734,6 +753,7 @@ export class ConversationPlanWorkflowService {
           // it, since a later Gate B/C pause must still enforce an earlier
           // "rule for reviewer" ruling.
           forcedAcceptModuleIds: json<string[]>(row.forced_accept_module_ids),
+          ...(row.paused_checkpoint === "after_review" ? { acceptedFindingIndices } : {}),
         };
       } else if (row.status === "running" && row.execution_checkpoint !== null) {
         const checkpoint = V2ReviewExecutionCheckpoint.parse(json(row.execution_checkpoint));
@@ -1080,7 +1100,7 @@ export class ConversationPlanWorkflowService {
       );
       await tx.query(
         `UPDATE work_items
-            SET status='planning', aggregate_version=aggregate_version+1, updated_at=$3
+            SET aggregate_version=aggregate_version+1, updated_at=$3
           WHERE project_id=$1 AND id=$2 AND status='in_qc'`,
         [review.project_id, review.work_item_id, now],
       );
@@ -1115,6 +1135,7 @@ export class ConversationPlanWorkflowService {
     input: {
       exit: "continue" | "note";
       note?: { channel: "reviewer" | "pm"; message: string };
+      findingDecisions?: Record<string, "accept" | "reject">;
       idempotencyKey?: string;
       /** Compound exit "Continue, and stop asking" (QC-PAUSE-POINTS.md "Gate
        * exits"): sets qc_mode to automatic for the rest of this run, then
@@ -1145,6 +1166,63 @@ export class ConversationPlanWorkflowService {
         );
       }
       const now = this.now().toISOString();
+      if (review.paused_checkpoint === "after_review") {
+        const supplied = input.findingDecisions ?? {};
+        const exchanges = json<V2ConversationPlanReviewT["round_exchanges"]>(
+          review.round_exchanges,
+        );
+        const pausedRound = Number(review.paused_at_round);
+        const currentExchange = exchanges.find((exchange) => exchange.round === pausedRound);
+        if (!currentExchange) {
+          throw new ConversationPlanWorkflowError(
+            "invalid_plan_state",
+            `review "${reviewId}" has no findings for paused round ${pausedRound}`,
+          );
+        }
+        const priorFindingCount = exchanges
+          .filter((exchange) => exchange.round < pausedRound)
+          .reduce((total, exchange) => total + exchange.reviewer.findings.length, 0);
+        const findings = json<V2ConversationPlanReviewFindingT[]>(review.findings).slice(
+          priorFindingCount,
+          priorFindingCount + currentExchange.reviewer.findings.length,
+        );
+        const eligibleIds = new Set(findings.map((finding) => finding.id));
+        if (
+          findings.length === 0 ||
+          Object.keys(supplied).length !== findings.length ||
+          Object.keys(supplied).some((findingId) => !eligibleIds.has(findingId)) ||
+          findings.some((finding) => supplied[finding.id] === undefined)
+        ) {
+          throw new ConversationPlanWorkflowError(
+            "invalid_plan_state",
+            "every finding in the paused reviewer pass requires an accept or reject decision",
+          );
+        }
+        const records: FindingDecisionRecord[] = findings.map((finding) => ({
+          finding_id: finding.id,
+          finding_index: finding.index,
+          decision: supplied[finding.id] as "accept" | "reject",
+          decided_by_user_id: userId,
+          decided_at: now,
+        }));
+        const steeredRounds = [
+          ...new Set([...json<number[]>(review.human_steered_rounds), pausedRound]),
+        ].sort((left, right) => left - right);
+        await tx.query(
+          `UPDATE conversation_plan_reviews
+              SET finding_decisions=finding_decisions || $2::jsonb,
+                  human_steered_rounds=$3::jsonb,
+                  last_human_message_at=$4,
+                  updated_at=$4
+            WHERE id=$1`,
+          [review.id, JSON.stringify(records), JSON.stringify(steeredRounds), now],
+        );
+      } else if (input.findingDecisions !== undefined) {
+        throw new ConversationPlanWorkflowError(
+          "invalid_plan_state",
+          "finding decisions are accepted only immediately after a reviewer pass",
+        );
+      }
       if (input.exit === "note" && input.note) {
         // Recorded as a chat message while the review stays awaiting_human
         // (always allowed — see the DB guard's 'failed' recovery-chat
@@ -2039,7 +2117,7 @@ export class ConversationPlanWorkflowService {
       );
       await tx.query(
         `UPDATE work_items
-            SET status='planning', aggregate_version=aggregate_version+1, updated_at=$3
+            SET aggregate_version=aggregate_version+1, updated_at=$3
           WHERE project_id=$1 AND id=$2 AND status='in_qc'`,
         [review.project_id, review.work_item_id, now],
       );
@@ -2047,7 +2125,7 @@ export class ConversationPlanWorkflowService {
         tx,
         review,
         review.initiated_by_user_id,
-        "QC stopped after its retry could not produce an applicable result. Every response and Markdown artifact produced so far remains available. You can inspect or take over either QC chat, retry with that guidance, explicitly continue without QC, or return to planning.",
+        "QC stopped after its retry could not produce an applicable result. Every response and Markdown artifact produced so far remains available in the review record. Choose whether to retry QC, continue without QC, or reject the plan.",
         review.plan_version_id,
         review.action_id,
         [

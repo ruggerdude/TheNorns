@@ -392,13 +392,14 @@ export function resumeConversationPlanReview(
   input: {
     exit: "continue" | "note";
     note?: { channel: "reviewer" | "pm"; message: string };
+    findingDecisions?: Record<string, "accept" | "reject">;
     idempotency_key?: string;
     /** Compound exit "Continue, and stop asking" — sets qc_mode=automatic
      *  for the rest of this run and continues. */
     stopAsking?: boolean;
   },
 ): Promise<{ review: V2ConversationPlanReviewT }> {
-  const { stopAsking, ...rest } = input;
+  const { stopAsking, findingDecisions, ...rest } = input;
   return requestJson(
     `${messageEndpoint(projectId, workItemId, conversationId)}/plan-reviews/${encodeURIComponent(
       reviewId,
@@ -407,6 +408,7 @@ export function resumeConversationPlanReview(
       method: "POST",
       body: JSON.stringify({
         ...rest,
+        ...(findingDecisions ? { finding_decisions: findingDecisions } : {}),
         ...(stopAsking !== undefined ? { stop_asking: stopAsking } : {}),
       }),
     },

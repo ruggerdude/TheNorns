@@ -493,7 +493,7 @@ describe.sequential("conversation plan workflow", () => {
       review_status: "failed",
       action_status: "failed",
       plan_status: "candidate",
-      work_status: "planning",
+      work_status: "in_qc",
     });
   });
 });

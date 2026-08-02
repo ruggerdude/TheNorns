@@ -2532,7 +2532,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       [scope.workItemId, qc.effect.planning_run_id],
     );
     expect(settled.rows[0]).toEqual({
-      work_status: "planning",
+      work_status: "in_qc",
       run_status: "failed",
       review_status: "failed",
       action_status: "failed",
@@ -2874,7 +2874,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       [scope.workItemId, seed.reviewId],
     );
     expect(lifecycle.rows[0]).toEqual({
-      work_status: "planning",
+      work_status: "in_qc",
       run_status: "cancelled",
       review_status: "cancelled",
       cancelled_by_user_id: owner.id,

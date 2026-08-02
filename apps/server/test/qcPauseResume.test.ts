@@ -13,7 +13,12 @@ import {
   type ProviderName,
   type StructuredResult,
 } from "@norns/adapters";
-import { type V2QcModeT, V2WorkPlanContract, type V2WorkPlanContractT } from "@norns/contracts";
+import {
+  type V2ConversationPlanReviewFindingT,
+  type V2QcModeT,
+  V2WorkPlanContract,
+  type V2WorkPlanContractT,
+} from "@norns/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { z } from "zod";
 import { ConversationPlanWorkflowService } from "../src/conversations/planWorkflow.js";
@@ -294,7 +299,7 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
       plan_content_hash: string;
       reviewer_provider: string;
       reviewer_model: string;
-      findings: unknown;
+      findings: V2ConversationPlanReviewFindingT[];
       dispositions: unknown;
     }>(
       `SELECT review.status, review.paused_checkpoint, review.paused_at_round,
@@ -535,7 +540,12 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
         "Deliver the durable workflow, now with the objective clarified.",
       ),
     });
-    await workflow.resumeReview(owner.id, sent.scope, sent.reviewId, { exit: "continue" });
+    await workflow.resumeReview(owner.id, sent.scope, sent.reviewId, {
+      exit: "continue",
+      findingDecisions: Object.fromEntries(
+        parked.findings.map((finding) => [finding.id, "accept" as const]),
+      ),
+    });
     await worker.runNow(sent.planningRunId);
 
     expect(pm.requests).toHaveLength(1);

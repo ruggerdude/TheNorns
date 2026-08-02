@@ -67,6 +67,7 @@ const ResumeReviewBody = z
       })
       .strict()
       .optional(),
+    finding_decisions: z.record(z.string().min(1), z.enum(["accept", "reject"])).optional(),
     idempotency_key: z.string().min(1).optional(),
     // Compound exit "Continue, and stop asking" (QC-PAUSE-POINTS.md "Gate
     // exits"): sets qc_mode to automatic for the rest of this run.
@@ -412,6 +413,7 @@ export function registerConversationPlanRoutes(
         {
           exit: body.exit,
           ...(body.note ? { note: body.note } : {}),
+          ...(body.finding_decisions ? { findingDecisions: body.finding_decisions } : {}),
           ...(body.idempotency_key ? { idempotencyKey: body.idempotency_key } : {}),
           ...(body.stop_asking !== undefined ? { stopAsking: body.stop_asking } : {}),
         },

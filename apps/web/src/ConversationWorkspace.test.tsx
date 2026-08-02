@@ -1616,7 +1616,7 @@ describe("conversation workspace", () => {
     view.unmount();
   });
 
-  it("hydrates exact Plan Contract, QC, and explicit action cards from durable detail", async () => {
+  it("replaces the planning transcript with the QC-owned decision workspace", async () => {
     const version = planVersion({ status: "in_qc" });
     const review = planReview();
     const action = planAction({
@@ -1659,7 +1659,6 @@ describe("conversation workspace", () => {
       }),
     );
 
-    const user = userEvent.setup();
     render(
       <ConversationWorkspace
         projectId={projectId}
@@ -1668,27 +1667,20 @@ describe("conversation workspace", () => {
       />,
     );
 
-    // Terminal QC output no longer duplicates its plan and decision cards in
-    // the Plan transcript. The durable message becomes one explicit route to
-    // the QC-owned decision workspace.
-    expect(await screen.findByLabelText("QC decision available")).toHaveTextContent(
-      "Findings, suggested revisions, and the final decision are in the QC tab.",
-    );
+    expect(
+      await screen.findByRole("region", { name: "Quality control workspace" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Quality review passed" })).toBeInTheDocument();
     expect(screen.queryByText("Plan Contract · Version 1")).not.toBeInTheDocument();
     expect(screen.queryByTestId("conversation-action-approve_plan")).not.toBeInTheDocument();
-    expect(screen.queryByRole("region", { name: "Planning workflow" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Approve and start" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "QC — Decision needed" })).toBeInTheDocument();
-
-    // QC findings, dispositions, and the terminal decision live in the QC tab.
-    await user.click(screen.getByRole("button", { name: "Review QC decision →" }));
-    expect(screen.getByRole("heading", { name: "QC control room" })).toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "Decision brief" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
     expect(screen.getByText("Make cancellation verification explicit.")).toBeInTheDocument();
+    await userEvent.click(screen.getByText("Review record"));
+    await userEvent.click(screen.getByText("PM response"));
     expect(screen.getByText("Added the requested telemetry assertion.")).toBeInTheDocument();
-    expect(screen.getByText("Final reviewed plan output · Version 1")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Approve reviewed plan & start implementation" }),
+      screen.getByRole("button", { name: "Approve plan and start development" }),
     ).toBeInTheDocument();
   });
 
@@ -1773,16 +1765,10 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await userEvent.click(await screen.findByRole("button", { name: "QC" }));
-    expect(await screen.findByRole("heading", { name: /^Round 1 of / })).toBeInTheDocument();
-    expect(screen.getAllByTestId("conversation-qc-card")).toHaveLength(1);
-
-    const historyPanel = screen.getByText("Previous attempts").closest("details");
-    expect(historyPanel).not.toHaveAttribute("open");
-    await userEvent.click(screen.getByText("Previous attempts"));
-    expect(historyPanel).toHaveAttribute("open");
-    expect(screen.getByText(/Reviewer feedback was saved/i)).toBeInTheDocument();
-    await userEvent.click(screen.getByText("Retained findings and responses"));
+    expect(await screen.findByRole("heading", { name: "Round 1 of 3" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
+    await userEvent.click(screen.getByText("Review record"));
+    await userEvent.click(screen.getByText("Previous attempts · 1"));
     expect(screen.getByText("The retry boundary is not explicit.")).toBeInTheDocument();
   });
 
@@ -2313,15 +2299,18 @@ describe("conversation workspace", () => {
         }
       }
 
-      expect(await screen.findByText(intentText)).toBeInTheDocument();
-      expect(await screen.findByText("Plan Contract · Version 1")).toBeInTheDocument();
-      expect(await screen.findByText("UI preview", { exact: true })).toBeInTheDocument();
       if (trigger === "typed command") {
+        expect(await screen.findByText(intentText)).toBeInTheDocument();
+        expect(await screen.findByText("Plan Contract · Version 1")).toBeInTheDocument();
+        expect(await screen.findByText("UI preview", { exact: true })).toBeInTheDocument();
         expect(screen.queryByRole("button", { name: "Send to QC" })).not.toBeInTheDocument();
       } else if (skipsQc) {
         await waitFor(() => expect(approved).toBe(true));
+        expect(await screen.findByTestId("qc-new-workspace")).toBeInTheDocument();
+        expect(screen.getByRole("heading", { name: "Quality review passed" })).toBeInTheDocument();
       } else {
-        expect(screen.queryByRole("region", { name: "Planning workflow" })).not.toBeInTheDocument();
+        expect(await screen.findByTestId("qc-new-workspace")).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
       }
       expect(proposalBodies).toEqual([
         {
@@ -2968,7 +2957,6 @@ describe("conversation workspace", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    fireEvent.click(screen.getByRole("button", { name: "QC" }));
     expect(screen.getByRole("heading", { name: "Round 2 of 3" })).toBeInTheDocument();
     expect(detailCalls).toBe(1);
 
@@ -3039,10 +3027,8 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await userEvent.click(await screen.findByRole("button", { name: "QC" }));
-    expect(
-      await screen.findByRole("button", { name: "Retry QC with retained guidance" }),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Run QC again" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
   });
 
   it("polls a pending approved-plan kickoff until its durable outcome settles", async () => {
@@ -3372,7 +3358,9 @@ describe("conversation workspace", () => {
     await waitFor(() => expect(confirmationBodies).toHaveLength(2));
     expect(confirmationBodies[0]?.idempotency_key).toEqual(expect.any(String));
     expect(confirmationBodies[1]?.idempotency_key).toBe(confirmationBodies[0]?.idempotency_key);
-    expect(await screen.findByText("QC attempt 1 is converged.")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Quality review passed" }),
+    ).toBeInTheDocument();
   });
 
   it("keeps one in-memory confirmation key when session storage is unavailable", async () => {
@@ -5652,10 +5640,7 @@ describe("conversation workspace", () => {
     expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
   });
 
-  it("shows the QC tab on a project that runs QC even before its first review", async () => {
-    // QC-PAUSE-POINTS.md "Surfaces": visibility keys on whether QC RUNS, not on
-    // whether this conversation has been reviewed yet. Keying off
-    // plan_reviews.length hid the tab on every plan not yet sent to review.
+  it("keeps planning visible until QC actually owns the work", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -5676,7 +5661,8 @@ describe("conversation workspace", () => {
       />,
     );
 
-    expect(await screen.findByRole("button", { name: "QC" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Plan with PM" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
   });
 
   it("hides the QC tab when the project has review turned off (zero rounds)", async () => {
@@ -5704,7 +5690,7 @@ describe("conversation workspace", () => {
     expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
   });
 
-  it("shows a needs-you badge on the QC tab and a status strip on the Plan tab while a review is parked", async () => {
+  it("removes all planning navigation and shows finding choices when QC needs the user", async () => {
     const review = planReview({
       status: "awaiting_human",
       paused_checkpoint: "after_review",
@@ -5724,8 +5710,6 @@ describe("conversation workspace", () => {
         throw new Error(`Unexpected request: ${url}`);
       }),
     );
-    const user = userEvent.setup();
-
     render(
       <ConversationWorkspace
         projectId={projectId}
@@ -5734,15 +5718,14 @@ describe("conversation workspace", () => {
       />,
     );
 
-    const qcTab = await screen.findByRole("button", { name: /QC.*Needs you/ });
-    expect(qcTab).toBeInTheDocument();
-
-    const strip = screen.getByRole("button", { name: /QC round 1 of 3 · paused, waiting on you/ });
-    expect(strip).toBeInTheDocument();
-
-    await user.click(strip);
-    expect(qcTab).toHaveAttribute("aria-current", "page");
-    expect(screen.getByTestId("conversation-work-tab-qc")).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Round 1 reviewer pass complete" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Accept all 1/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Choose individually/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Accept none/ })).toBeInTheDocument();
   });
 
   it("never offers a qc_interim plan version as the default target for mockups", async () => {
@@ -5804,7 +5787,7 @@ describe("conversation workspace", () => {
     expect(optionLabels.some((label) => label?.includes("Web UI"))).toBe(false);
   });
 
-  it("carries a finding into the Plan composer as a quote and switches to the Plan tab", async () => {
+  it("never routes a QC finding back into the PM screen", async () => {
     const version = planVersion({ status: "in_qc" });
     const review = planReview({ plan_version_id: version.id });
     vi.stubGlobal(
@@ -5818,8 +5801,6 @@ describe("conversation workspace", () => {
         throw new Error(`Unexpected request: ${url}`);
       }),
     );
-    const user = userEvent.setup();
-
     render(
       <ConversationWorkspace
         projectId={projectId}
@@ -5828,16 +5809,12 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "QC" }));
-    await user.click(await screen.findByRole("button", { name: "Discuss in Plan" }));
-
-    expect(screen.getByRole("button", { name: "Plan with PM" })).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
-    expect(screen.queryByTestId("conversation-work-tab-qc")).not.toBeInTheDocument();
-    expect(await screen.findByRole("textbox", { name: "Message the project PM" })).toHaveValue(
-      "> Make cancellation verification explicit.\n\n",
-    );
+    expect(await screen.findByTestId("qc-new-workspace")).toBeInTheDocument();
+    expect(screen.getByText("Make cancellation verification explicit.")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Discuss in Plan" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("textbox", { name: "Message the project PM" }),
+    ).not.toBeInTheDocument();
   });
 });
