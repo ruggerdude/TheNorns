@@ -143,6 +143,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
             qc_pause_points_columns: true,
             work_plan_version_origin: true,
             qc_adjudication_columns: true,
+            qc_last_human_message_at: true,
+            qc_mode_provenance_columns: true,
           },
         ],
       }),
@@ -259,7 +261,9 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "devices.os_version, devices.agent_version, devices.agent_protocol_version, " +
         "devices.agent_capabilities, devices.last_seen_at, device_publication_permits, " +
         "conversation_plan_reviews QC pause columns, work_plan_versions.origin, " +
-        "conversation_plan_reviews adjudication columns. " +
+        "conversation_plan_reviews adjudication columns, " +
+        "conversation_plan_reviews.last_human_message_at, " +
+        "conversation_plan_reviews qc_mode provenance columns. " +
         "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
     });
   });
@@ -331,7 +335,9 @@ describe("PostgreSQL runtime schema compatibility", () => {
           "conversation_plan_reviews.review_mode, conversation_organization_v1, " +
           "conversation_message_branches_v1, " +
           "conversation_plan_reviews QC pause columns, work_plan_versions.origin, " +
-          "conversation_plan_reviews adjudication columns. " +
+          "conversation_plan_reviews adjudication columns, " +
+          "conversation_plan_reviews.last_human_message_at, " +
+          "conversation_plan_reviews qc_mode provenance columns. " +
           "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
       },
     );
@@ -407,7 +413,9 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "devices.os_version, devices.agent_version, devices.agent_protocol_version, " +
         "devices.agent_capabilities, devices.last_seen_at, device_publication_permits, " +
         "conversation_plan_reviews QC pause columns, work_plan_versions.origin, " +
-        "conversation_plan_reviews adjudication columns. " +
+        "conversation_plan_reviews adjudication columns, " +
+        "conversation_plan_reviews.last_human_message_at, " +
+        "conversation_plan_reviews qc_mode provenance columns. " +
         "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
     });
   });

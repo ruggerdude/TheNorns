@@ -177,3 +177,19 @@ pnpm --filter @norns/server run build && node apps/server/dist/main.js   # :8787
 pnpm --filter @norns/web dev                                             # :5173 (proxies /api)
 # open http://localhost:5173 and sign in with dev@local.test / dev-password
 ```
+
+### Deploy ordering (Railway auto-deploys, migrations do not)
+
+Railway rebuilds on every push to `main`. **Migrations do not run with it.** So a
+push that adds a migration opens a window where the new code is live against the
+old schema. That window has caused two production incidents:
+
+- a conversation route selecting a column that did not exist yet, and
+- the attention/portfolio read model failing silently, degrading the dashboard
+  to "showing last known data" while it still listed a deleted project.
+
+Apply migrations **before** pushing the code that needs them, or immediately
+after and accept the gap. `assertCurrentRuntimeSchema` catches the columns it
+knows about at startup — **extend it whenever you add a column a runtime path
+reads**, or the gap shows up as a degraded read model rather than a refused
+boot, which is much harder to attribute.

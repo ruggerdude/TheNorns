@@ -133,6 +133,8 @@ interface RuntimeSchemaPosture {
   qc_pause_points_columns: boolean;
   work_plan_version_origin: boolean;
   qc_adjudication_columns: boolean;
+  qc_last_human_message_at: boolean;
+  qc_mode_provenance_columns: boolean;
 }
 
 /**
@@ -356,7 +358,24 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
                    'forced_accept_module_ids',
                    'adjudication_idempotency_key'
                  )
-            ) AS qc_adjudication_columns`,
+            ) AS qc_adjudication_columns,
+            EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='conversation_plan_reviews'
+                 AND column_name='last_human_message_at'
+            ) AS qc_last_human_message_at,
+            (
+              SELECT count(*) = 2
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='conversation_plan_reviews'
+                 AND column_name IN (
+                   'qc_mode_changed_at_round',
+                   'qc_mode_changed_by_user_id'
+                 )
+            ) AS qc_mode_provenance_columns`,
   );
   const posture = result.rows[0];
   const missing = [
@@ -423,6 +442,16 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
     ...(!posture?.work_plan_version_origin ? ["work_plan_versions.origin"] : []),
     ...(!posture?.qc_adjudication_columns
       ? ["conversation_plan_reviews adjudication columns"]
+      : []),
+    // 0072/0073. The attention read model selects last_human_message_at on
+    // every poll, so a database missing it degrades the portfolio to "showing
+    // last known data" rather than failing anywhere obvious — which is exactly
+    // how this went unnoticed once already. Fail at startup instead.
+    ...(!posture?.qc_last_human_message_at
+      ? ["conversation_plan_reviews.last_human_message_at"]
+      : []),
+    ...(!posture?.qc_mode_provenance_columns
+      ? ["conversation_plan_reviews qc_mode provenance columns"]
       : []),
   ];
   if (missing.length > 0) {
