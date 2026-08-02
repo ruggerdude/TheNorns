@@ -1103,6 +1103,20 @@ describe("conversation workspace", () => {
             },
           });
         }
+        // The workspace reads the project's QC settings on mount to decide
+        // whether the QC tab exists, and re-reads it when a branch switch
+        // remounts the thread. Without this the mock throws and the resulting
+        // rejection perturbs timing — green locally, flaky on slower CI.
+        if (url.endsWith("/planning-reviewer")) {
+          return Response.json({
+            provider: "anthropic",
+            model: null,
+            mode: "automatic",
+            qc_mode: "automatic",
+            allow_unadjudicated_rebuttals: false,
+            default_max_rounds: 3,
+          });
+        }
         throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
       }),
     );

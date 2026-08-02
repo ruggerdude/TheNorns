@@ -126,3 +126,4 @@
 2026-08-01T00:00Z | QCP-9 | Mid-run qc_mode changes now record round and acting user (migration 0073), coupled 1:1 to qc_mode_source='in_run' in both the contract and a DB CHECK; found and fixed a second write site in resumeReview's stopAsking branch
 2026-08-01T00:00Z | QCP-R11 | idempotentReplay helper shared by resumeReview and adjudicateReview; the confirm path stays separate (different lookup key and an extra conflict branch)
 2026-08-01T00:00Z | QCP-R8 | Migration runner supports an opt-in `-- norns:no-transaction` marker so a future migration can use CREATE INDEX CONCURRENTLY; default transactional path unchanged, existing migrations deliberately not retrofitted
+2026-08-02T00:00Z | CI | Fixed the migration-tail assertion (now reads the current tail), the tab-panel layout regression caught by e2e, and a CI-only flake from the new planning-reviewer fetch; verified against real Postgres and Playwright
