@@ -58,6 +58,7 @@ export interface ConversationDetail {
   actions: V2ConversationActionT[];
   plan_reviews: V2ConversationPlanReviewT[];
   action_effects: V2ConversationPlanActionEffectT[];
+  project_runs_qc: boolean;
   handoff?: V2ConversationHandoffT | null;
   latest_summary?: V2ConversationSummaryT | null;
   usage?: ConversationUsageSummary | null;

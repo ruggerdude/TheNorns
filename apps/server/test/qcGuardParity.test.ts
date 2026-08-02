@@ -2,7 +2,7 @@
 // V2ConversationPlanReview in packages/contracts/src/v2/conversation.ts) and
 // the database guards (CHECK constraints + trigger functions on
 // conversation_plan_reviews across migrations 0037, 0049, 0064, 0065, 0066,
-// 0068). The two express the same rules independently as defence-in-depth;
+// 0068, 0074). The two express the same rules independently as defence-in-depth;
 // nothing else enforces that they stay in lockstep. For every case below we
 // assert the contract and the database AGREE — both accept, or both reject.
 //
@@ -519,16 +519,13 @@ describe.sequential("QC guard parity: contract invariants vs. database guards (Q
       expectParity("queued carrying paused_checkpoint", dbAccepted, contractAccepted);
     });
 
-    // FINDING: paused_at_round <= max_rounds is a contract-only rule. It
-    // cannot be a database CHECK on conversation_plan_reviews because
-    // max_rounds lives on a different table (planning_runs) — Postgres CHECK
-    // constraints cannot reference another table's row, and no trigger fills
-    // the gap (grep for "max_rounds" across apps/server/drizzle/*.sql: it is
-    // never joined against paused_at_round anywhere). So the database accepts
-    // a paused_at_round beyond the run's max_rounds; the contract rejects it.
-    // This is a one-sided rule, not a test bug — documented here rather than
-    // worked around.
-    it("[finding] paused_at_round beyond max_rounds: DB accepts, contract rejects (one-sided rule)", async () => {
+    // QCP-15: paused_at_round <= max_rounds used to be a contract-only rule.
+    // max_rounds lives on a different table (planning_runs), so it can't be a
+    // CHECK on conversation_plan_reviews — Postgres CHECK constraints can't
+    // reference another table's row. 0074_qc_paused_round_bound closes the
+    // gap with a constraint trigger that looks up the linked run's max_rounds
+    // instead. Both sides now agree.
+    it("paused_at_round beyond max_rounds: both sides reject", async () => {
       const sent = await sendToQc("pause-beyond-cap"); // max_rounds=3 (sendToQc default)
       await pg.query(
         `UPDATE conversation_plan_reviews SET status='running', started_at=$2 WHERE id=$1`,
@@ -542,8 +539,6 @@ describe.sequential("QC guard parity: contract invariants vs. database guards (Q
           [sent.reviewId],
         ),
       ));
-      expect(dbAccepted).toBe(true); // the database has no way to enforce this
-
       const contractAccepted = V2ConversationPlanReview.safeParse(
         baseReviewFixture({
           status: "awaiting_human",
@@ -553,11 +548,7 @@ describe.sequential("QC guard parity: contract invariants vs. database guards (Q
           max_rounds: 3,
         }),
       ).success;
-      expect(contractAccepted).toBe(false); // the contract can and does enforce it
-
-      // The row is now persisted but unparseable: workflow.detail() — which
-      // real callers use to render this review — throws on it.
-      await expect(contractView(sent.scope)).rejects.toThrow();
+      expectParity("paused_at_round beyond max_rounds", dbAccepted, contractAccepted);
     });
   });
 

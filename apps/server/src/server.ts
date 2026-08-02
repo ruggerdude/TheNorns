@@ -4055,6 +4055,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               actions: [],
               plan_reviews: [],
               action_effects: [],
+              project_runs_qc: false,
             }),
       pinForProject: async (projectId) => {
         const selected = await projects.pmSelectionOf(projectId);
@@ -6397,6 +6398,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           runReviewNow: (runId) => executeReviewNow(runId),
           cancelReviewNow: (runId) => cancelReviewNow(runId),
           qcModeSettingsOf: (projectId) => planningRunService.qcModeSettingsOf(projectId),
+          defaultMaxRoundsOf: (projectId) => planningRunService.defaultMaxRoundsOf(projectId),
           createReviewAdapter: (provider, model) => buildPlanningAdapter(provider, model),
           ...(options.recordUsage ? { recordUsage: options.recordUsage } : {}),
           ...(options.planningRuns.executionKickoff

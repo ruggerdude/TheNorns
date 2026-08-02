@@ -465,6 +465,7 @@ function detailResponse(
     actions?: V2ConversationActionT[];
     reviews?: V2ConversationPlanReviewT[];
     effects?: V2ConversationPlanActionEffectT[];
+    runsQc?: boolean;
     handoff?: unknown;
     latestSummary?: unknown;
     usage?: unknown;
@@ -490,6 +491,7 @@ function detailResponse(
     actions: resources.actions ?? [],
     plan_reviews: resources.reviews ?? [],
     action_effects: resources.effects ?? [],
+    project_runs_qc: resources.runsQc ?? false,
     handoff: resources.handoff ?? null,
     latest_summary: resources.latestSummary ?? null,
     usage:
@@ -1101,20 +1103,6 @@ describe("conversation workspace", () => {
               "content-type": "text/event-stream",
               "x-vercel-ai-ui-message-stream": "v1",
             },
-          });
-        }
-        // The workspace reads the project's QC settings on mount to decide
-        // whether the QC tab exists, and re-reads it when a branch switch
-        // remounts the thread. Without this the mock throws and the resulting
-        // rejection perturbs timing — green locally, flaky on slower CI.
-        if (url.endsWith("/planning-reviewer")) {
-          return Response.json({
-            provider: "anthropic",
-            model: null,
-            mode: "automatic",
-            qc_mode: "automatic",
-            allow_unadjudicated_rebuttals: false,
-            default_max_rounds: 3,
           });
         }
         throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
@@ -5284,18 +5272,8 @@ describe("conversation workspace", () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = urlOf(input);
         if (url.endsWith("/work-items")) return listResponse();
-        if (url.endsWith("/planning-reviewer")) {
-          return Response.json({
-            provider: "anthropic",
-            model: null,
-            mode: "automatic",
-            qc_mode: "automatic",
-            allow_unadjudicated_rebuttals: false,
-            default_max_rounds: 3,
-          });
-        }
         if (url.endsWith(`/conversations/${conversationId}`)) {
-          return detailResponse([], null, null, { reviews: [] });
+          return detailResponse([], null, null, { reviews: [], runsQc: true });
         }
         throw new Error(`Unexpected request: ${url}`);
       }),
@@ -5318,18 +5296,8 @@ describe("conversation workspace", () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = urlOf(input);
         if (url.endsWith("/work-items")) return listResponse();
-        if (url.endsWith("/planning-reviewer")) {
-          return Response.json({
-            provider: "anthropic",
-            model: null,
-            mode: "automatic",
-            qc_mode: "automatic",
-            allow_unadjudicated_rebuttals: false,
-            default_max_rounds: 0,
-          });
-        }
         if (url.endsWith(`/conversations/${conversationId}`)) {
-          return detailResponse([], null, null, { reviews: [] });
+          return detailResponse([], null, null, { reviews: [], runsQc: false });
         }
         throw new Error(`Unexpected request: ${url}`);
       }),

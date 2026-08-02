@@ -100,6 +100,7 @@ export interface ConversationPlanWorkflowOptions {
     pm: { provider: ProviderName; model: string },
   ): Promise<ConversationPlanReviewModels>;
   qcModeSettingsOf?(projectId: string): Promise<{ qcMode: V2ConversationPlanReviewT["qc_mode"] }>;
+  defaultMaxRoundsOf?(projectId: string): Promise<number>;
   runReviewNow(runId: string): Promise<unknown>;
   cancelReviewNow?(runId: string): boolean;
   createReviewAdapter?(provider: ProviderName, model: string): LlmAdapter;
@@ -129,6 +130,10 @@ export interface ConversationPlanDetail {
   actions: V2ConversationActionT[];
   plan_reviews: V2ConversationPlanReviewT[];
   action_effects: V2ConversationPlanActionEffectT[];
+  /** Honest signal for whether the project runs QC at all, so clients don't
+   * need a second round trip to /planning-reviewer just to decide whether to
+   * show the QC tab. True when default_max_rounds > 0. */
+  project_runs_qc: boolean;
 }
 
 interface ActionRow {
@@ -558,11 +563,13 @@ export class ConversationPlanWorkflowService {
       const planById = new Map(planVersions.map((plan) => [plan.id, plan]));
       const planReviews = reviews.rows.map(toReview);
       const reviewById = new Map(planReviews.map((review) => [review.id, review]));
+      const defaultMaxRounds = (await this.options.defaultMaxRoundsOf?.(projectId)) ?? 0;
       return {
         plan_versions: planVersions,
         actions: actions.rows.map(toAction),
         plan_reviews: planReviews,
         action_effects: effects.rows.map((row) => this.toEffect(row, planById, reviewById)),
+        project_runs_qc: defaultMaxRounds > 0,
       };
     });
   }

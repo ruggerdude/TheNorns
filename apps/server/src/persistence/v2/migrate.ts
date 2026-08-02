@@ -478,6 +478,12 @@ export const QC_MODE_PROVENANCE_MIGRATION_URL = new URL(
   import.meta.url,
 );
 
+export const QC_PAUSED_ROUND_BOUND_MIGRATION_NAME = "0074_qc_paused_round_bound";
+export const QC_PAUSED_ROUND_BOUND_MIGRATION_URL = new URL(
+  "../../../drizzle/0074_qc_paused_round_bound.sql",
+  import.meta.url,
+);
+
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
   affectedRows?: number;
@@ -800,6 +806,10 @@ export async function loadQcLastHumanMessageMigrationSql(): Promise<string> {
 
 export async function loadQcModeProvenanceMigrationSql(): Promise<string> {
   return readFile(QC_MODE_PROVENANCE_MIGRATION_URL, "utf8");
+}
+
+export async function loadQcPausedRoundBoundMigrationSql(): Promise<string> {
+  return readFile(QC_PAUSED_ROUND_BOUND_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1265,6 +1275,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: QC_MODE_PROVENANCE_MIGRATION_NAME,
       sql: await loadQcModeProvenanceMigrationSql(),
+    },
+    {
+      name: QC_PAUSED_ROUND_BOUND_MIGRATION_NAME,
+      sql: await loadQcPausedRoundBoundMigrationSql(),
     },
   ];
 }

@@ -127,3 +127,5 @@
 2026-08-01T00:00Z | QCP-R11 | idempotentReplay helper shared by resumeReview and adjudicateReview; the confirm path stays separate (different lookup key and an extra conflict branch)
 2026-08-01T00:00Z | QCP-R8 | Migration runner supports an opt-in `-- norns:no-transaction` marker so a future migration can use CREATE INDEX CONCURRENTLY; default transactional path unchanged, existing migrations deliberately not retrofitted
 2026-08-02T00:00Z | CI | Fixed the migration-tail assertion (now reads the current tail), the tab-panel layout regression caught by e2e, and a CI-only flake from the new planning-reviewer fetch; verified against real Postgres and Playwright
+2026-08-02T00:00Z | QCP-15 | paused_at_round <= max_rounds now enforced by a constraint trigger (migration 0074) as well as the contract; a CHECK could not reach max_rounds on planning_runs. Parity test flipped from a documented finding to a both-sides-reject case
+2026-08-02T00:00Z | QCP-16 | project_runs_qc now rides the conversation detail payload; the workspace's mount-time planning-reviewer fetch is gone, removing the flake class it introduced across 47 test mocks
