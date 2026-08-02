@@ -1,10 +1,4 @@
-import {
-  AdapterError,
-  type ConversationMessage,
-  type LlmAdapter,
-  type MessageContent,
-  type ProviderName,
-} from "@norns/adapters";
+import { AdapterError, type LlmAdapter, type ProviderName } from "@norns/adapters";
 import {
   V2ConversationAction,
   V2CreateConversationPlanProposalInput,
@@ -26,210 +20,14 @@ import {
 } from "./planWorkflow.js";
 import type { ConversationService } from "./service.js";
 
-export const PLAN_PROPOSAL_MAX_OUTPUT_TOKENS = 7_000;
-export const PLAN_PROPOSAL_MAX_DISCUSSION_MESSAGES = 16;
-export const PLAN_PROPOSAL_MAX_DISCUSSION_CHARACTERS = 16_000;
-export const PLAN_PROPOSAL_MAX_MESSAGE_CHARACTERS = 4_000;
-
-const MIN_TRUNCATED_MESSAGE_CHARACTERS = 256;
-
 const PLAN_PROPOSAL_SYSTEM = [
   "You are the conversational PM proposing a structured Work Plan Contract from the visible project conversation and binding context.",
   "Return only the strict provider-neutral Work Plan Contract envelope requested by the schema.",
   "The proposal is inert: do not claim that it was saved, reviewed, approved, or started.",
   "Treat the conversation as source evidence, not as the plan itself. Extract the latest agreed direction and explicit human decisions; do not turn greetings, exploration, abandoned alternatives, repeated explanations, or the mechanics of creating the plan into plan modules.",
   "When later messages revise or reject earlier ideas, keep only the latest accepted direction. Put genuinely unresolved choices in open_decisions instead of silently treating them as commitments.",
-  "Write a concise, executable contract. State the objective once; avoid repeating the same requirement across descriptions, deliverables, acceptance criteria, risks, and verification requirements. Each module must describe an independently implementable and verifiable area, not a conversation topic.",
-  "Normally use 1-8 modules and the fewest modules that fully cover the accepted scope. Exceed eight only when the visible accepted scope genuinely requires more independently deliverable areas. Keep assumptions, risks, out-of-scope items, open decisions, deliverables, and acceptance criteria bounded to material items.",
-  "Preserve established human decisions, surface unresolved decisions, pin one OpenAI or Anthropic staffing choice per module, and include concrete executable verification requirements and a realistic budget.",
+  "Preserve established human decisions, surface unresolved decisions, pin one OpenAI or Anthropic staffing choice per module, and include concrete verification requirements and budget.",
 ].join("\n\n");
-
-export interface PlanProposalDiscussionMessage {
-  source_index: number;
-  role: ConversationMessage["role"];
-  content: string;
-  source_content_sha256: string;
-  original_characters: number;
-  included_characters: number;
-  truncated: boolean;
-}
-
-export interface PlanProposalDiscussionEnvelope {
-  schema_version: 1;
-  chronological_messages: PlanProposalDiscussionMessage[];
-  bounds: {
-    max_messages: number;
-    max_included_characters: number;
-    max_characters_per_message: number;
-  };
-  omission: {
-    total_messages: number;
-    included_messages: number;
-    omitted_messages: number;
-    truncated_messages: number;
-    total_rendered_characters: number;
-    included_characters: number;
-    omitted_content_sha256: string | null;
-  };
-}
-
-export interface ConversationPlanProposalRequestEnvelope {
-  system: string;
-  prompt: string;
-  maxTokens: number;
-  discussion: PlanProposalDiscussionEnvelope;
-}
-
-interface RenderedDiscussionMessage {
-  source_index: number;
-  role: ConversationMessage["role"];
-  content: string;
-  source_content_sha256: string;
-}
-
-function renderVisibleMessageContent(content: MessageContent): string {
-  if (typeof content === "string") return content.trim();
-  const rendered = content
-    .map((part) =>
-      part.type === "text"
-        ? part.text
-        : `[Visible ${part.mime} image omitted from the text-only plan digest.]`,
-    )
-    .join("\n")
-    .trim();
-  return rendered || "[Visible non-text message omitted from the text-only plan digest.]";
-}
-
-function boundedMessageExcerpt(
-  message: RenderedDiscussionMessage,
-  maxCharacters: number,
-): { content: string; truncated: boolean; omittedSegmentSha256: string | null } {
-  if (message.content.length <= maxCharacters) {
-    return { content: message.content, truncated: false, omittedSegmentSha256: null };
-  }
-
-  const available = Math.max(MIN_TRUNCATED_MESSAGE_CHARACTERS, maxCharacters);
-  const markerTemplate = "\n… [message middle omitted; sha256=HASH] …\n";
-  const markerLength = markerTemplate.length - "HASH".length + 64;
-  const retainedCharacters = available - markerLength;
-  const headCharacters = Math.ceil(retainedCharacters / 2);
-  const tailCharacters = Math.floor(retainedCharacters / 2);
-  const omittedEnd = message.content.length - tailCharacters;
-  const omitted = message.content.slice(headCharacters, omittedEnd);
-  const omittedSegmentSha256 = canonicalSha256(omitted);
-  const marker = `\n… [message middle omitted; sha256=${omittedSegmentSha256}] …\n`;
-  return {
-    content: message.content.slice(0, headCharacters) + marker + message.content.slice(omittedEnd),
-    truncated: true,
-    omittedSegmentSha256,
-  };
-}
-
-/**
- * Builds the bounded, provider-neutral initial proposal request. The binding
- * system context remains byte-for-byte intact; only recent visible discussion
- * is excerpted. Selection walks newest-to-oldest, then restores chronology.
- */
-export function buildConversationPlanProposalRequest(input: {
-  assembledSystem: string;
-  messages: readonly ConversationMessage[];
-  handoff?: V2CreateConversationPlanProposalInputT["handoff"];
-}): ConversationPlanProposalRequestEnvelope {
-  const rendered: RenderedDiscussionMessage[] = input.messages.map((message, sourceIndex) => ({
-    source_index: sourceIndex,
-    role: message.role,
-    content: renderVisibleMessageContent(message.content),
-    source_content_sha256: canonicalSha256({ role: message.role, content: message.content }),
-  }));
-  const selected: PlanProposalDiscussionMessage[] = [];
-  const omittedDescriptors: Array<Record<string, string | number>> = [];
-  let remainingCharacters = PLAN_PROPOSAL_MAX_DISCUSSION_CHARACTERS;
-
-  for (let index = rendered.length - 1; index >= 0; index -= 1) {
-    const message = rendered[index];
-    if (!message) continue;
-    const hasMessageCapacity = selected.length < PLAN_PROPOSAL_MAX_DISCUSSION_MESSAGES;
-    const canFitWholeMessage = message.content.length <= remainingCharacters;
-    const canFitTruncatedMessage = remainingCharacters >= MIN_TRUNCATED_MESSAGE_CHARACTERS;
-    if (!hasMessageCapacity || (!canFitWholeMessage && !canFitTruncatedMessage)) {
-      omittedDescriptors.push({
-        source_index: message.source_index,
-        source_content_sha256: message.source_content_sha256,
-        reason: hasMessageCapacity ? "character_limit" : "message_limit",
-      });
-      continue;
-    }
-
-    const excerpt = boundedMessageExcerpt(
-      message,
-      Math.min(PLAN_PROPOSAL_MAX_MESSAGE_CHARACTERS, remainingCharacters),
-    );
-    selected.push({
-      source_index: message.source_index,
-      role: message.role,
-      content: excerpt.content,
-      source_content_sha256: message.source_content_sha256,
-      original_characters: message.content.length,
-      included_characters: excerpt.content.length,
-      truncated: excerpt.truncated,
-    });
-    remainingCharacters -= excerpt.content.length;
-    if (excerpt.omittedSegmentSha256) {
-      omittedDescriptors.push({
-        source_index: message.source_index,
-        omitted_segment_sha256: excerpt.omittedSegmentSha256,
-        reason: "message_truncated",
-      });
-    }
-  }
-
-  selected.reverse();
-  const includedSourceIndexes = new Set(selected.map((message) => message.source_index));
-  const discussion: PlanProposalDiscussionEnvelope = {
-    schema_version: 1,
-    chronological_messages: selected,
-    bounds: {
-      max_messages: PLAN_PROPOSAL_MAX_DISCUSSION_MESSAGES,
-      max_included_characters: PLAN_PROPOSAL_MAX_DISCUSSION_CHARACTERS,
-      max_characters_per_message: PLAN_PROPOSAL_MAX_MESSAGE_CHARACTERS,
-    },
-    omission: {
-      total_messages: rendered.length,
-      included_messages: selected.length,
-      omitted_messages: rendered.length - includedSourceIndexes.size,
-      truncated_messages: selected.filter((message) => message.truncated).length,
-      total_rendered_characters: rendered.reduce(
-        (total, message) => total + message.content.length,
-        0,
-      ),
-      included_characters: selected.reduce(
-        (total, message) => total + message.included_characters,
-        0,
-      ),
-      omitted_content_sha256:
-        omittedDescriptors.length > 0 ? canonicalSha256(omittedDescriptors) : null,
-    },
-  };
-  const prompt = [
-    "Propose the complete Work Plan Contract envelope now.",
-    "Use the binding context plus the bounded visible-discussion digest below to synthesize only the latest accepted plan. Omission hashes are provenance metadata, not plan requirements.",
-    input.handoff
-      ? `The human selected ${input.handoff.execution_agent.provider}:${input.handoff.execution_agent.model} as the execution agent. Use that exact provider and model for every module staffing choice.`
-      : null,
-    "BOUNDED_VISIBLE_DISCUSSION_JSON",
-    JSON.stringify(discussion),
-    "Return the strict structured result only.",
-  ]
-    .filter((line): line is string => line !== null)
-    .join("\n");
-
-  return {
-    system: `${PLAN_PROPOSAL_SYSTEM}\n\n${input.assembledSystem}`,
-    prompt,
-    maxTokens: PLAN_PROPOSAL_MAX_OUTPUT_TOKENS,
-    discussion,
-  };
-}
 
 interface ProposalAttemptRow {
   id: string;
@@ -560,16 +358,19 @@ export class ConversationPlanProposalService {
         provider(scope.conversation.provider),
         scope.conversation.model,
       );
-      const proposalRequest = buildConversationPlanProposalRequest({
-        assembledSystem: assembled.system,
-        messages: assembled.messages,
-        ...(input.handoff ? { handoff: input.handoff } : {}),
-      });
       const generated = await adapter.completeStructured(
         {
-          system: proposalRequest.system,
-          prompt: proposalRequest.prompt,
-          maxTokens: proposalRequest.maxTokens,
+          system: `${PLAN_PROPOSAL_SYSTEM}\n\n${assembled.system}`,
+          prompt: [
+            "Propose the complete Work Plan Contract envelope now.",
+            "Use the current objective, visible discussion, decisions, risks, and referenced artifacts to synthesize only the current agreed plan.",
+            input.handoff
+              ? `The human selected ${input.handoff.execution_agent.provider}:${input.handoff.execution_agent.model} as the execution agent. Use that exact provider and model for every module staffing choice.`
+              : null,
+            "Return the strict structured result only.",
+          ]
+            .filter((line): line is string => line !== null)
+            .join("\n"),
           projectId,
           initiatedByUserId: userId,
           telemetryRequestId: usageRequestId,

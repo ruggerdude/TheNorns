@@ -639,12 +639,9 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
 
     expect(replay).toEqual(first);
     expect(adapter.requests).toHaveLength(1);
-    expect(adapter.requests[0]?.maxTokens).toBe(7_000);
     expect(adapter.requests[0]?.system).toContain(
       "Extract the latest agreed direction and explicit human decisions",
     );
-    expect(adapter.requests[0]?.prompt).toContain("BOUNDED_VISIBLE_DISCUSSION_JSON");
-    expect(adapter.requests[0]?.prompt).toContain("Use this as the plan.");
     expect(adapter.requests[0]?.prompt).toContain(
       "anthropic:claude-sonnet-5 as the execution agent",
     );
