@@ -89,6 +89,7 @@ export function Admin({
   const [users, setUsers] = useState<UserSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [roleBusyUserId, setRoleBusyUserId] = useState<string | null>(null);
+  const [actionPanel, setActionPanel] = useState<"invite" | "create" | null>(null);
 
   const [addEmail, setAddEmail] = useState("");
   const [addName, setAddName] = useState("");
@@ -122,6 +123,15 @@ export function Admin({
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (actionPanel === null) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setActionPanel(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [actionPanel]);
 
   const addUser = useCallback(async () => {
     setAdding(true);
@@ -231,26 +241,49 @@ export function Admin({
         </header>
       ) : null}
       <main className="page-container admin-page">
-        <PageHeader
-          eyebrow="Administrator access"
-          title="Users"
-          lede="Add people, invite members, and control who can administer the workspace."
-        />
+        <div className="admin-page-heading">
+          <PageHeader
+            eyebrow="Workspace administration"
+            title="People"
+            lede="Manage membership, invitations, and administrator access."
+          />
+          <div className="admin-primary-actions" aria-label="People actions">
+            <Button onClick={() => setActionPanel("create")}>Create manually</Button>
+            <Button variant="primary" onClick={() => setActionPanel("invite")}>
+              Invite people
+            </Button>
+          </div>
+        </div>
         {error ? <Alert testId="admin-error">{error}</Alert> : null}
 
         <div className="admin-layout">
-          <section className="card">
-            <h3>Users</h3>
+          <section className="admin-roster" aria-labelledby="admin-roster-title">
+            <div className="admin-section-heading">
+              <div>
+                <h2 id="admin-roster-title">Workspace members</h2>
+                <p>People with access to projects and conversations in this workspace.</p>
+              </div>
+              <span className="admin-member-count" aria-label={`${users?.length ?? 0} members`}>
+                {users === null ? "—" : users.length}
+              </span>
+            </div>
             {users === null ? (
-              <p className="muted">Loading…</p>
+              <p className="admin-loading muted">Loading members…</p>
             ) : (
               <ul className="user-list" data-testid="user-list">
                 {users.map((user) => (
                   <li key={user.id} className="user-row">
-                    <div>
-                      <strong>{user.email}</strong>
-                      {user.name ? <span className="muted"> · {user.name}</span> : null}
-                      <div className="meta">
+                    <div className="user-identity">
+                      <span className="user-avatar" aria-hidden="true">
+                        {(user.name ?? user.email).trim().slice(0, 1).toUpperCase()}
+                      </span>
+                      <div>
+                        <strong>{user.name ?? user.email}</strong>
+                        {user.name ? <span className="user-email">{user.email}</span> : null}
+                      </div>
+                    </div>
+                    <div className="user-access">
+                      <div className="meta" aria-label={`${user.role}, ${user.status}`}>
                         <Badge tone={user.role === "admin" ? "info" : "default"}>{user.role}</Badge>{" "}
                         <Badge tone={user.status === "active" ? "success" : "warn"}>
                           {user.status}
@@ -284,86 +317,142 @@ export function Admin({
               </ul>
             )}
           </section>
-
-          <section className="card form-stack">
-            <h3>Add a user manually</h3>
-            <Field label="Email">
-              <Input
-                type="email"
-                value={addEmail}
-                onChange={(event) => setAddEmail(event.target.value)}
-                placeholder="teammate@example.com"
-              />
-            </Field>
-            <Field label="Name (optional)">
-              <Input value={addName} onChange={(event) => setAddName(event.target.value)} />
-            </Field>
-            <Field label="Password">
-              <Input
-                type="password"
-                value={addPassword}
-                onChange={(event) => setAddPassword(event.target.value)}
-                placeholder="At least 8 characters"
-                autoComplete="new-password"
-              />
-            </Field>
-            <Field label="Role">
-              <Select
-                value={addRole}
-                onChange={(event) => setAddRole(event.target.value as "admin" | "member")}
-              >
-                <option value="member">Member</option>
-                <option value="admin">Admin</option>
-              </Select>
-            </Field>
-            <Button
-              variant="primary"
-              className="btn-block"
-              disabled={adding || !addEmail.trim() || addPassword.length < 8}
-              onClick={() => void addUser()}
-            >
-              {adding ? "Adding…" : "Add user"}
-            </Button>
-          </section>
-
-          <section className="card form-stack">
-            <h3>Invite by email</h3>
-            <Field label="Email">
-              <Input
-                type="email"
-                value={inviteEmail}
-                onChange={(event) => setInviteEmail(event.target.value)}
-                placeholder="teammate@example.com"
-              />
-            </Field>
-            <Field label="Name (optional)">
-              <Input value={inviteName} onChange={(event) => setInviteName(event.target.value)} />
-            </Field>
-            <Field label="Role">
-              <Select
-                value={inviteRole}
-                onChange={(event) => setInviteRole(event.target.value as "admin" | "member")}
-              >
-                <option value="member">Member</option>
-                <option value="admin">Admin</option>
-              </Select>
-            </Field>
-            <Button
-              variant="primary"
-              className="btn-block"
-              disabled={inviting || !inviteEmail.trim()}
-              onClick={() => void inviteUser()}
-            >
-              {inviting ? "Sending…" : "Send invite"}
-            </Button>
-            {inviteNotice ? (
-              <Alert testId="invite-notice">
-                {inviteNotice.message} Share this link manually:{" "}
-                <span className="mono">{inviteNotice.url}</span>
-              </Alert>
-            ) : null}
-          </section>
         </div>
+
+        {actionPanel ? (
+          <div
+            className="admin-drawer-backdrop"
+            onMouseDown={(event) => {
+              if (event.currentTarget === event.target) setActionPanel(null);
+            }}
+          >
+            <dialog
+              open
+              className="admin-drawer"
+              aria-modal="true"
+              aria-labelledby="admin-drawer-title"
+            >
+              <div className="admin-drawer-header">
+                <div>
+                  <span className="eyebrow">Add workspace access</span>
+                  <h2 id="admin-drawer-title">
+                    {actionPanel === "invite" ? "Invite people" : "Create a member"}
+                  </h2>
+                  <p>
+                    {actionPanel === "invite"
+                      ? "Send a secure invitation so your teammate can choose their password."
+                      : "Create credentials directly when email invitation is not appropriate."}
+                  </p>
+                </div>
+                <Button
+                  variant="ghost"
+                  className="btn-small"
+                  aria-label="Close people panel"
+                  onClick={() => setActionPanel(null)}
+                >
+                  Close
+                </Button>
+              </div>
+
+              <div className="admin-method-switch" aria-label="Choose how to add a member">
+                <Button
+                  variant={actionPanel === "invite" ? "primary" : "ghost"}
+                  onClick={() => setActionPanel("invite")}
+                >
+                  Invite by email
+                </Button>
+                <Button
+                  variant={actionPanel === "create" ? "primary" : "ghost"}
+                  onClick={() => setActionPanel("create")}
+                >
+                  Create manually
+                </Button>
+              </div>
+
+              {actionPanel === "create" ? (
+                <div className="admin-drawer-form form-stack">
+                  <Field label="Email">
+                    <Input
+                      type="email"
+                      value={addEmail}
+                      onChange={(event) => setAddEmail(event.target.value)}
+                      placeholder="teammate@example.com"
+                    />
+                  </Field>
+                  <Field label="Name (optional)">
+                    <Input value={addName} onChange={(event) => setAddName(event.target.value)} />
+                  </Field>
+                  <Field label="Password">
+                    <Input
+                      type="password"
+                      value={addPassword}
+                      onChange={(event) => setAddPassword(event.target.value)}
+                      placeholder="At least 8 characters"
+                      autoComplete="new-password"
+                    />
+                  </Field>
+                  <Field label="Role">
+                    <Select
+                      value={addRole}
+                      onChange={(event) => setAddRole(event.target.value as "admin" | "member")}
+                    >
+                      <option value="member">Member</option>
+                      <option value="admin">Admin</option>
+                    </Select>
+                  </Field>
+                  <Button
+                    variant="primary"
+                    className="btn-block"
+                    disabled={adding || !addEmail.trim() || addPassword.length < 8}
+                    onClick={() => void addUser()}
+                  >
+                    {adding ? "Creating…" : "Create member"}
+                  </Button>
+                </div>
+              ) : (
+                <div className="admin-drawer-form form-stack">
+                  <Field label="Email">
+                    <Input
+                      type="email"
+                      value={inviteEmail}
+                      onChange={(event) => setInviteEmail(event.target.value)}
+                      placeholder="teammate@example.com"
+                    />
+                  </Field>
+                  <Field label="Name (optional)">
+                    <Input
+                      value={inviteName}
+                      onChange={(event) => setInviteName(event.target.value)}
+                    />
+                  </Field>
+                  <Field label="Role">
+                    <Select
+                      value={inviteRole}
+                      onChange={(event) => setInviteRole(event.target.value as "admin" | "member")}
+                    >
+                      <option value="member">Member</option>
+                      <option value="admin">Admin</option>
+                    </Select>
+                  </Field>
+                  <Button
+                    variant="primary"
+                    className="btn-block"
+                    disabled={inviting || !inviteEmail.trim()}
+                    onClick={() => void inviteUser()}
+                  >
+                    {inviting ? "Sending…" : "Send invite"}
+                  </Button>
+                  {inviteNotice ? (
+                    <Alert testId="invite-notice">
+                      {inviteNotice.message} Share this link manually:{" "}
+                      <span className="mono">{inviteNotice.url}</span>
+                    </Alert>
+                  ) : null}
+                </div>
+              )}
+            </dialog>
+          </div>
+        ) : null}
       </main>
     </div>
   );

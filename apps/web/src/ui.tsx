@@ -46,7 +46,11 @@ export function Alert({
   tone?: "danger" | "info" | "success";
 }) {
   return (
-    <div className={`alert alert-${tone}`} data-testid={testId}>
+    <div
+      className={`alert alert-${tone}`}
+      data-testid={testId}
+      role={tone === "danger" ? "alert" : "status"}
+    >
       <span className="alert-body">{children}</span>
     </div>
   );
@@ -124,10 +128,10 @@ export function DismissibleNote({
 }
 export function Spinner({ label = "Loading…" }: { label?: string }) {
   return (
-    <div className="loading">
-      <span className="spinner" />
+    <output className="loading" aria-live="polite">
+      <span className="spinner" aria-hidden="true" />
       {label}
-    </div>
+    </output>
   );
 }
 export function Badge({
@@ -195,8 +199,8 @@ export function Brand({
   );
 }
 /**
- * DESIGN P1 — canonical page intro. Every page header converges on this:
- * eyebrow (uppercase brand ink), h1 (--text-2xl / 800), optional lede, and
+ * Canonical page intro. Every page header converges on this:
+ * eyebrow, h1 (--text-2xl / 600), optional lede, and
  * an optional right-aligned actions slot.
  */
 export function PageHeader({
@@ -211,13 +215,13 @@ export function PageHeader({
   actions?: ReactNode;
 }) {
   return (
-    <div className="page-header">
+    <header className="page-header">
       <div className="page-header-copy">
         {eyebrow ? <div className="eyebrow">{eyebrow}</div> : null}
         <h1>{title}</h1>
         {lede ? <p className="page-header-lede">{lede}</p> : null}
       </div>
       {actions ? <div className="page-header-actions">{actions}</div> : null}
-    </div>
+    </header>
   );
 }

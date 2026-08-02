@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { ProjectSummary } from "./Projects";
 import { UnauthorizedError, authHeaders } from "./auth";
 
@@ -18,6 +18,7 @@ export function PortfolioMenu({
   onUnauthorized: () => void;
 }): React.ReactElement {
   const projectListId = useId();
+  const menuRef = useRef<HTMLElement>(null);
   const [projectListOpen, setProjectListOpen] = useState(false);
   const [loadedProjects, setLoadedProjects] = useState<ProjectSummary[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -43,13 +44,30 @@ export function PortfolioMenu({
     };
   }, [onUnauthorized, projects]);
 
+  useEffect(() => {
+    if (!projectListOpen) return;
+    const closeMenu = (event: PointerEvent | KeyboardEvent) => {
+      if (event instanceof KeyboardEvent) {
+        if (event.key === "Escape") setProjectListOpen(false);
+        return;
+      }
+      if (!menuRef.current?.contains(event.target as Node)) setProjectListOpen(false);
+    };
+    window.addEventListener("keydown", closeMenu);
+    window.addEventListener("pointerdown", closeMenu);
+    return () => {
+      window.removeEventListener("keydown", closeMenu);
+      window.removeEventListener("pointerdown", closeMenu);
+    };
+  }, [projectListOpen]);
+
   const choose = (action: () => void) => {
     setProjectListOpen(false);
     action();
   };
 
   return (
-    <nav className="portfolio-navigation" aria-label="Portfolio navigation">
+    <nav className="portfolio-navigation" aria-label="Portfolio navigation" ref={menuRef}>
       <button type="button" className="portfolio-new-project" onClick={() => choose(onNewProject)}>
         <span>New project</span>
       </button>

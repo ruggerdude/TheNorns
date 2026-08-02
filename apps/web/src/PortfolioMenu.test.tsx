@@ -41,6 +41,10 @@ describe("PortfolioMenu", () => {
     expect(onOpenProject).toHaveBeenCalledWith(projects[0]);
     expect(screen.queryByRole("button", { name: "Hide active projects" })).not.toBeInTheDocument();
 
+    await user.click(screen.getByRole("button", { name: "Show active projects" }));
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("button", { name: "Hide active projects" })).not.toBeInTheDocument();
+
     await user.click(newProject);
     expect(onNewProject).toHaveBeenCalledTimes(1);
     expect(navigation).toContainElement(newProject);

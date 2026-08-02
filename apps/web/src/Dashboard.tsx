@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { authHeaders } from "./auth";
 import { Alert, Badge, Spinner } from "./ui";
+import "./CoreSurfaces.css";
 interface DashboardDto {
   graph_version: number;
   nodes: Record<string, string>;
@@ -54,41 +55,54 @@ export function Dashboard({ onUnauthorized }: { onUnauthorized?: () => void }): 
       </main>
     );
   return (
-    <main className="page dashboard">
-      <div className="page-intro">
+    <main className="page dashboard core-pm-dashboard">
+      <header className="core-pm-header">
         <div className="eyebrow">Program intelligence</div>
-        <h1>PM Dashboard</h1>
-      </div>
-      <div className="demo-banner">
-        <strong>Demo data</strong> · This dashboard is not yet scoped to the project you opened. Its
-        metrics come from the execution-engine demo environment.
+        <h1>PM dashboard</h1>
+        <p>Follow execution health, budget, and the decisions that need attention.</p>
+      </header>
+      <div className="demo-banner core-demo-banner">
+        <strong>Demo environment</strong>
+        <span>These metrics represent the execution engine and are not scoped to one project.</span>
       </div>
       {dto.kill_switch ? (
         <Alert>
           <span data-testid="kill-switch">Kill switch is active. Execution is halted.</span>
         </Alert>
       ) : null}
-      <div className="dashboard-grid">
-        <section className="card span-8" data-testid="pm-summary">
-          <div className="eyebrow">PM brief</div>
-          <h2>{dto.pm_summary}</h2>
-        </section>
-        <section className="card span-4" data-testid="progress">
-          <div className="muted">Progress</div>
-          <div className="metric">{dto.progress_pct}%</div>
-          <div className="progress-track">
-            <div className="progress-fill" style={{ width: `${dto.progress_pct}%` }} />
+      <div className="core-pm-dashboard-grid">
+        <section className="core-pm-overview" data-testid="pm-summary">
+          <div>
+            <div className="eyebrow">PM brief</div>
+            <h2>{dto.pm_summary}</h2>
           </div>
-          <span className="meta">GATE-DERIVED · {dto.eta.label}</span>
+          <div className="core-pm-progress" data-testid="progress">
+            <div>
+              <span>Overall progress</span>
+              <strong>{dto.progress_pct}%</strong>
+            </div>
+            <div
+              className="progress-track"
+              role="progressbar"
+              aria-label="Overall progress"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={dto.progress_pct}
+              tabIndex={0}
+            >
+              <div className="progress-fill" style={{ width: `${dto.progress_pct}%` }} />
+            </div>
+            <span className="meta">Gate-derived · {dto.eta.label}</span>
+          </div>
         </section>
-        <section className="card span-6" data-testid="cost">
+        <section className="core-pm-section" data-testid="cost">
           <div className="section-head">
             <h3>Budget</h3>
             <Badge tone="success">{money(dto.cost.burn_rate_usd_per_hour)}/hr</Badge>
           </div>
-          <div className="metric">{money(dto.cost.settled_usd)}</div>
-          <p className="muted">settled of {money(dto.cost.project_cap_usd)} cap</p>
-          <div className="assignment">
+          <div className="core-pm-primary-metric">{money(dto.cost.settled_usd)}</div>
+          <p className="muted">Settled of {money(dto.cost.project_cap_usd)} project cap</p>
+          <div className="assignment core-pm-definition-list">
             <span>Reserved</span>
             <strong>{money(dto.cost.active_reservations_usd)}</strong>
             <span>Approved</span>
@@ -103,7 +117,7 @@ export function Dashboard({ onUnauthorized }: { onUnauthorized?: () => void }): 
             ))}
           </div>
         </section>
-        <section className="card span-6" data-testid="nodes">
+        <section className="core-pm-section" data-testid="nodes">
           <div className="section-head">
             <h3>Modules</h3>
             <span className="meta">GRAPH V{dto.graph_version}</span>
@@ -121,7 +135,7 @@ export function Dashboard({ onUnauthorized }: { onUnauthorized?: () => void }): 
             </div>
           ))}
         </section>
-        <section className="card span-4">
+        <section className="core-pm-section core-pm-attention">
           <h3>Attention</h3>
           {dto.blocked.length === 0 ? (
             <p className="muted">No blocked modules.</p>
@@ -140,7 +154,7 @@ export function Dashboard({ onUnauthorized }: { onUnauthorized?: () => void }): 
             dto.review_queue.map((x) => <p key={x}>{x}</p>)
           )}
         </section>
-        <section className="card span-8" data-testid="timeline">
+        <section className="core-pm-section core-pm-timeline" data-testid="timeline">
           <h3>Timeline</h3>
           {dto.timeline.length === 0 ? (
             <p className="muted">No events yet.</p>

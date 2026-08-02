@@ -33,4 +33,22 @@ describe("Global navigation", () => {
     expect(navigation).not.toHaveTextContent("Computers");
     expect(navigation).toHaveTextContent("Admin");
   });
+
+  it("dismisses the user menu with Escape", async () => {
+    const interaction = userEvent.setup();
+    render(
+      <AuthenticatedHeaderActions
+        user={user}
+        onOpenUsage={vi.fn()}
+        onOpenAccount={vi.fn()}
+        onOpenAdmin={vi.fn()}
+        onSignOut={vi.fn()}
+      />,
+    );
+
+    await interaction.click(screen.getByRole("button", { name: "Device Owner" }));
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    await interaction.keyboard("{Escape}");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
 });

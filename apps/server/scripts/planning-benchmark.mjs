@@ -36,11 +36,17 @@ const BASELINE = {
   // Throughput is constant 53-107 tok/s across types: latency is a linear
   // function of output tokens, so an output-token reduction is the only lever.
   throughput_tok_per_sec: [53, 107],
-  // Worst observed plan inflation: plan_review_55bef2af, one revision round.
+  // plan_review_55bef2af. NOTE: these figures are the plan after TWO rounds
+  // (round_exchanges length 2), not one. The measured one-round result on this
+  // same input was 3,221 tok / 3 modules (2.62x / 1.50x) -- see roundOne below.
+  // Comparing a one-round measurement against the two-round figure manufactures
+  // a ~40% improvement that does not exist.
   inflation: {
     review: "plan_review_55",
     seedTokens: 1229,
     seedModules: 2,
+    rounds: 2,
+    roundOne: { revisedTokens: 3221, revisedModules: 3, tokenGrowth: 2.62, moduleGrowth: 1.5 },
     revisedTokens: 5565,
     revisedModules: 4,
   },

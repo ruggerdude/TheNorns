@@ -264,9 +264,10 @@ describe("conversation QC card", () => {
 
     expect(screen.getByText("Paused in")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Round 1 of 3" })).toBeInTheDocument();
-    expect(
-      within(screen.getByTestId("conversation-qc-gate-card")).getByText("Round 1 of 3"),
-    ).toBeInTheDocument();
+    const gate = screen.getByTestId("conversation-qc-gate-card");
+    expect(within(gate).getByText("Round 1 of 3")).toBeInTheDocument();
+    const decisionLayout = gate.closest(".conversation-qc-decision-layout");
+    expect(decisionLayout).toContainElement(screen.getByRole("region", { name: "Decision brief" }));
   });
 
   it("presents a waived review as skipped instead of as a completed QC round", () => {
@@ -1214,6 +1215,9 @@ describe("approval-card evidence", () => {
     );
 
     const decision = screen.getByRole("region", { name: "Human plan decision" });
+    expect(decision.closest(".conversation-qc-decision-layout")).toContainElement(
+      screen.getByRole("region", { name: "Decision brief" }),
+    );
     expect(
       within(decision).getByText(/This review was human-steered at round 2/i),
     ).toBeInTheDocument();

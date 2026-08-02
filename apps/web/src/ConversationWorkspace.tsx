@@ -127,6 +127,7 @@ import {
 import { type ExecutionModelCapability, getExecutionModelCapabilities } from "./phaseTabApi";
 import { Alert, Badge, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 import "./ConversationWorkspace.css";
+import "./ConversationQcCard.css";
 
 type ArtifactData = {
   artifact_id: string;

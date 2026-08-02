@@ -34,6 +34,7 @@ import {
 } from "./projectSourceRequest";
 import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 import { useSingleFlightPolling } from "./useSingleFlightPolling";
+import "./CoreSurfaces.css";
 
 export interface ProjectSummary {
   id: string;
@@ -1541,119 +1542,92 @@ export function Projects({
           />
         ) : null}
       </header>
-      <main className="page-container project-dashboard" hidden={dialog}>
+      <main className="page-container project-dashboard core-portfolio-page" hidden={dialog}>
         {error ? <Alert testId="projects-error">{error}</Alert> : null}
-        {/* DESIGN R2: one true page title — largest text on the page — with a
-            thin gold accent rule. Project creation now lives in the shared
-            application rail, where it remains available from every page. */}
-        <header className="page-header portfolio-page-header">
+        <header className="page-header portfolio-page-header core-portfolio-header">
           <div>
+            <div className="eyebrow">Workspace overview</div>
             <h1>Portfolio</h1>
-            <span
-              aria-hidden="true"
-              style={{
-                display: "block",
-                width: "48px",
-                height: "3px",
-                borderRadius: "999px",
-                background: "var(--gold)",
-                marginTop: "var(--space-2)",
-              }}
-            />
+            <p>Monitor active work, resolve exceptions, and open any project from one view.</p>
           </div>
         </header>
-        <section className="focus-panel portfolio-pulse-panel" aria-label="Portfolio summary">
-          <div className="portfolio-summary-head">
+        <section
+          className="core-portfolio-status"
+          aria-labelledby="attention-heading"
+          aria-label="Portfolio summary"
+        >
+          <div className="core-portfolio-status-header">
             <div>
-              <div className="eyebrow">Portfolio summary</div>
-              <strong>
+              <div className="core-status-title-row">
+                <h2 id="attention-heading">Status</h2>
+                <Badge
+                  tone={
+                    portfolioState === "Needs attention"
+                      ? "danger"
+                      : portfolioState === "Work in progress"
+                        ? "success"
+                        : portfolioState === "Status unavailable"
+                          ? "warn"
+                          : "info"
+                  }
+                >
+                  {portfolioState}
+                </Badge>
+              </div>
+              <p>
                 {!hasStatusData
                   ? "Current status is unavailable"
-                  : activeAgents > 0
-                    ? "Work is moving"
-                    : "Ready for the next project"}
-              </strong>
+                  : actionableAttention.length > 0
+                    ? `${actionableAttention.length} item${actionableAttention.length === 1 ? "" : "s"} need review`
+                    : activeAgents > 0
+                      ? "Work is moving without intervention"
+                      : "Ready for the next project"}
+              </p>
             </div>
-            <Badge
-              tone={
-                portfolioState === "Needs attention"
-                  ? "danger"
-                  : portfolioState === "Work in progress"
-                    ? "success"
-                    : portfolioState === "Status unavailable"
-                      ? "warn"
-                      : "info"
-              }
+            <p
+              className="core-refresh-status"
+              data-testid="portfolio-refresh-status"
+              aria-live="polite"
             >
-              {portfolioState}
-            </Badge>
+              {attentionPolling.error || resumePolling.error || resumePollIssue
+                ? `Refresh issue · showing last known data${
+                    attentionPolling.lastSuccessAt
+                      ? ` from ${attentionPolling.lastSuccessAt.toLocaleTimeString()}`
+                      : ""
+                  }.`
+                : attentionPolling.lastSuccessAt
+                  ? `Updated ${attentionPolling.lastSuccessAt.toLocaleTimeString([], {
+                      hour: "numeric",
+                      minute: "2-digit",
+                    })}`
+                  : "Refreshing status…"}
+            </p>
           </div>
-          <div className="portfolio-summary-stats">
+
+          <div className="core-portfolio-metrics" aria-label="Portfolio attention summary">
             <div>
+              <span>Projects</span>
               <strong>{projects?.length ?? "—"}</strong>
-              <span>Total projects</span>
             </div>
             <div>
-              <strong>{activeAgents}</strong>
               <span>Active runs</span>
+              <strong>{attention?.counts.active_runs ?? activeAgents}</strong>
             </div>
-            <div>
-              <strong>{blockedProjects}</strong>
-              <span>Blocked</span>
+            <div className={(attention?.counts.decisions ?? 0) > 0 ? "is-warning" : ""}>
+              <span>Decisions</span>
+              <strong>{attention?.counts.decisions ?? 0}</strong>
+            </div>
+            <div
+              className={(attention?.counts.blockers ?? blockedProjects) > 0 ? "is-critical" : ""}
+            >
+              <span>Blockers</span>
+              <strong>{attention?.counts.blockers ?? blockedProjects}</strong>
             </div>
           </div>
-          {attentionPolling.error || resumePolling.error || resumePollIssue ? (
-            <p className="muted" data-testid="portfolio-refresh-status" aria-live="polite">
-              Refresh issue · showing last known data
-              {attentionPolling.lastSuccessAt
-                ? ` from ${attentionPolling.lastSuccessAt.toLocaleTimeString()}`
-                : ""}
-              .
-            </p>
-          ) : (
-            <p className="muted" data-testid="portfolio-refresh-status" aria-live="polite">
-              {attentionPolling.lastSuccessAt
-                ? `Last refreshed ${attentionPolling.lastSuccessAt.toLocaleTimeString()}`
-                : "Refreshing status…"}
-            </p>
-          )}
-        </section>
-        {attention ? (
-          <section className="attention-center" aria-labelledby="attention-heading">
-            <div className="section-head">
-              <h2 id="attention-heading">Status</h2>
-              <span className="muted" aria-live="polite">
-                {attentionPolling.error ? "Refresh failed · data from " : "Updated "}
-                {new Intl.DateTimeFormat(undefined, {
-                  hour: "numeric",
-                  minute: "2-digit",
-                }).format(new Date(attention.generated_at))}
-              </span>
-            </div>
-            <div className="attention-summary" aria-label="Portfolio attention summary">
-              <div className={attention.counts.critical ? "is-critical" : ""}>
-                <strong>{attention.counts.critical}</strong>
-                <span>Critical</span>
-              </div>
-              <div>
-                <strong>{attention.counts.decisions}</strong>
-                <span>Decisions</span>
-              </div>
-              <div>
-                <strong>{attention.counts.approvals}</strong>
-                <span>Approvals</span>
-              </div>
-              <div>
-                <strong>{attention.counts.blockers}</strong>
-                <span>Blockers</span>
-              </div>
-              <div>
-                <strong>{attention.counts.active_runs}</strong>
-                <span>Active runs</span>
-              </div>
-            </div>
-            {attention.items.length ? (
-              <div className="attention-list" data-testid="attention-list">
+
+          {attention ? (
+            attention.items.length ? (
+              <div className="attention-list core-attention-list" data-testid="attention-list">
                 {attention.items.map((item) => (
                   <article className={`attention-item severity-${item.severity}`} key={item.key}>
                     <div className="attention-item-main">
@@ -1759,21 +1733,17 @@ export function Projects({
                 <strong>No strategic intervention is waiting.</strong>
                 <span>Active work will continue to update here.</span>
               </div>
-            )}
-            {/* Portfolio-health rows merged into project cards below */}
-          </section>
-        ) : (
-          <section className="attention-center" aria-labelledby="attention-heading">
-            <div className="section-head">
-              <h2 id="attention-heading">Status</h2>
-              <span className="muted">Unavailable</span>
-            </div>
+            )
+          ) : (
             <Alert>Portfolio status is unavailable. Refresh to try again.</Alert>
-          </section>
-        )}
-        <div className="project-toolbar">
-          <h2>Projects</h2>
-          <span className="project-count">{visible?.length ?? 0} shown</span>
+          )}
+        </section>
+        <div className="project-toolbar core-project-toolbar">
+          <div>
+            <h2>Projects</h2>
+            <p>Open a project to continue planning, review decisions, or follow active work.</p>
+          </div>
+          <span className="project-count">{visible?.length ?? 0}</span>
         </div>
         {projects === null ? (
           <Spinner label="Loading projects…" />
@@ -1822,7 +1792,7 @@ export function Projects({
               const tasksTotal = health?.total_tasks ?? 0;
               return (
                 <article
-                  className={`card proj-row s-${status}`}
+                  className={`card proj-row core-project-row s-${status}`}
                   key={project.id}
                   data-testid="proj-row"
                 >
@@ -1837,48 +1807,76 @@ export function Projects({
                   >
                     <span className="sr-only">Enter {project.name}</span>
                   </a>
-                  <div className="pr-main">
-                    <div className="pr-head">
-                      <span className="status-dot" />
-                      <div className="pr-titles">
-                        <h3 className="pr-title" id={`project-title-${project.id}`}>
-                          {project.name}
-                        </h3>
-                        {phaseName ? <small className="pr-phase">{phaseName}</small> : null}
-                      </div>
-                      <Badge
-                        tone={
-                          status === "red"
-                            ? "danger"
-                            : status === "green"
-                              ? "success"
-                              : status === "blue"
-                                ? "info"
-                                : "default"
-                        }
-                      >
-                        {statusLabel}
-                      </Badge>
-                      <span className="chip model-c" title="Coordinator">
-                        {project.pm_model
-                          ? (pmModelOption(project.pm_model)?.label ?? project.pm_model)
-                          : `${project.pm_provider} default`}
-                      </span>
-                      <span className="chip model-g" title="Reviewer">
-                        {pmModelOption(DEFAULT_PM_MODEL[project.reviewer_provider])?.label ??
-                          project.reviewer_provider}
-                      </span>
+                  <div className="core-project-identity">
+                    <div className="core-project-title-row">
+                      <span className="status-dot" aria-hidden="true" />
+                      <h3 className="pr-title" id={`project-title-${project.id}`}>
+                        {project.name}
+                      </h3>
+                    </div>
+                    {!isFillerDescription(project.description) ? (
+                      <p>{project.description}</p>
+                    ) : phaseName ? (
+                      <p>{phaseName}</p>
+                    ) : (
+                      <p>{projectSourceLabel(project)}</p>
+                    )}
+                    <div className="core-project-meta">
+                      <span>{projectSourceLabel(project)}</span>
+                      {phaseName ? <span>{phaseName}</span> : null}
                     </div>
                   </div>
-                  <div className="pr-side pr-stats-row" aria-label={`${project.name} stats`}>
-                    <span>
-                      {tasksDone}/{tasksTotal} tasks
-                    </span>
-                    <span>{resume?.agents_active ?? 0} runs</span>
-                    <span>{resume ? `${resume.overall_percent_complete}%` : "—"}</span>
+                  <div className="core-project-state">
+                    <Badge
+                      tone={
+                        status === "red"
+                          ? "danger"
+                          : status === "green"
+                            ? "success"
+                            : status === "blue"
+                              ? "info"
+                              : "default"
+                      }
+                    >
+                      {statusLabel}
+                    </Badge>
                     {(resume?.decisions_waiting ?? 0) > 0 ? (
-                      <span className="warn">{resume?.decisions_waiting} decisions</span>
+                      <span className="core-project-warning">
+                        {resume?.decisions_waiting} decision
+                        {resume?.decisions_waiting === 1 ? "" : "s"}
+                      </span>
                     ) : null}
+                  </div>
+                  <div className="core-project-progress" aria-label={`${project.name} stats`}>
+                    <div>
+                      <span>
+                        {tasksDone}/{tasksTotal} tasks
+                      </span>
+                      <span>{resume?.agents_active ?? 0} runs</span>
+                      <strong>{resume ? `${resume.overall_percent_complete}%` : "—"}</strong>
+                    </div>
+                    <div
+                      className="core-project-progress-track"
+                      role="progressbar"
+                      aria-label={`${project.name} completion`}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={resume?.overall_percent_complete ?? 0}
+                      tabIndex={0}
+                    >
+                      <span style={{ width: `${resume?.overall_percent_complete ?? 0}%` }} />
+                    </div>
+                  </div>
+                  <div className="core-project-agents" aria-label={`${project.name} models`}>
+                    <span title="Coordinator">
+                      {project.pm_model
+                        ? (pmModelOption(project.pm_model)?.label ?? project.pm_model)
+                        : `${project.pm_provider} default`}
+                    </span>
+                    <span title="Reviewer">
+                      {pmModelOption(DEFAULT_PM_MODEL[project.reviewer_provider])?.label ??
+                        project.reviewer_provider}
+                    </span>
                   </div>
                 </article>
               );

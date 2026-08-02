@@ -187,7 +187,7 @@ describe("Phase 6 project operations dashboard", () => {
       expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
     }
     expect(screen.getByText("Visual collection failed")).toBeInTheDocument();
-    expect(screen.getByText("$12.50")).toBeInTheDocument();
+    expect(screen.getAllByText("$12.50")).toHaveLength(2);
     expect(screen.getByText("$42.00")).toBeInTheDocument();
     expect(screen.getByText("No deployment observations are recorded.")).toBeInTheDocument();
     expect(screen.getByText("No verification results are recorded.")).toBeInTheDocument();

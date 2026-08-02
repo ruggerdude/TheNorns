@@ -138,16 +138,61 @@ export function ProjectOperationsDashboard({
       data-testid="project-operations-dashboard"
     >
       <header className="operations-header">
-        <div>
+        <div className="operations-header-copy">
           <span className="eyebrow">Authoritative project read model</span>
           <h2 id="project-operations-title">Project operations</h2>
-          <p>Generated {formatTime(dashboard.generated_at)}</p>
+          <p>Live execution, decisions, delivery evidence, and spend in one operational view.</p>
         </div>
-        <Button className="btn-small" disabled={loading} onClick={() => void load()}>
-          {loading ? "Refreshing…" : "Refresh"}
-        </Button>
+        <div className="operations-header-actions">
+          <span>Updated {formatTime(dashboard.generated_at)}</span>
+          <Button className="btn-small" disabled={loading} onClick={() => void load()}>
+            {loading ? "Refreshing…" : "Refresh"}
+          </Button>
+        </div>
       </header>
       {error ? <Alert testId="project-operations-refresh-error">{error}</Alert> : null}
+
+      <dl className="operations-summary" aria-label="Project operations summary">
+        <div>
+          <dt>Active work</dt>
+          <dd>
+            {dashboard.active_work.availability === "available"
+              ? dashboard.active_work.data.length
+              : "—"}
+          </dd>
+        </div>
+        <div
+          className={
+            dashboard.needs_attention.availability === "available" &&
+            dashboard.needs_attention.data.length > 0
+              ? "needs-attention"
+              : ""
+          }
+        >
+          <dt>Needs attention</dt>
+          <dd>
+            {dashboard.needs_attention.availability === "available"
+              ? dashboard.needs_attention.data.length
+              : "—"}
+          </dd>
+        </div>
+        <div>
+          <dt>Open decisions</dt>
+          <dd>
+            {dashboard.open_decisions.availability === "available"
+              ? dashboard.open_decisions.data.length
+              : "—"}
+          </dd>
+        </div>
+        <div>
+          <dt>Current spend</dt>
+          <dd>
+            {dashboard.budget.availability === "available"
+              ? formatMoney(dashboard.budget.data.current_spend_usd)
+              : "—"}
+          </dd>
+        </div>
+      </dl>
 
       <div className="operations-grid">
         {dashboard.active_work.availability === "unavailable" ? (

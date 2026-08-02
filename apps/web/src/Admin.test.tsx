@@ -113,11 +113,11 @@ describe("Admin panel", () => {
     render(<Admin onClose={vi.fn()} onUnauthorized={vi.fn()} />);
     await screen.findByTestId("user-list");
 
-    const addEmailField = screen.getAllByPlaceholderText("teammate@example.com")[0];
-    if (!addEmailField) throw new Error("add-user email field not found");
+    await user.click(screen.getByRole("button", { name: "Create manually" }));
+    const addEmailField = screen.getByPlaceholderText("teammate@example.com");
     await user.type(addEmailField, "new@x.com");
     await user.type(screen.getByPlaceholderText("At least 8 characters"), "password123");
-    await user.click(screen.getByRole("button", { name: /^add user$/i }));
+    await user.click(screen.getByRole("button", { name: /^create member$/i }));
 
     await waitFor(() => expect(screen.getByTestId("user-list")).toHaveTextContent("new@x.com"));
   });
@@ -139,8 +139,8 @@ describe("Admin panel", () => {
     render(<Admin onClose={vi.fn()} onUnauthorized={vi.fn()} />);
     await screen.findByTestId("user-list");
 
-    const inviteEmailField = screen.getAllByPlaceholderText("teammate@example.com")[1];
-    if (!inviteEmailField) throw new Error("invite email field not found");
+    await user.click(screen.getByRole("button", { name: "Invite people" }));
+    const inviteEmailField = screen.getByPlaceholderText("teammate@example.com");
     await user.type(inviteEmailField, "invitee@x.com");
     await user.click(screen.getByRole("button", { name: /send invite/i }));
 

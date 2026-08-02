@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { SettingsTab } from "./Account";
 import { PortfolioMenu } from "./PortfolioMenu";
 import type { ProjectSummary } from "./Projects";
@@ -16,10 +16,28 @@ export function HeaderUserMenu({
   onSignOut: () => void;
 }): React.ReactElement {
   const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
   const label = user.name ?? user.email;
 
+  useEffect(() => {
+    if (!open) return;
+    const closeMenu = (event: PointerEvent | KeyboardEvent) => {
+      if (event instanceof KeyboardEvent) {
+        if (event.key === "Escape") setOpen(false);
+        return;
+      }
+      if (!menuRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    window.addEventListener("keydown", closeMenu);
+    window.addEventListener("pointerdown", closeMenu);
+    return () => {
+      window.removeEventListener("keydown", closeMenu);
+      window.removeEventListener("pointerdown", closeMenu);
+    };
+  }, [open]);
+
   return (
-    <div className="header-user-menu">
+    <div className="header-user-menu" ref={menuRef}>
       <button
         type="button"
         className="user-chip user-menu-trigger"

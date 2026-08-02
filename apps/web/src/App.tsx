@@ -1667,7 +1667,7 @@ function ProjectGraph({
             <div
               style={{
                 color: theme === "light" ? "#65717d" : "#9ba4ae",
-                fontSize: 10,
+                fontSize: 12,
                 marginTop: 3,
               }}
             >
@@ -1678,7 +1678,7 @@ function ProjectGraph({
                 style={{
                   marginTop: 7,
                   color: theme === "light" ? "#247147" : "#9edbb8",
-                  fontSize: 10,
+                  fontSize: 12,
                 }}
               >
                 {node.assignment.model} · {node.assignment.worker_count}w
@@ -1694,7 +1694,7 @@ function ProjectGraph({
                 style={{
                   color: theme === "light" ? "#8a5715" : "#ffcf91",
                   marginTop: 7,
-                  fontSize: 10,
+                  fontSize: 12,
                 }}
               >
                 ○ Needs allocation
