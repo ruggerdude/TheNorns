@@ -718,14 +718,13 @@ export function Projects({
 
   useEffect(() => void refresh(), [refresh]);
 
-  // FRONT DOOR P1: fetch each project's resume (phase list + progress) so the
-  // dashboard rows can render per-phase lines, color coding, and aggregate
-  // facts. Best-effort per project — one project's failure never blocks the
-  // others (Promise.allSettled), and a project without a plan yet (404) just
-  // renders with no phase lines, matching the "Draft" card in the mockup.
+  // FRONT DOOR P1: hydrate each project's detailed resume once when the
+  // portfolio loads. Ongoing portfolio status comes from the single aggregate
+  // /attention poll below; repeating this fan-out used to issue one expensive
+  // resume request per project every 15 seconds.
   const resumePolling = useSingleFlightPolling({
     enabled: Boolean(projects?.length),
-    intervalMs: 15_000,
+    intervalMs: null,
     maxBackoffMs: 120_000,
     resourceKey: projects?.map((project) => project.id).join("|") ?? "no-projects",
     load: async (signal) => {
@@ -1909,12 +1908,21 @@ export function Projects({
               );
               const failedRun = projectAttention.find((item) => item.kind === "failed_run");
               const stalledRun = projectAttention.find((item) => item.kind === "stalled_run");
+              const decisionsWaiting =
+                attention !== null
+                  ? projectAttention.filter((item) => item.kind === "decision").length
+                  : (resume?.decisions_waiting ?? 0);
               const status: "red" | "green" | "blue" | "neutral" =
-                (resume?.decisions_waiting ?? 0) > 0 || blockedPhase || projectAttention.length > 0
+                decisionsWaiting > 0 ||
+                health?.health === "blocked" ||
+                health?.health === "attention" ||
+                blockedPhase ||
+                projectAttention.length > 0
                   ? "red"
-                  : activePhase
+                  : (health?.active_runs ?? 0) > 0 || activePhase
                     ? "green"
-                    : project.status === "planned" && (resume?.phases.length ?? 0) > 0
+                    : project.status === "planned" &&
+                        ((health?.total_tasks ?? 0) > 0 || (resume?.phases.length ?? 0) > 0)
                       ? "blue"
                       : "neutral";
               const statusLabel =
@@ -1930,8 +1938,20 @@ export function Projects({
                       ? "Plan ready"
                       : "Draft";
               const phaseName = health?.current_phase ?? activePhase?.objective_summary ?? null;
-              const tasksDone = health?.completed_tasks ?? 0;
-              const tasksTotal = health?.total_tasks ?? 0;
+              const tasksDone =
+                health?.completed_tasks ??
+                resume?.phases.reduce((sum, phase) => sum + phase.tasks_completed, 0) ??
+                0;
+              const tasksTotal =
+                health?.total_tasks ??
+                resume?.phases.reduce((sum, phase) => sum + phase.tasks_total, 0) ??
+                0;
+              const percentComplete = health
+                ? tasksTotal > 0
+                  ? Math.round((tasksDone / tasksTotal) * 100)
+                  : 0
+                : resume?.overall_percent_complete;
+              const activeRuns = health?.active_runs ?? resume?.agents_active ?? 0;
               return (
                 <a
                   className={`card proj-row core-project-row s-${status}`}
@@ -1977,10 +1997,10 @@ export function Projects({
                     >
                       {statusLabel}
                     </Badge>
-                    {(resume?.decisions_waiting ?? 0) > 0 ? (
+                    {decisionsWaiting > 0 ? (
                       <span className="core-project-warning">
-                        {resume?.decisions_waiting} decision
-                        {resume?.decisions_waiting === 1 ? "" : "s"}
+                        {decisionsWaiting} decision
+                        {decisionsWaiting === 1 ? "" : "s"}
                       </span>
                     ) : null}
                   </div>
@@ -1989,8 +2009,8 @@ export function Projects({
                       <span>
                         {tasksDone}/{tasksTotal} tasks
                       </span>
-                      <span>{resume?.agents_active ?? 0} runs</span>
-                      <strong>{resume ? `${resume.overall_percent_complete}%` : "—"}</strong>
+                      <span>{activeRuns} runs</span>
+                      <strong>{percentComplete === undefined ? "—" : `${percentComplete}%`}</strong>
                     </div>
                     <div
                       className="core-project-progress-track"
@@ -1998,10 +2018,10 @@ export function Projects({
                       aria-label={`${project.name} completion`}
                       aria-valuemin={0}
                       aria-valuemax={100}
-                      aria-valuenow={resume?.overall_percent_complete ?? 0}
+                      aria-valuenow={percentComplete ?? 0}
                       tabIndex={0}
                     >
-                      <span style={{ width: `${resume?.overall_percent_complete ?? 0}%` }} />
+                      <span style={{ width: `${percentComplete ?? 0}%` }} />
                     </div>
                   </div>
                   <div className="core-project-agents" aria-label={`${project.name} models`}>

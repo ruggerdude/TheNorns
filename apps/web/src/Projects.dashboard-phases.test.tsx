@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type ProjectSummary, Projects } from "./Projects";
@@ -71,13 +71,43 @@ describe("project cards on the Portfolio", () => {
   let mock: MockFetch;
   const onOpenProject = vi.fn<(project: ProjectSummary) => void>();
 
-  afterEach(() => mock.restore());
+  afterEach(() => {
+    vi.useRealTimers();
+    mock.restore();
+  });
 
   function setup() {
     onOpenProject.mockReset();
     mock = new MockFetch();
     mock.get("/api/projects", { body: [project] });
-    mock.get("/api/v2/attention", { status: 404, body: {} });
+    mock.get("/api/v2/attention", {
+      body: {
+        generated_at: "2026-07-27T16:00:00.000Z",
+        counts: {
+          critical: 0,
+          high: 1,
+          decisions: 1,
+          approvals: 0,
+          blockers: 0,
+          active_projects: 1,
+          active_runs: 2,
+        },
+        items: [],
+        projects: [
+          {
+            id: project.id,
+            name: project.name,
+            health: "attention",
+            current_phase: "Schema & ingest",
+            completed_tasks: 8,
+            total_tasks: 17,
+            active_runs: 2,
+            attention_count: 1,
+            next_action: "Review project status",
+          },
+        ],
+      },
+    });
     mock.get(`/api/v2/projects/${project.id}/resume`, { body: resumeBody() });
     mock.install();
     render(
@@ -110,5 +140,26 @@ describe("project cards on the Portfolio", () => {
     await userEvent.click(await screen.findByRole("link", { name: `Enter ${project.name}` }));
     expect(onOpenProject).toHaveBeenCalledWith(project);
     expect(onOpenProject).toHaveBeenCalledTimes(1);
+  });
+
+  it("hydrates detailed resumes once and uses aggregate attention for recurring status", async () => {
+    vi.useFakeTimers();
+    setup();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(mock.calls.filter((call) => call.url === "/api/v2/attention")).toHaveLength(1);
+    expect(
+      mock.calls.filter((call) => call.url === `/api/v2/projects/${project.id}/resume`),
+    ).toHaveLength(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(30_001);
+    });
+
+    expect(mock.calls.filter((call) => call.url === "/api/v2/attention")).toHaveLength(4);
+    expect(
+      mock.calls.filter((call) => call.url === `/api/v2/projects/${project.id}/resume`),
+    ).toHaveLength(1);
   });
 });
