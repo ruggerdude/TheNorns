@@ -76,6 +76,8 @@ import {
 import { createPortal } from "react-dom";
 import remarkGfm from "remark-gfm";
 import { ArtifactImage } from "./ArtifactImage";
+import { type AttachmentDescriptor, AttachmentInput } from "./AttachmentInput";
+import { BraidMark } from "./BraidMark";
 import { ConversationActionCard } from "./ConversationActionCard";
 import { ProjectRunStopControl, executionTargetHeaderLabel } from "./ConversationExecutionTarget";
 import { ConversationPlanCard } from "./ConversationPlanCard";
@@ -94,6 +96,7 @@ import {
   asAiProvider,
   defaultReviewerProviderFor,
 } from "./aiProviders";
+import { attachmentTypeLabel, resolvedAttachmentMime } from "./attachmentFiles";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 import {
   type ConversationDetail,
@@ -363,37 +366,6 @@ function attachmentIdFromUrl(url: string): string | null {
 }
 
 const CONVERSATION_ATTACHMENT_ACCEPT = "*";
-
-const ATTACHMENT_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  webp: "image/webp",
-  gif: "image/gif",
-  txt: "text/plain",
-  md: "text/markdown",
-  markdown: "text/markdown",
-  json: "application/json",
-  csv: "text/csv",
-  pdf: "application/pdf",
-};
-
-function resolvedAttachmentMime(file: File): string {
-  const declared = file.type.trim().toLocaleLowerCase();
-  if (declared && declared !== "application/octet-stream") return declared;
-  const extension = file.name.split(".").pop()?.toLocaleLowerCase();
-  return (extension ? ATTACHMENT_MIME_BY_EXTENSION[extension] : null) ?? "application/octet-stream";
-}
-
-function attachmentTypeLabel(mimeType: string): string {
-  if (mimeType.startsWith("image/")) return "Image";
-  if (mimeType === "application/pdf") return "PDF";
-  if (mimeType === "application/json") return "JSON";
-  if (mimeType === "text/markdown") return "Markdown";
-  if (mimeType === "text/csv") return "CSV";
-  if (mimeType.startsWith("text/")) return "Text file";
-  return "File";
-}
 
 function toSubmissionParts(message: NornsUIMessage): V2WorkMessagePartT[] {
   return message.parts.flatMap((part): V2WorkMessagePartT[] => {
@@ -2516,6 +2488,14 @@ function UserMessage(): React.ReactElement {
 
 function AssistantMessage(): React.ReactElement {
   const presentation = useCurrentActorPresentation("assistant");
+  const thinking = useMessage(
+    (message) =>
+      message.status?.type === "running" &&
+      !message.content.some((part) => {
+        if (part.type === "text" || part.type === "reasoning") return part.text.trim().length > 0;
+        return true;
+      }),
+  );
   return (
     <MessagePrimitive.Root
       className={`conversation-message is-assistant actor-${presentation.className}`}
@@ -2524,6 +2504,19 @@ function AssistantMessage(): React.ReactElement {
         {presentation.label}
       </div>
       <div className="conversation-bubble" aria-live="polite">
+        {thinking ? (
+          <output className="conversation-pm-thinking" aria-label="PM is thinking">
+            <BraidMark
+              className="conversation-pm-thinking-weave"
+              width={76}
+              height={28}
+              lead={0}
+              period={32}
+              strokeWidth={3.5}
+            />
+            <span>Weaving the plan…</span>
+          </output>
+        ) : null}
         <MessagePrimitive.Parts
           components={{
             Text: MarkdownText,
@@ -2621,10 +2614,16 @@ function RetryTerminalResponseButton({
 
 function InitialConversationMessage({
   text,
+  projectId,
+  attachments,
   onStarted,
+  onCompleted,
 }: {
   text: string;
+  projectId: string;
+  attachments: AttachmentDescriptor[];
   onStarted: () => void;
+  onCompleted: () => void;
 }): null {
   const chat = useAISDKChat<NornsUIMessage>();
   const started = useRef(false);
@@ -2632,8 +2631,23 @@ function InitialConversationMessage({
     if (!chat || started.current) return;
     started.current = true;
     onStarted();
-    void chat.sendMessage({ text });
-  }, [chat, onStarted, text]);
+    void chat
+      .sendMessage({
+        parts: [
+          { type: "text", text },
+          ...attachments.map((attachment) => ({
+            type: "file" as const,
+            mediaType: attachment.mime,
+            filename: attachment.filename ?? "Attachment",
+            url: `/api/v2/projects/${projectId}/attachments/${encodeURIComponent(attachment.id)}`,
+          })),
+        ],
+      })
+      .then(onCompleted)
+      .catch(() => {
+        // The runtime surfaces the request error in the conversation.
+      });
+  }, [attachments, chat, onCompleted, onStarted, projectId, text]);
   return null;
 }
 
@@ -3339,6 +3353,8 @@ function ConversationThread({
   header,
   detail,
   initialMessage,
+  initialAttachments = [],
+  autoPlanInitialMessage = false,
   onInitialMessageStarted,
   onEditMessage,
   onOpenConversation,
@@ -3356,6 +3372,8 @@ function ConversationThread({
   ) => ReactNode;
   detail: ConversationDetail;
   initialMessage?: string | null;
+  initialAttachments?: AttachmentDescriptor[];
+  autoPlanInitialMessage?: boolean;
   onInitialMessageStarted?: () => void;
   onEditMessage: (sourceMessageId: string, text: string) => Promise<void>;
   onOpenConversation: (conversationId: string) => void;
@@ -4733,7 +4751,12 @@ function ConversationThread({
       {initialMessage ? (
         <InitialConversationMessage
           text={initialMessage}
+          projectId={detail.work_item.project_id}
+          attachments={initialAttachments}
           onStarted={onInitialMessageStarted ?? (() => undefined)}
+          onCompleted={() => {
+            if (autoPlanInitialMessage) void generatePlanProposal(undefined, true);
+          }}
         />
       ) : null}
       <ConversationActionContext.Provider value={actionContext}>
@@ -5174,6 +5197,7 @@ function ConversationThread({
 }
 
 function NewWorkForm({
+  projectId,
   busy,
   defaultPin,
   modelError,
@@ -5181,6 +5205,7 @@ function NewWorkForm({
   initialBrief,
   onCreate,
 }: {
+  projectId: string;
   busy: boolean;
   defaultPin: { provider: PmProviderT; model: PmModelT } | null;
   modelError: string | null;
@@ -5190,19 +5215,27 @@ function NewWorkForm({
     remoteLocation: string | null;
   } | null;
   initialBrief?: string | null;
-  onCreate: (message: string, model: PmModelT, workflow: "phased" | "quick") => Promise<void>;
+  onCreate: (
+    message: string,
+    model: PmModelT,
+    workflow: "phased" | "quick",
+    attachments: AttachmentDescriptor[],
+  ) => Promise<void>;
 }): React.ReactElement {
   const [message, setMessage] = useState(initialBrief ?? "");
   const [model, setModel] = useState<PmModelT | null>(defaultPin?.model ?? null);
   const [workflow, setWorkflow] = useState<"phased" | "quick">("phased");
+  const [attachmentIds, setAttachmentIds] = useState<string[]>([]);
+  const [attachments, setAttachments] = useState<AttachmentDescriptor[]>([]);
+  const [attachmentsUploading, setAttachmentsUploading] = useState(false);
   useEffect(() => {
     if (defaultPin) setModel((current) => current ?? defaultPin.model);
   }, [defaultPin]);
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const cleanMessage = message.trim();
-    if (!cleanMessage || !model) return;
-    void onCreate(cleanMessage, model, workflow);
+    if (!cleanMessage || !model || attachmentsUploading) return;
+    void onCreate(cleanMessage, model, workflow, attachments);
   };
   const buildTarget =
     projectContext?.workspaceLocation ??
@@ -5255,20 +5288,31 @@ function NewWorkForm({
         </label>
       </fieldset>
       <form className="conversation-new-composer" onSubmit={submit}>
-        <TextArea
-          data-testid="conversation-first-message"
-          aria-label="Describe the work"
-          rows={10}
-          value={message}
+        <AttachmentInput
+          variant="composer"
+          label="Describe the work"
+          textAreaTestId="conversation-first-message"
+          textValue={message}
+          onTextChange={setMessage}
+          projectId={projectId}
+          value={attachmentIds}
+          onChange={setAttachmentIds}
+          purpose="objective"
           disabled={busy}
-          placeholder="What should we build, change, or understand?"
-          onChange={(event) => setMessage(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" && !event.shiftKey) {
-              event.preventDefault();
-              event.currentTarget.form?.requestSubmit();
-            }
-          }}
+          submitOnEnter
+          placeholder="Describe what we should build, change, or understand. Add screenshots, PDFs, documents, or any other project files."
+          onUploaded={(attachment) =>
+            setAttachments((current) => [
+              ...current.filter((candidate) => candidate.id !== attachment.id),
+              attachment,
+            ])
+          }
+          onRemoved={(attachmentId) =>
+            setAttachments((current) =>
+              current.filter((attachment) => attachment.id !== attachmentId),
+            )
+          }
+          onUploadingChange={setAttachmentsUploading}
         />
         <div className="conversation-new-composer-actions">
           <div className="conversation-model-select">
@@ -5297,10 +5341,16 @@ function NewWorkForm({
           <Button
             variant="primary"
             type="submit"
-            disabled={busy || !message.trim() || model === null}
+            disabled={busy || attachmentsUploading || !message.trim() || model === null}
             data-testid="conversation-create"
           >
-            {busy ? "Starting…" : workflow === "phased" ? "Start Planning" : "Start Development"}
+            {busy || attachmentsUploading
+              ? attachmentsUploading
+                ? "Uploading…"
+                : "Starting…"
+              : workflow === "phased"
+                ? "Start Planning"
+                : "Start Development"}
           </Button>
         </div>
       </form>
@@ -5372,6 +5422,8 @@ export function ConversationWorkspace({
   const [initialMessage, setInitialMessage] = useState<{
     conversationId: string;
     text: string;
+    attachments: AttachmentDescriptor[];
+    autoPlan: boolean;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [renamingWorkItemId, setRenamingWorkItemId] = useState<string | null>(null);
@@ -5745,7 +5797,12 @@ export function ConversationWorkspace({
           workItemId: parent.work_item.id,
           conversationId: created.conversation.id,
         });
-        setInitialMessage({ conversationId: created.conversation.id, text });
+        setInitialMessage({
+          conversationId: created.conversation.id,
+          text,
+          attachments: [],
+          autoPlan: false,
+        });
         setThreadVersion((version) => version + 1);
         callbacks.current.onConversationSelected?.(created.conversation.id);
         setError(null);
@@ -5757,7 +5814,12 @@ export function ConversationWorkspace({
     [detail, handleUnauthorized, projectId],
   );
 
-  const createWork = async (message: string, model: PmModelT, workflow: "phased" | "quick") => {
+  const createWork = async (
+    message: string,
+    model: PmModelT,
+    workflow: "phased" | "quick",
+    attachments: AttachmentDescriptor[],
+  ) => {
     setCreating(true);
     setError(null);
     try {
@@ -5770,7 +5832,12 @@ export function ConversationWorkspace({
       setNewWorkInitialBrief(null);
       setShowNew(false);
       setConversationListOpen(false);
-      setInitialMessage({ conversationId: created.conversation.id, text: message });
+      setInitialMessage({
+        conversationId: created.conversation.id,
+        text: message,
+        attachments,
+        autoPlan: workflow === "phased",
+      });
       setDetail({
         work_item: created.work_item,
         conversation: created.conversation,
@@ -6137,8 +6204,8 @@ export function ConversationWorkspace({
                   setConversationMenu({
                     workItemId: group.work_item.id,
                     title: group.work_item.title,
-                    x: Math.min(event.clientX, window.innerWidth - 208),
-                    y: Math.min(event.clientY, window.innerHeight - 240),
+                    x: Math.max(8, Math.min(event.clientX, window.innerWidth - 208)),
+                    y: Math.max(8, Math.min(event.clientY, window.innerHeight - 240)),
                   });
                 }}
               >
@@ -6158,8 +6225,8 @@ export function ConversationWorkspace({
                   setConversationMenu({
                     workItemId: group.work_item.id,
                     title: group.work_item.title,
-                    x: Math.min(bounds.right - 184, window.innerWidth - 208),
-                    y: Math.min(bounds.bottom + 4, window.innerHeight - 240),
+                    x: Math.max(8, Math.min(bounds.right - 184, window.innerWidth - 208)),
+                    y: Math.max(8, Math.min(bounds.bottom + 4, window.innerHeight - 240)),
                   });
                 }}
               >
@@ -6588,116 +6655,123 @@ export function ConversationWorkspace({
             <ChatIcon />
           </Button>
         ) : null}
-        {conversationMenu ? (
-          <div
-            className="conversation-context-menu"
-            role="menu"
-            aria-label="Conversation actions"
-            style={{ left: conversationMenu.x, top: conversationMenu.y }}
-          >
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setRenameTitle(conversationMenu.title);
-                setRenamingWorkItemId(conversationMenu.workItemId);
-                setConversationMenu(null);
-              }}
-            >
-              Rename
-            </button>
-            {organizationAvailable && menuOrganization ? (
-              <>
+        {conversationMenu
+          ? createPortal(
+              <div
+                className="conversation-context-menu"
+                role="menu"
+                aria-label="Conversation actions"
+                style={{
+                  left: conversationMenu.x,
+                  top: conversationMenu.y,
+                  maxHeight: `calc(100dvh - ${conversationMenu.y}px - 0.5rem)`,
+                }}
+              >
                 <button
                   type="button"
                   role="menuitem"
-                  disabled={organizationBusyWorkItemId === conversationMenu.workItemId}
-                  onClick={() =>
-                    void changeOrganization(conversationMenu.workItemId, {
-                      pinned: menuOrganization.pinned_at === null,
-                    })
-                  }
+                  onClick={() => {
+                    setRenameTitle(conversationMenu.title);
+                    setRenamingWorkItemId(conversationMenu.workItemId);
+                    setConversationMenu(null);
+                  }}
                 >
-                  {menuOrganization.pinned_at ? "Unpin" : "Pin"}
+                  Rename title
                 </button>
-                <div className="conversation-context-menu-label">Move to folder</div>
-                {menuOrganization.folder_id ? (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    disabled={organizationBusyWorkItemId === conversationMenu.workItemId}
-                    onClick={() =>
-                      void changeOrganization(conversationMenu.workItemId, { folder_id: null })
-                    }
-                  >
-                    Remove from folder
-                  </button>
+                {organizationAvailable && menuOrganization ? (
+                  <>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      disabled={organizationBusyWorkItemId === conversationMenu.workItemId}
+                      onClick={() =>
+                        void changeOrganization(conversationMenu.workItemId, {
+                          pinned: menuOrganization.pinned_at === null,
+                        })
+                      }
+                    >
+                      {menuOrganization.pinned_at ? "Unpin" : "Pin"}
+                    </button>
+                    <div className="conversation-context-menu-label">Move to folder</div>
+                    {menuOrganization.folder_id ? (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={organizationBusyWorkItemId === conversationMenu.workItemId}
+                        onClick={() =>
+                          void changeOrganization(conversationMenu.workItemId, { folder_id: null })
+                        }
+                      >
+                        Remove from folder
+                      </button>
+                    ) : null}
+                    {navigation?.folders.map((folder) => (
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={
+                          organizationBusyWorkItemId === conversationMenu.workItemId ||
+                          menuOrganization.folder_id === folder.id
+                        }
+                        key={`move:${conversationMenu.workItemId}:${folder.id}`}
+                        onClick={() =>
+                          void changeOrganization(conversationMenu.workItemId, {
+                            folder_id: folder.id,
+                          })
+                        }
+                      >
+                        {folder.name}
+                      </button>
+                    ))}
+                  </>
                 ) : null}
-                {navigation?.folders.map((folder) => (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    disabled={
-                      organizationBusyWorkItemId === conversationMenu.workItemId ||
-                      menuOrganization.folder_id === folder.id
-                    }
-                    key={`move:${conversationMenu.workItemId}:${folder.id}`}
-                    onClick={() =>
-                      void changeOrganization(conversationMenu.workItemId, {
-                        folder_id: folder.id,
-                      })
-                    }
-                  >
-                    {folder.name}
-                  </button>
-                ))}
-              </>
-            ) : null}
-            <div className="conversation-context-menu-danger">
-              {conversationMenu.confirmDelete ? (
-                <>
-                  <span>Delete this chat? Its history will be archived.</span>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="is-danger"
-                    disabled={deleteWorkItemId === conversationMenu.workItemId}
-                    onClick={() => void deleteWork(conversationMenu.workItemId)}
-                  >
-                    {deleteWorkItemId === conversationMenu.workItemId
-                      ? "Deleting…"
-                      : "Confirm delete"}
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    disabled={deleteWorkItemId === conversationMenu.workItemId}
-                    onClick={() =>
-                      setConversationMenu((current) =>
-                        current ? { ...current, confirmDelete: false } : current,
-                      )
-                    }
-                  >
-                    Cancel
-                  </button>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  role="menuitem"
-                  className="is-danger"
-                  onClick={() =>
-                    setConversationMenu((current) =>
-                      current ? { ...current, confirmDelete: true } : current,
-                    )
-                  }
-                >
-                  Delete chat
-                </button>
-              )}
-            </div>
-          </div>
-        ) : null}
+                <div className="conversation-context-menu-danger">
+                  {conversationMenu.confirmDelete ? (
+                    <>
+                      <span>Delete this chat? Its history will be archived.</span>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        className="is-danger"
+                        disabled={deleteWorkItemId === conversationMenu.workItemId}
+                        onClick={() => void deleteWork(conversationMenu.workItemId)}
+                      >
+                        {deleteWorkItemId === conversationMenu.workItemId
+                          ? "Deleting…"
+                          : "Confirm delete"}
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={deleteWorkItemId === conversationMenu.workItemId}
+                        onClick={() =>
+                          setConversationMenu((current) =>
+                            current ? { ...current, confirmDelete: false } : current,
+                          )
+                        }
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      role="menuitem"
+                      className="is-danger"
+                      onClick={() =>
+                        setConversationMenu((current) =>
+                          current ? { ...current, confirmDelete: true } : current,
+                        )
+                      }
+                    >
+                      Delete chat
+                    </button>
+                  )}
+                </div>
+              </div>,
+              document.body,
+            )
+          : null}
       </aside>
 
       <main className="conversation-main">
@@ -6709,6 +6783,7 @@ export function ConversationWorkspace({
         {showNew ? conversationHeader() : null}
         {showNew ? (
           <NewWorkForm
+            projectId={projectId}
             busy={creating}
             defaultPin={projectPin}
             modelError={projectPinError}
@@ -6727,6 +6802,16 @@ export function ConversationWorkspace({
                 initialMessage?.conversationId === detail.conversation.id
                   ? initialMessage.text
                   : null
+              }
+              initialAttachments={
+                initialMessage?.conversationId === detail.conversation.id
+                  ? initialMessage.attachments
+                  : []
+              }
+              autoPlanInitialMessage={
+                initialMessage?.conversationId === detail.conversation.id
+                  ? initialMessage.autoPlan
+                  : false
               }
               onInitialMessageStarted={() => setInitialMessage(null)}
               onEditMessage={editConversationMessage}

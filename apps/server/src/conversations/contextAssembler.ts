@@ -1098,7 +1098,10 @@ export class ConversationContextAssembler {
           remainingFileCharacters -= content.length;
           seenFiles += 1;
         } else {
-          const content = `image attachment ${attachment.id} (${attachment.mime})`;
+          const attachmentKind = attachment.mime.startsWith("image/")
+            ? "Image attachment"
+            : "Binary attachment";
+          const content = `${attachmentKind}: ${attachment.original_filename} (${attachment.mime}), id=${attachment.id}`;
           materials.push({
             kind: "artifact",
             ref: attachment.id,

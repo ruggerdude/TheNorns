@@ -1,16 +1,17 @@
-// FRONT DOOR P4 (D3): a self-contained image-attachment picker for project
-// objectives. Paste a screenshot, drop a file, or browse — each image is
-// uploaded to the project's attachment routes and surfaced as a removable
-// thumbnail chip. The component is deliberately isolated: it is NOT mounted
-// anywhere here. Phase 1 owns the objective form and mounts this, driving it
-// through the documented props below (`value` / `onChange` are the selected
-// attachment-id contract the planning-run request consumes as `attachment_ids`).
+// A self-contained project attachment picker. Paste, drop, or browse for any
+// file type; readable formats are extracted by the server and unknown binary
+// formats remain available as durable project evidence.
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type {
   ChangeEvent as ReactChangeEvent,
   ClipboardEvent as ReactClipboardEvent,
   DragEvent as ReactDragEvent,
 } from "react";
+import {
+  PROJECT_ATTACHMENT_ACCEPT,
+  attachmentTypeLabel,
+  resolvedAttachmentMime,
+} from "./attachmentFiles";
 import { authHeaders } from "./auth";
 import { Alert, Button, Spinner } from "./ui";
 
@@ -21,39 +22,6 @@ export const ATTACHMENT_ACCEPTED_MIMES = [
   "image/webp",
   "image/gif",
 ] as const;
-
-const TEXT_FILE_EXTENSIONS = new Set([
-  "c",
-  "cc",
-  "cpp",
-  "css",
-  "csv",
-  "go",
-  "h",
-  "hpp",
-  "html",
-  "java",
-  "js",
-  "jsx",
-  "json",
-  "log",
-  "md",
-  "py",
-  "rb",
-  "rs",
-  "sh",
-  "sql",
-  "toml",
-  "ts",
-  "tsx",
-  "txt",
-  "xml",
-  "yaml",
-  "yml",
-  "zsh",
-]);
-const TEXT_FILE_ACCEPT = [...TEXT_FILE_EXTENSIONS].map((extension) => `.${extension}`).join(",");
-const MAX_TEXT_FILE_BYTES = 200 * 1024;
 
 /** Metadata for one stored attachment, as returned by the upload route. */
 export interface AttachmentDescriptor {
@@ -74,11 +42,11 @@ export interface AttachmentInputProps {
    * straight through to `POST /planning-runs` as `attachment_ids`.
    */
   value: string[];
-  /** Called with the next id list whenever an image is added or removed. */
+  /** Called with the next id list whenever a file is added or removed. */
   onChange: (ids: string[]) => void;
   /** Purpose recorded server-side (groups the per-objective cap). Default "objective". */
   purpose?: string;
-  /** Max images the UI will allow (default 8, matching the server per-objective cap). */
+  /** Max files the UI will allow (default 8, matching the server per-objective cap). */
   maxAttachments?: number;
   /** Disable all interaction (e.g. while the parent form is submitting). */
   disabled?: boolean;
@@ -92,8 +60,7 @@ export interface AttachmentInputProps {
   hideInlineError?: boolean;
   /**
    * Composer mode integrates the prompt and attachments into one control.
-   * Image files are uploaded; text/code files are read locally and inserted
-   * into the prompt so they are available to the planning agents.
+   * Every selected file is uploaded and retained as project evidence.
    */
   variant?: "dropzone" | "composer";
   label?: string;
@@ -101,28 +68,18 @@ export interface AttachmentInputProps {
   onTextChange?: (value: string) => void;
   placeholder?: string;
   textAreaTestId?: string;
+  /** Submit the containing form on Enter; Shift+Enter still inserts a line. */
+  submitOnEnter?: boolean;
+  /** Reports a completed upload so a parent can include metadata in its first message. */
+  onUploaded?: (attachment: AttachmentDescriptor) => void;
+  /** Reports a removed attachment to metadata-owning parents. */
+  onRemoved?: (attachmentId: string) => void;
+  /** Lets a containing form prevent submission while file uploads are active. */
+  onUploadingChange?: (uploading: boolean) => void;
 }
 
 const DEFAULT_MAX = 8;
 const DEFAULT_PURPOSE = "objective";
-
-function isAcceptedImage(file: File): boolean {
-  return (ATTACHMENT_ACCEPTED_MIMES as readonly string[]).includes(file.type);
-}
-
-function extensionFor(file: File): string {
-  return file.name.split(".").pop()?.toLowerCase() ?? "";
-}
-
-function isAcceptedTextFile(file: File): boolean {
-  return (
-    file.type.startsWith("text/") ||
-    file.type === "application/json" ||
-    file.type === "application/xml" ||
-    file.type === "application/sql" ||
-    TEXT_FILE_EXTENSIONS.has(extensionFor(file))
-  );
-}
 
 function filesFromDataTransfer(data: DataTransfer | null): File[] {
   if (!data) return [];
@@ -137,16 +94,6 @@ function filesFromDataTransfer(data: DataTransfer | null): File[] {
     }
   }
   return fromItems;
-}
-
-function appendTextFiles(
-  current: string,
-  files: readonly { name: string; text: string }[],
-): string {
-  const blocks = files.map(
-    ({ name, text }) => `Reference file: ${name}\n\`\`\`\n${text.trimEnd()}\n\`\`\``,
-  );
-  return [current.trimEnd(), ...blocks].filter(Boolean).join("\n\n");
 }
 
 export function AttachmentInput({
@@ -164,6 +111,10 @@ export function AttachmentInput({
   onTextChange,
   placeholder = "Describe the goal, paste a screenshot, or add a reference file…",
   textAreaTestId,
+  submitOnEnter = false,
+  onUploaded,
+  onRemoved,
+  onUploadingChange,
 }: AttachmentInputProps) {
   // Render metadata keyed by id. `value` stays authoritative for selection;
   // this map only supplies each chip's dimensions/label.
@@ -182,6 +133,10 @@ export function AttachmentInput({
     });
   }, [value]);
 
+  useEffect(() => {
+    onUploadingChange?.(uploading > 0);
+  }, [onUploadingChange, uploading]);
+
   const report = useCallback(
     (message: string) => {
       setError(message);
@@ -197,12 +152,14 @@ export function AttachmentInput({
   const uploadOne = useCallback(
     async (file: File): Promise<AttachmentDescriptor | null> => {
       try {
+        const mime = resolvedAttachmentMime(file);
         const res = await fetch(`/api/v2/projects/${projectId}/attachments`, {
           method: "POST",
           headers: {
             ...authHeaders(),
-            "content-type": file.type,
+            "content-type": mime,
             "x-attachment-purpose": purpose,
+            "x-attachment-filename": file.name,
           },
           credentials: "include",
           body: file,
@@ -228,38 +185,14 @@ export function AttachmentInput({
     async (files: File[]) => {
       if (disabled || files.length === 0) return;
       setError(null);
-      const images = files.filter(isAcceptedImage);
-      const textFiles = variant === "composer" ? files.filter(isAcceptedTextFile) : [];
-      const unsupported = files.filter(
-        (file) => !isAcceptedImage(file) && !(variant === "composer" && isAcceptedTextFile(file)),
-      );
-      if (unsupported.length > 0 && variant !== "composer") {
-        report(
-          "That file type is not supported yet. Add an image or a text, code, Markdown, JSON, or CSV file.",
-        );
-      }
-
-      if (textFiles.length > 0 && onTextChange) {
-        const readable = textFiles.filter((file) => {
-          if (file.size <= MAX_TEXT_FILE_BYTES) return true;
-          report(`${file.name} is too large. Text files must be 200 KB or smaller.`);
-          return false;
-        });
-        const inserted = await Promise.all(
-          readable.map(async (file) => ({ name: file.name, text: await file.text() })),
-        );
-        if (inserted.length > 0) {
-          onTextChange(appendTextFiles(textValue, inserted));
-        }
-      }
       const room = maxAttachments - value.length;
-      if (room <= 0 && images.length > 0) {
-        report(`You can attach at most ${maxAttachments} images.`);
+      if (room <= 0) {
+        report(`You can attach at most ${maxAttachments} files.`);
         return;
       }
-      const accepted = images.slice(0, room);
-      if (accepted.length < images.length) {
-        report(`You can attach at most ${maxAttachments} images.`);
+      const accepted = files.slice(0, room);
+      if (accepted.length < files.length) {
+        report(`You can attach at most ${maxAttachments} files.`);
       }
 
       setUploading((n) => n + accepted.length);
@@ -280,22 +213,14 @@ export function AttachmentInput({
         });
         // Dedupe: the server returns the existing id for identical content.
         const merged = [...value];
-        for (const descriptor of added)
+        for (const descriptor of added) {
           if (!merged.includes(descriptor.id)) merged.push(descriptor.id);
+          onUploaded?.(descriptor);
+        }
         onChange(merged);
       }
     },
-    [
-      disabled,
-      maxAttachments,
-      onChange,
-      onTextChange,
-      report,
-      textValue,
-      uploadOne,
-      value,
-      variant,
-    ],
+    [disabled, maxAttachments, onChange, onUploaded, report, uploadOne, value],
   );
 
   const removeOne = useCallback(
@@ -303,6 +228,7 @@ export function AttachmentInput({
       if (disabled) return;
       // Optimistically drop from the selection; the DELETE is best-effort.
       onChange(value.filter((existing) => existing !== id));
+      onRemoved?.(id);
       try {
         const res = await fetch(`/api/v2/projects/${projectId}/attachments/${id}`, {
           method: "DELETE",
@@ -310,13 +236,13 @@ export function AttachmentInput({
           credentials: "include",
         });
         if (!res.ok && res.status !== 404) {
-          report(`Could not remove the image (${res.status}).`);
+          report(`Could not remove the file (${res.status}).`);
         }
       } catch {
-        report("Could not remove the image — check your connection.");
+        report("Could not remove the file — check your connection.");
       }
     },
-    [disabled, onChange, projectId, report, value],
+    [disabled, onChange, onRemoved, projectId, report, value],
   );
 
   const onPaste = (event: ReactClipboardEvent<HTMLDivElement>) => {
@@ -341,11 +267,7 @@ export function AttachmentInput({
     <input
       ref={fileInputRef}
       type="file"
-      accept={
-        variant === "composer"
-          ? `${ATTACHMENT_ACCEPTED_MIMES.join(",")},${TEXT_FILE_ACCEPT}`
-          : ATTACHMENT_ACCEPTED_MIMES.join(",")
-      }
+      accept={PROJECT_ATTACHMENT_ACCEPT}
       multiple
       hidden
       data-testid="attachment-file-input"
@@ -360,15 +282,25 @@ export function AttachmentInput({
           const descriptor = descriptors[id];
           return (
             <li key={id} className="attachment-chip" data-testid="attachment-chip">
-              <img
-                src={`/api/v2/projects/${projectId}/attachments/${id}`}
-                alt={
-                  descriptor?.filename ??
-                  (descriptor
-                    ? `Attachment ${descriptor.width ?? "?"}×${descriptor.height ?? "?"}`
-                    : "Attachment")
-                }
-              />
+              {!descriptor || descriptor.mime.startsWith("image/") ? (
+                <img
+                  src={`/api/v2/projects/${projectId}/attachments/${id}`}
+                  alt={
+                    descriptor?.filename ??
+                    (descriptor
+                      ? `Attachment ${descriptor.width ?? "?"}×${descriptor.height ?? "?"}`
+                      : "Attachment")
+                  }
+                />
+              ) : (
+                <span className="attachment-chip-file">
+                  <span aria-hidden="true">↗</span>
+                  <span>
+                    <strong>{descriptor.filename ?? "Attachment"}</strong>
+                    <small>{attachmentTypeLabel(descriptor.mime)}</small>
+                  </span>
+                </span>
+              )}
               <button
                 type="button"
                 className="attachment-chip-remove"
@@ -406,20 +338,26 @@ export function AttachmentInput({
             value={textValue}
             disabled={disabled}
             onChange={(event) => onTextChange?.(event.target.value)}
+            onKeyDown={(event) => {
+              if (submitOnEnter && event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }
+            }}
           />
           <div className="prompt-composer-toolbar">
             <button
               type="button"
               className="composer-add-button"
               aria-label="Add images or files"
-              title="Add images or text files"
+              title="Add files"
               disabled={!interactive}
               onClick={() => fileInputRef.current?.click()}
             >
               <span aria-hidden="true">+</span>
             </button>
-            <span className="composer-help">Paste, drop, or add images and text files</span>
-            {uploading > 0 ? <Spinner label={`Uploading ${uploading} image(s)…`} /> : null}
+            <span className="composer-help">Paste, drop, or add any file</span>
+            {uploading > 0 ? <Spinner label={`Uploading ${uploading} file(s)…`} /> : null}
           </div>
           {picker}
         </div>
@@ -436,12 +374,12 @@ export function AttachmentInput({
         onPaste={onPaste}
         onDrop={onDrop}
         onDragOver={(event) => event.preventDefault()}
-        aria-label="Attach images: paste, drop, or browse"
+        aria-label="Attach files: paste, drop, or browse"
       >
         <p className="attachment-hint">
           {atCapacity
             ? `Attachment limit reached (${maxAttachments}).`
-            : "Paste a screenshot, drop an image, or"}
+            : "Paste, drop any file, or"}
         </p>
         {!atCapacity && (
           <Button
@@ -450,7 +388,7 @@ export function AttachmentInput({
             disabled={!interactive}
             onClick={() => fileInputRef.current?.click()}
           >
-            Browse images
+            Browse files
           </Button>
         )}
         {picker}
@@ -458,7 +396,7 @@ export function AttachmentInput({
 
       {chips}
 
-      {uploading > 0 && <Spinner label={`Uploading ${uploading} image(s)…`} />}
+      {uploading > 0 && <Spinner label={`Uploading ${uploading} file(s)…`} />}
       {error && !hideInlineError && <Alert testId="attachment-error">{error}</Alert>}
     </div>
   );

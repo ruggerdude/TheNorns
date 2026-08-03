@@ -125,7 +125,18 @@ describe("AttachmentInput (FRONT DOOR P4)", () => {
     expect(screen.getByRole("button", { name: "Add images or files" })).toBeVisible();
   });
 
-  it("imports a text file selected with the + picker into the prompt", async () => {
+  it("uploads a text file selected with the + picker and keeps it as an attachment", async () => {
+    fetchMock.post(UPLOAD_URL, {
+      status: 201,
+      body: {
+        id: "att_notes",
+        mime: "text/markdown",
+        bytes: 24,
+        width: null,
+        height: null,
+        purpose: "objective",
+      },
+    });
     render(<ComposerHarness />);
     const notes = new File(["Use a compact dashboard."], "notes.md", {
       type: "text/markdown",
@@ -136,10 +147,14 @@ describe("AttachmentInput (FRONT DOOR P4)", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByTestId("prompt-text")).toHaveTextContent("Reference file: notes.md");
-      expect(screen.getByTestId("prompt-text")).toHaveTextContent("Use a compact dashboard.");
+      expect(screen.getByTestId("selected-ids")).toHaveTextContent("att_notes");
     });
-    expect(fetchMock.calls.some((call) => call.method === "POST")).toBe(false);
+    expect(screen.getByTestId("attachment-chip")).toHaveTextContent("notes.md");
+    expect(screen.getByTestId("attachment-chip")).toHaveTextContent("Markdown");
+    expect(screen.getByTestId("prompt-text")).toHaveTextContent("");
+    const post = fetchMock.calls.find((call) => call.method === "POST");
+    expect(post?.headers["content-type"]).toBe("text/markdown");
+    expect(post?.headers["x-attachment-filename"]).toBe("notes.md");
   });
 
   it("renders a thumbnail for a pre-selected attachment id", () => {
@@ -168,16 +183,31 @@ describe("AttachmentInput (FRONT DOOR P4)", () => {
     ).toBe(true);
   });
 
-  it("rejects a non-image paste without uploading", async () => {
+  it("accepts an arbitrary binary file and uploads it as octet-stream", async () => {
+    fetchMock.post(UPLOAD_URL, {
+      status: 201,
+      body: {
+        id: "att_binary",
+        mime: "application/octet-stream",
+        bytes: 5,
+        width: null,
+        height: null,
+        purpose: "objective",
+      },
+    });
     render(<Harness />);
-    const textFile = new File(["hello"], "notes.txt", { type: "text/plain" });
+    const binaryFile = new File(["hello"], "installer.exe", {
+      type: "application/x-msdownload",
+    });
     fireEvent.paste(screen.getByTestId("attachment-dropzone"), {
-      clipboardData: { files: [textFile], items: [] },
+      clipboardData: { files: [binaryFile], items: [] },
     });
 
-    // No image parts extracted -> nothing posted.
-    await Promise.resolve();
-    expect(fetchMock.calls.some((call) => call.method === "POST")).toBe(false);
-    expect(screen.queryByTestId("attachment-chip")).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId("selected-ids")).toHaveTextContent("att_binary");
+    });
+    const post = fetchMock.calls.find((call) => call.method === "POST");
+    expect(post?.headers["content-type"]).toBe("application/octet-stream");
+    expect(screen.getByTestId("attachment-chip")).toHaveTextContent("installer.exe");
   });
 });

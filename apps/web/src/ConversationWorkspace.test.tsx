@@ -918,6 +918,87 @@ describe("conversation workspace", () => {
     });
   });
 
+  it("shows the three weaving logo strands while the PM is thinking", async () => {
+    const encoder = new TextEncoder();
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const responseBody = new ReadableStream<Uint8Array>({
+      start(streamController) {
+        controller = streamController;
+      },
+    });
+    const push = (chunk: unknown) =>
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+    let completed = false;
+    const persistedMessages = [
+      message({
+        id: "message-thinking-user",
+        role: "user",
+        sequence: 1,
+        parts: [{ type: "text", format: "markdown", text: "Map the rollout" }],
+      }),
+      message({
+        id: "message-thinking-reply",
+        role: "assistant",
+        sequence: 2,
+        parts: [{ type: "text", format: "markdown", text: "The rollout is mapped." }],
+      }),
+    ];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) {
+          return detailResponse(completed ? persistedMessages : []);
+        }
+        if (url.endsWith(`/conversations/${conversationId}/messages`) && init?.method === "POST") {
+          return new Response(responseBody, {
+            status: 200,
+            headers: {
+              "content-type": "text/event-stream",
+              "x-vercel-ai-ui-message-stream": "v1",
+            },
+          });
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    await user.type(
+      await screen.findByRole("textbox", { name: "Message the project PM" }),
+      "Map the rollout{enter}",
+    );
+    push({ type: "start", messageId: "message-thinking-reply" });
+
+    const indicator = await screen.findByLabelText("PM is thinking");
+    expect(indicator).toHaveTextContent("Weaving the plan…");
+    expect(
+      Array.from(indicator.querySelectorAll("[data-strand]")).map((strand) =>
+        strand.getAttribute("data-strand"),
+      ),
+    ).toEqual(expect.arrayContaining(["0", "1", "2"]));
+
+    push({ type: "text-start", id: "text-thinking" });
+    push({ type: "text-delta", id: "text-thinking", delta: "The rollout is mapped." });
+    push({ type: "text-end", id: "text-thinking" });
+    completed = true;
+    push({ type: "finish", finishReason: "stop" });
+    controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+    controller.close();
+
+    expect(await screen.findByText("The rollout is mapped.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByLabelText("PM is thinking")).not.toBeInTheDocument());
+  });
+
   it("renders durable images as thumbnails and documents as accessible download chips", async () => {
     const history = [
       message({
@@ -3807,8 +3888,44 @@ describe("conversation workspace", () => {
 
   it("starts by sending the first message and assigns an automatic title", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const uploadContentTypes: string[] = [];
     const firstMessage =
       "I want to build a release dashboard. It should show deployments and current health.";
+    const version = planVersion({ created_by_action_id: "action-save-initial" });
+    const saveAction = planAction({
+      id: "action-save-initial",
+      source_message_id: "message-plan-initial",
+      action_type: "save_plan_candidate",
+      payload: {
+        parameters: {
+          plan: version.plan,
+          predecessor_plan_version_id: null,
+          predecessor_content_hash: null,
+        },
+      },
+    });
+    const appliedSaveAction = planAction({ ...saveAction, status: "applied" });
+    const proposalMessage = message({
+      id: "message-plan-initial",
+      role: "system",
+      sequence: 3,
+      parts: [{ type: "action", action_id: saveAction.id }],
+    });
+    const firstUserMessage = message({
+      id: "message-first-user",
+      role: "user",
+      sequence: 1,
+      parts: [{ type: "text", format: "markdown", text: firstMessage }],
+    });
+    const firstAssistantMessage = message({
+      id: "message-first-reply",
+      role: "assistant",
+      sequence: 2,
+      parts: [{ type: "text", format: "markdown", text: "Ready to plan." }],
+    });
+    let uploaded = 0;
+    let planRequested = false;
+    let planSaved = false;
     const stream =
       'data: {"type":"start","messageId":"message-first-reply"}\n\n' +
       'data: {"type":"text-start","id":"text-first"}\n\n' +
@@ -3816,6 +3933,10 @@ describe("conversation workspace", () => {
       'data: {"type":"text-end","id":"text-first"}\n\n' +
       'data: {"type":"finish","finishReason":"stop"}\n\n' +
       "data: [DONE]\n\n";
+    const planStream = `data: {"type":"start"}\n\ndata: ${JSON.stringify({
+      type: "data-plan-proposal",
+      data: { message: proposalMessage, action: saveAction },
+    })}\n\n`;
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -3828,6 +3949,39 @@ describe("conversation workspace", () => {
           return Response.json({ work_item: workItem, conversation }, { status: 201 });
         }
         if (url.endsWith("/work-items")) return Response.json({ work_items: [] });
+        if (url.endsWith("/attachments") && init?.method === "POST") {
+          uploaded += 1;
+          const contentType = new Headers(init.headers).get("content-type") ?? "";
+          uploadContentTypes.push(contentType);
+          return Response.json(
+            {
+              id: `attachment-${uploaded}`,
+              mime: contentType,
+              bytes: 12,
+              width: null,
+              height: null,
+              purpose: "objective",
+            },
+            { status: 201 },
+          );
+        }
+        if (url.endsWith(`/conversations/${conversationId}/plan-proposals/stream`)) {
+          planRequested = true;
+          return new Response(planStream, {
+            status: 200,
+            headers: {
+              "content-type": "text/event-stream",
+              "x-vercel-ai-ui-message-stream": "v1",
+            },
+          });
+        }
+        if (url.endsWith(`/actions/${saveAction.id}/confirm`)) {
+          planSaved = true;
+          return Response.json({
+            action: appliedSaveAction,
+            effect: { kind: "plan_saved", plan_version: version },
+          });
+        }
         if (url.endsWith(`/conversations/${conversationId}/messages`)) {
           return new Response(stream, {
             status: 200,
@@ -3838,14 +3992,15 @@ describe("conversation workspace", () => {
           });
         }
         if (url.endsWith(`/conversations/${conversationId}`)) {
-          return detailResponse([
-            message({
-              id: "message-first-user",
-              role: "user",
-              sequence: 1,
-              parts: [{ type: "text", format: "markdown", text: firstMessage }],
-            }),
-          ]);
+          return detailResponse(
+            [firstUserMessage, firstAssistantMessage, ...(planRequested ? [proposalMessage] : [])],
+            null,
+            null,
+            {
+              planVersions: planSaved ? [version] : [],
+              actions: planRequested ? [planSaved ? appliedSaveAction : saveAction] : [],
+            },
+          );
         }
         throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
       }),
@@ -3865,9 +4020,20 @@ describe("conversation workspace", () => {
     const composer = await screen.findByRole("textbox", { name: "Describe the work" });
     const modelSelect = await screen.findByRole("combobox", { name: "Conversation model" });
     await waitFor(() => expect(modelSelect).toHaveValue("claude-sonnet-5"));
+    fireEvent.change(screen.getByTestId("attachment-file-input"), {
+      target: {
+        files: [
+          new File(["project brief"], "brief.pdf", { type: "application/pdf" }),
+          new File(["binary data"], "design-assets.zip", { type: "application/zip" }),
+        ],
+      },
+    });
+    expect(await screen.findByText("brief.pdf")).toBeInTheDocument();
+    expect(await screen.findByText("design-assets.zip")).toBeInTheDocument();
     await user.type(composer, `${firstMessage}{enter}`);
 
     expect(await screen.findByText("Ready to plan.")).toBeInTheDocument();
+    await waitFor(() => expect(planSaved).toBe(true));
     const create = calls.find(
       ({ url, init }) => url.endsWith("/work-items") && init?.method === "POST",
     );
@@ -3878,10 +4044,25 @@ describe("conversation workspace", () => {
       workflow: "phased",
     });
     const submit = calls.find(({ url }) => url.endsWith("/messages"));
-    expect(JSON.parse(String(submit?.init?.body))).toMatchObject({
-      parts: [{ type: "text", format: "markdown", text: firstMessage }],
-    });
+    expect(JSON.parse(String(submit?.init?.body)).parts).toEqual([
+      { type: "text", format: "markdown", text: firstMessage },
+      {
+        type: "attachment",
+        attachment_id: "attachment-1",
+        name: "brief.pdf",
+        media_type: "application/pdf",
+      },
+      {
+        type: "attachment",
+        attachment_id: "attachment-2",
+        name: "design-assets.zip",
+        media_type: "application/octet-stream",
+      },
+    ]);
     expect(new Headers(submit?.init?.headers).get("content-type")).toBe("application/json");
+    expect(uploadContentTypes).toEqual(["application/pdf", "application/octet-stream"]);
+    expect(calls.some(({ url }) => url.endsWith("/plan-proposals/stream"))).toBe(true);
+    expect(calls.some(({ url }) => url.endsWith(`/actions/${saveAction.id}/confirm`))).toBe(true);
     expect(selectedConversations).toContain(conversationId);
   });
 
@@ -3991,7 +4172,12 @@ describe("conversation workspace", () => {
     await user.click(
       await screen.findByRole("button", { name: "Actions for Conversation-first planning" }),
     );
-    await user.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const menu = screen.getByRole("menu", { name: "Conversation actions" });
+    expect(menu.parentElement).toBe(document.body);
+    expect(Number.parseFloat(menu.style.left)).toBeGreaterThanOrEqual(8);
+    expect(Number.parseFloat(menu.style.top)).toBeGreaterThanOrEqual(8);
+    expect(menu.style.maxHeight).toContain("100dvh");
+    await user.click(screen.getByRole("menuitem", { name: "Rename title" }));
     const title = screen.getByRole("textbox", { name: "Work item title" });
     await user.clear(title);
     await user.type(title, "Release readiness");

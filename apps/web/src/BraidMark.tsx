@@ -133,6 +133,7 @@ export function BraidMark({
       {ordered.map((seg) => (
         <path
           key={`${seg.strand}-${seg.from}-${seg.to}-${seg.over ? "o" : "u"}`}
+          data-strand={seg.strand}
           d={segmentPath(xs, ys, seg)}
           fill="none"
           stroke={colors[seg.strand] ?? strand1}

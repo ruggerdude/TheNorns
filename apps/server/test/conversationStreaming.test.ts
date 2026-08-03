@@ -952,6 +952,54 @@ describe.sequential("persistent planning conversation streaming", () => {
     ]);
   });
 
+  it("keeps arbitrary binary files as named project evidence for the PM", async () => {
+    const uploaded = await attachments.create("stream-project", {
+      mime: "application/octet-stream",
+      content: Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x00, 0x01]),
+      filename: "design-assets.zip",
+      purpose: "conversation",
+      createdBy: owner.id,
+    });
+    const trigger = await conversations.submitUserMessage(owner, {
+      project_id: "stream-project",
+      work_item_id: workItemId,
+      conversation_id: conversationId,
+      client_message_id: "stream-client-binary-integration",
+      parts: [
+        { type: "text", format: "plain", text: "Keep these design assets with the project." },
+        {
+          type: "attachment",
+          attachment_id: uploaded.id,
+          name: uploaded.original_filename,
+          media_type: uploaded.mime,
+        },
+      ],
+    });
+    const captured = new FakeAdapter("openai", "mock-openai");
+    captured.enqueue("The design archive is attached as project evidence.");
+    currentAdapter = captured as ConversationLlmAdapter;
+    const prepared = await turnService.prepare({
+      actor: owner,
+      projectId: "stream-project",
+      workItemId,
+      conversationId,
+      triggeringMessageId: trigger.id,
+    });
+    await prepared.run({
+      started: () => undefined,
+      text: () => undefined,
+      finished: () => undefined,
+    });
+
+    expect(captured.requests[0]?.images).toEqual([]);
+    expect(captured.requests[0]?.system).toContain(
+      `Binary attachment: design-assets.zip (application/octet-stream), id=${uploaded.id}`,
+    );
+    expect(captured.requests[0]?.messages?.at(-1)?.content).toContain(
+      `[Attachment: design-assets.zip (application/octet-stream), id=${uploaded.id}]`,
+    );
+  });
+
   it("injects durable file extraction exactly once while preserving image-only provider parts", async () => {
     const extractedPhrase = "The launch constraint is a reversible staged rollout.";
     const uploaded = await attachments.create("stream-project", {

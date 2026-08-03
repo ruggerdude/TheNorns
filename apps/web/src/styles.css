@@ -2940,6 +2940,34 @@ button:disabled {
   object-fit: cover;
   display: block;
 }
+.attachment-chip:has(.attachment-chip-file) {
+  width: min(15rem, 100%);
+}
+.attachment-chip-file {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  gap: .55rem;
+  padding: .65rem 1.8rem .65rem .7rem;
+  color: var(--text);
+}
+.attachment-chip-file > span:last-child {
+  display: grid;
+  min-width: 0;
+}
+.attachment-chip-file strong,
+.attachment-chip-file small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.attachment-chip-file strong {
+  font-size: var(--text-sm);
+}
+.attachment-chip-file small {
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
 .attachment-chip-remove {
   position: absolute;
   top: 2px;
