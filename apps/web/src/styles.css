@@ -3648,7 +3648,7 @@ button:disabled {
 }
 .github-repository-summary {
   display: grid;
-  grid-template-columns: auto minmax(0, 0.7fr) minmax(0, 1.3fr);
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   gap: 0.7rem;
   min-width: 0;
@@ -3666,16 +3666,13 @@ button:disabled {
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
-.github-repository-summary strong {
-  overflow: hidden;
-  color: var(--text);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .github-repository-summary > span:last-child {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.connection-required-action-only {
+  justify-content: flex-end;
 }
 .project-location-options button {
   min-height: 78px !important;
@@ -3887,9 +3884,6 @@ button:disabled {
   }
   .github-repository-summary {
     grid-template-columns: 1fr auto;
-  }
-  .github-repository-summary-label {
-    grid-column: 1 / -1;
   }
 }
 

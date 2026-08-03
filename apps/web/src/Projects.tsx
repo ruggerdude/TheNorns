@@ -2048,7 +2048,6 @@ export function Projects({
                       </span>
                       <div>
                         <h2 id="project-name-section">Name of project</h2>
-                        <p>The name shown across your workspace.</p>
                       </div>
                     </header>
                     {startingPoint === "new" ? (
@@ -2154,7 +2153,6 @@ export function Projects({
                             data-testid="derived-project-summary"
                           >
                             <span className="github-repository-summary-label">Repository</span>
-                            <strong>{derivedIdentity.projectName}</strong>
                             <span>
                               {`${selectedConnection?.owner_login ?? "GitHub"}/${derivedIdentity.repositorySlug}`}{" "}
                               · {repositoryPrivate ? "Private" : "Public"}
@@ -2438,21 +2436,9 @@ export function Projects({
                           ) : computers === null ? (
                             <Spinner label="Checking your computers…" />
                           ) : readyComputers.length === 0 ? (
-                            <div className="connection-required">
-                              <div>
-                                <strong>Online Local Agent required</strong>
-                                <p>
-                                  Open or update the Local Agent on a connected computer, then try
-                                  again.
-                                </p>
-                              </div>
-                              <Button
-                                type="button"
-                                variant="primary"
-                                className="btn-small"
-                                onClick={onOpenAdmin}
-                              >
-                                Open Computers
+                            <div className="connection-required connection-required-action-only">
+                              <Button type="button" className="btn-small" disabled>
+                                No agent
                               </Button>
                             </div>
                           ) : (
@@ -2513,11 +2499,7 @@ export function Projects({
                                   disabled={folderPickerBusy || !selectedComputerId}
                                   onClick={() => void chooseCloneDestination()}
                                 >
-                                  {folderPickerBusy
-                                    ? "Waiting for folder…"
-                                    : cloneDestination?.computer_id === selectedComputerId
-                                      ? "Change folder"
-                                      : "Choose folder"}
+                                  {folderPickerBusy ? "Waiting for folder…" : "Select folder"}
                                 </Button>
                               </div>
                               {folderPickerError ? (

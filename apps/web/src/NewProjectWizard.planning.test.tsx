@@ -126,11 +126,12 @@ describe("new project: name-first creation, planning in the conversation", () =>
     expect(screen.queryByText(/repository destination/i)).not.toBeInTheDocument();
     expect(screen.queryByTestId("github-connection")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /create project/i })).toBeDisabled();
+    expect(screen.queryByText("The name shown across your workspace.")).not.toBeInTheDocument();
 
     await user.type(screen.getByTestId("project-name"), "Lightweight habit tracker");
-    expect(screen.getByTestId("derived-project-summary")).toHaveTextContent(
-      "octocat/lightweight-habit-tracker",
-    );
+    const repositorySummary = screen.getByTestId("derived-project-summary");
+    expect(repositorySummary).toHaveTextContent("octocat/lightweight-habit-tracker");
+    expect(repositorySummary.querySelector("strong")).toBeNull();
     await user.click(screen.getByRole("button", { name: /create project/i }));
 
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());

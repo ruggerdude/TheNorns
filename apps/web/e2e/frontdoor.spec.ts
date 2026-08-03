@@ -612,7 +612,7 @@ test("New work can create a GitHub repository and folder on an enrolled computer
   await page.getByTestId("project-name").fill("Local release readiness dashboard");
   await page.getByRole("button", { name: /^this computer/i }).click();
   await expect(page.getByTestId("project-computer")).toHaveValue("device-e2e");
-  await page.getByRole("button", { name: "Choose folder" }).click();
+  await page.getByRole("button", { name: "Select folder" }).click();
   await expect(page.locator(".folder-destination")).toContainText("Projects");
   await expect(page.getByTestId("setup-confirmation")).toHaveCount(0);
   await page.getByRole("button", { name: /create project/i }).click();
@@ -694,9 +694,11 @@ test("New project creates from a name and lands in the workspace", async ({ page
 
   await expect(page.getByText(/repository destination/i)).toHaveCount(0);
   await page.getByTestId("project-name").fill("Deployment workflow dashboard for release managers");
-  await expect(page.getByTestId("derived-project-summary")).toContainText(
-    "Deployment workflow dashboard for release managers",
+  const repositorySummary = page.getByTestId("derived-project-summary");
+  await expect(repositorySummary).toContainText(
+    "octocat/deployment-workflow-dashboard-for-release-managers",
   );
+  await expect(repositorySummary.locator("strong")).toHaveCount(0);
   await page.getByRole("button", { name: /create project/i }).click();
 
   await expectNewWorkEntry(page);

@@ -343,9 +343,10 @@ describe("O1: GitHub and local Git repository onboarding", () => {
     await user.click(await screen.findByRole("button", { name: /new project/i }));
     await user.click(screen.getByRole("button", { name: /^this computer/i }));
     await user.type(screen.getByTestId("project-name"), "Fresh application");
-    await user.click(screen.getByRole("button", { name: /choose folder/i }));
+    await user.click(screen.getByRole("button", { name: "Select folder" }));
 
     expect((await screen.findByText("Project folder")).parentElement).toHaveTextContent("Projects");
+    expect(screen.getByRole("button", { name: "Select folder" })).toBeInTheDocument();
     expect(screen.queryByTestId("setup-confirmation")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /create project/i }));
 
@@ -364,6 +365,19 @@ describe("O1: GitHub and local Git repository onboarding", () => {
       },
     });
     expect(mock.calls.some((call) => call.url.startsWith("/api/runners/helper/"))).toBe(false);
+  });
+
+  it("shows a disabled No agent button instead of an account-navigation action", async () => {
+    mock.get("/api/devices", { body: { devices: [] } });
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /^this computer/i }));
+
+    expect(await screen.findByRole("button", { name: "No agent" })).toBeDisabled();
+    expect(screen.queryByText("Online Local Agent required")).not.toBeInTheDocument();
+    expect(screen.queryByText(/open or update the Local Agent/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open Computers" })).not.toBeInTheDocument();
   });
 
   it("keeps a computer check failure beside the execution choice and out of GitHub destination", async () => {
