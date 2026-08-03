@@ -110,7 +110,7 @@ describe("Phase 5 project execution monitoring", () => {
     mock.post(`/api/v2/projects/${projectAlpha.id}/directions`, { body: {} });
     mock.install();
 
-    await renderAppAndOpenProject(projectAlpha.name);
+    await renderAppAndOpenProject(projectAlpha.name, { workspaceTab: "Work" });
     expect(await screen.findByRole("heading", { name: "Release safely" })).toBeVisible();
     expect(screen.getByText("Verify production release")).toBeVisible();
     expect(screen.getByRole("region", { name: "Implementation Agent" })).toHaveTextContent(
@@ -295,7 +295,7 @@ describe("Phase 5 project execution monitoring", () => {
     );
     mock.install();
 
-    const { user } = await renderAppAndOpenProject(projectAlpha.name);
+    const { user } = await renderAppAndOpenProject(projectAlpha.name, { workspaceTab: "Work" });
     expect(await screen.findByText("Run 2: failed")).toBeVisible();
     expect(await screen.findByTestId("phase-needs-you")).toBeVisible();
     await user.type(

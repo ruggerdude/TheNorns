@@ -1,9 +1,6 @@
-// FRONT DOOR P1b: the workspace wires the Gantt in two places — a mini
-// strip on the phase-board (Project Resume) section, and the full Gantt in
-// the Tracking section, with gates derived from real phase status +
-// portfolio attention (a blocked decision surfaces as a red gate, not a
-// fabricated one).
-import { screen, within } from "@testing-library/react";
+// The project overview intentionally omits detailed schedule visualization;
+// phase work and its gates belong in the dedicated work surfaces.
+import { screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { renderAppAndOpenProject, seedAuth } from "./test/appHarness";
 import { fullyAllocatedGraph, projectAlpha } from "./test/fixtures";
@@ -14,7 +11,7 @@ describe("FRONT DOOR P1b: workspace Gantt wiring", () => {
 
   afterEach(() => mock.restore());
 
-  it("renders the mini-Gantt on the phase board and the full Gantt in Tracking, with a red gate for the blocked phase", async () => {
+  it("keeps the detailed Gantt off the compact project overview", async () => {
     seedAuth();
     mock = new MockFetch();
     mock.get("/api/projects", { body: [projectAlpha] });
@@ -142,28 +139,8 @@ describe("FRONT DOOR P1b: workspace Gantt wiring", () => {
     mock.install();
 
     await renderAppAndOpenProject(projectAlpha.name);
-
-    // Mini-Gantt on the phase board: compact, no per-row names.
-    const miniGantt = within(await screen.findByTestId("workspace-mini-gantt")).getByTestId(
-      "gantt",
-    );
-    expect(miniGantt).toHaveAttribute("data-mini", "true");
-
-    // Full Gantt in the project dashboard: named rows, gates, and the blocked phase's red
-    // gate carrying the real decision title (not a placeholder).
-    const trackingSection = await screen.findByTestId("project-timeline");
-    const fullGantt = within(trackingSection).getByTestId("gantt");
-    expect(fullGantt).toHaveAttribute("data-mini", "false");
-    expect(within(fullGantt).getByText("Schema & ingest")).toBeInTheDocument();
-    expect(within(fullGantt).getByText("Reconciliation")).toBeInTheDocument();
-
-    const gates = within(fullGantt).getAllByTestId("gantt-gate");
-    expect(gates[1]).toHaveAttribute("data-state", "blocked");
-    expect(gates[1]).toHaveTextContent(/confirm the reconciliation window/i);
-
-    // Real per-phase agent count (2 distinct agents on the schema phase),
-    // not a fabricated number.
-    const rows = within(fullGantt).getAllByTestId("gantt-row");
-    expect(within(rows[0] as HTMLElement).getByText("2")).toBeInTheDocument();
+    expect(await screen.findByTestId("overview-dashboard")).toBeVisible();
+    expect(screen.queryByTestId("workspace-mini-gantt")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("project-timeline")).not.toBeInTheDocument();
   });
 });

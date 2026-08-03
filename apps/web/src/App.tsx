@@ -18,10 +18,7 @@ import type { Connection, Edge, Node } from "@xyflow/react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { SettingsTab } from "./Account";
-import { AnalyzeRepositoryControl } from "./AnalyzeRepositoryControl";
 import { Debates } from "./Debates";
-import { Gantt, type GanttPhase } from "./Gantt";
-import { KnowledgeStatusPanel } from "./KnowledgeStatusPanel";
 import { Login, type LoginMode } from "./Login";
 import { PortfolioMenu } from "./PortfolioMenu";
 import { ProjectMembers } from "./ProjectMembers";
@@ -34,7 +31,6 @@ import {
   Projects,
 } from "./Projects";
 import { RunLog } from "./RunLog";
-import { StartPhaseControl } from "./StartPhaseControl";
 import { type StaffingEdit, StrategyReview, type StrategyReviewDto } from "./StrategyReview";
 import { AuthenticatedHeaderActions } from "./UserMenu";
 import { WorkspaceSettings, prefetchProjectRules } from "./WorkspaceSettings";
@@ -60,19 +56,7 @@ import {
   buildRelationalGraphReadModel,
 } from "./relationalGraphReadModel";
 import { ThemeToggle, useTheme } from "./theme";
-import {
-  Alert,
-  Badge,
-  Brand,
-  Button,
-  DismissibleNote,
-  Field,
-  Input,
-  NextStep,
-  Select,
-  Spinner,
-  TextArea,
-} from "./ui";
+import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 import { type UpdatePreferences, resolveUpdatePreferences } from "./workspacePreferences";
 
 const GraphCanvas = lazy(() =>
@@ -87,11 +71,6 @@ const DeviceAuthorizationApproval = lazy(() =>
 );
 const UsageHub = lazy(() => import("./UsageHub").then(({ UsageHub }) => ({ default: UsageHub })));
 const PhaseTab = lazy(() => import("./PhaseTab").then(({ PhaseTab }) => ({ default: PhaseTab })));
-const ConversationOverview = lazy(() =>
-  import("./ConversationOverview").then(({ ConversationOverview }) => ({
-    default: ConversationOverview,
-  })),
-);
 const ProjectOperationsDashboard = lazy(() =>
   import("./ProjectOperationsDashboard").then(({ ProjectOperationsDashboard }) => ({
     default: ProjectOperationsDashboard,
@@ -892,9 +871,6 @@ function ProjectGraph({
   const [strategyReview, setStrategyReview] = useState<StrategyReviewDto | null>(null);
   const [strategyBusy, setStrategyBusy] = useState(false);
   const [strategyError, setStrategyError] = useState<string | null>(null);
-  // Phase-scoped "needs you": the portfolio attention feed filtered to this
-  // project + the currently monitored phase (P1 human-approved addition —
-  // the phase-detail view's Q&A/decision thread).
   const [phaseAttention, setPhaseAttention] = useState<AttentionItemDto[]>([]);
   const [phaseAttentionBusy, setPhaseAttentionBusy] = useState<string | null>(null);
   // Last-known-*good* approval state (never "pending"): what we revert to when
@@ -1214,11 +1190,17 @@ function ProjectGraph({
   useEffect(() => {
     if (!monitoredPhaseId) return;
     void loadPhaseExecution();
-    const idleMs = updatePreferences.intervalSeconds * 1000;
+    const idleMs = (resume?.update_interval_seconds ?? updatePreferences.intervalSeconds) * 1000;
     const pollMs = phaseHasActiveRun ? PHASE_ACTIVE_POLL_MS : idleMs;
     const timer = window.setInterval(() => void loadPhaseExecution(), pollMs);
     return () => window.clearInterval(timer);
-  }, [monitoredPhaseId, loadPhaseExecution, phaseHasActiveRun, updatePreferences.intervalSeconds]);
+  }, [
+    monitoredPhaseId,
+    loadPhaseExecution,
+    phaseHasActiveRun,
+    resume?.update_interval_seconds,
+    updatePreferences.intervalSeconds,
+  ]);
 
   const pollPlanningRun = useCallback(async () => {
     if (!activePlanningRunId) return;
@@ -1302,22 +1284,21 @@ function ProjectGraph({
     }
   }, [strategyReview, project.id, onLogout, loadResume]);
 
-  // FRONT DOOR P1 human-approved addition: phase-scoped "needs you" — the
-  // portfolio attention feed filtered to this project, then (for the
-  // decision-thread panel) to the monitored phase. Kept project-wide (not
-  // phase-scoped at fetch time) because the Gantt's blocked-decision gates
-  // (FRONT DOOR P1b) need every phase's attention state, not just the one
-  // currently monitored.
-  const [projectAttentionItems, setProjectAttentionItems] = useState<AttentionItemDto[]>([]);
   const loadProjectAttention = useCallback(async () => {
     try {
       const portfolio = await getJson<PortfolioAttentionDto>("/api/v2/attention");
-      setProjectAttentionItems(portfolio.items.filter((item) => item.project_id === project.id));
+      setPhaseAttention(
+        monitoredPhaseId
+          ? portfolio.items.filter(
+              (item) => item.project_id === project.id && item.phase_id === monitoredPhaseId,
+            )
+          : [],
+      );
     } catch (err) {
       if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
-      // A 404 (no phase3/attention wiring) just means nothing to show here.
+      else setPhaseAttention([]);
     }
-  }, [project.id, onLogout]);
+  }, [monitoredPhaseId, project.id, onLogout]);
 
   useEffect(() => {
     void loadProjectAttention();
@@ -1325,63 +1306,42 @@ function ProjectGraph({
     return () => window.clearInterval(timer);
   }, [loadProjectAttention]);
 
-  useEffect(() => {
-    setPhaseAttention(
-      monitoredPhaseId
-        ? projectAttentionItems.filter((item) => item.phase_id === monitoredPhaseId)
-        : [],
-    );
-  }, [projectAttentionItems, monitoredPhaseId]);
-
-  // FRONT DOOR P1b: per-phase blocking-decision label for the Gantt's red
-  // gate diamonds — the first (most relevant) attention item's title for
-  // each phase that has one, kept even for phases other than the one
-  // currently monitored.
-  const blockedPhaseLabels = useMemo(() => {
-    const labels = new Map<string, string>();
-    for (const item of projectAttentionItems) {
-      if (!item.phase_id) continue;
-      if (item.kind !== "decision" && item.kind !== "blocker") continue;
-      if (!labels.has(item.phase_id)) labels.set(item.phase_id, item.title);
-    }
-    return labels;
-  }, [projectAttentionItems]);
-
-  // FRONT DOOR P1b: real per-phase agent counts for the Gantt's count chip
-  // (distinct implementation + reviewer agent profiles currently staffed).
-  // The resume DTO has no per-phase agent count, so this fetches each
-  // phase's execution DTO once phases are known — small N (phases per
-  // project), and refreshed on the same cadence as the resume poll.
-  const [phaseAgentCounts, setPhaseAgentCounts] = useState<Record<string, number>>({});
-  const loadPhaseAgentCounts = useCallback(async () => {
-    if (!resume?.phases.length) return;
-    const settled = await Promise.allSettled(
-      resume.phases.map(async (phase) => {
-        const execution = await getJson<PhaseExecutionDto>(
-          `/api/v2/projects/${project.id}/phases/${phase.id}/execution`,
+  const resolvePhaseDecision = useCallback(
+    async (
+      item: AttentionItemDto,
+      input: {
+        selectedOptionId: string;
+        rationale: string;
+        directionTarget: string;
+        directionText: string;
+        idempotencyKey: string;
+      },
+    ) => {
+      const decision = item.decision;
+      if (!decision) return;
+      setPhaseAttentionBusy(item.key);
+      try {
+        await postJson(
+          `/api/v2/projects/${item.project_id}/decision-points/${encodeURIComponent(decision.decision_point_id)}/resolve`,
+          {
+            expected_condition_fingerprint: decision.condition_fingerprint,
+            selected_option_id: input.selectedOptionId,
+            rationale: input.rationale,
+            direction_target: input.directionTarget,
+            direction_text: input.directionText,
+            idempotency_key: input.idempotencyKey,
+          },
         );
-        const agentIds = new Set<string>();
-        for (const task of execution.tasks) {
-          if (task.implementation_agent) agentIds.add(task.implementation_agent.profile_id);
-          if (task.reviewer_agent) agentIds.add(task.reviewer_agent.profile_id);
-        }
-        return [phase.id, agentIds.size] as const;
-      }),
-    );
-    setPhaseAgentCounts((current) => {
-      const next = { ...current };
-      for (const outcome of settled) {
-        if (outcome.status === "fulfilled") next[outcome.value[0]] = outcome.value[1];
+        await Promise.all([loadProjectAttention(), loadPhaseExecution(), loadResume()]);
+      } catch (err) {
+        if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
+        else setResumeError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setPhaseAttentionBusy(null);
       }
-      return next;
-    });
-  }, [resume?.phases, project.id]);
-
-  useEffect(() => {
-    void loadPhaseAgentCounts();
-    const timer = window.setInterval(() => void loadPhaseAgentCounts(), 20_000);
-    return () => window.clearInterval(timer);
-  }, [loadPhaseAgentCounts]);
+    },
+    [onLogout, loadProjectAttention, loadPhaseExecution, loadResume],
+  );
 
   const relationalGraph = useMemo<RelationalGraphReadModel | null>(() => {
     if (!draftOnly) return null;
@@ -1447,75 +1407,6 @@ function ProjectGraph({
     (resume?.attention.blocked_tasks ?? 0) > 0 ||
     monitoredPhaseStatus === "needs attention" ||
     Boolean(relationalPhaseFallback?.needsAttention);
-
-  // FRONT DOOR P1b: the resume phase list, projected into the Gantt's input
-  // shape. Phases are already priority-ordered by the server (resume SQL:
-  // `ORDER BY p.priority DESC, ...`).
-  const ganttPhases: GanttPhase[] = useMemo(() => {
-    const durablePhases = (resume?.phases ?? []).map((phase) => ({
-      id: phase.id,
-      name: phase.objective_summary,
-      status: phase.status,
-      percentComplete:
-        phase.percent_complete ??
-        (phase.tasks > 0 ? Math.round((phase.completed_tasks / phase.tasks) * 100) : 0),
-      etaAt: phase.eta_at ?? null,
-      agentCount: phaseAgentCounts[phase.id],
-      blockedLabel: blockedPhaseLabels.get(phase.id) ?? null,
-    }));
-    if (durablePhases.length > 0 || !relationalPhaseFallback) return durablePhases;
-    return [
-      {
-        id: relationalPhaseFallback.id,
-        name: relationalPhaseFallback.title,
-        status: relationalPhaseFallback.status,
-        percentComplete: relationalPhaseFallback.percentComplete,
-        etaAt: null,
-        blockedLabel: relationalPhaseFallback.blockedLabel,
-      },
-    ];
-  }, [resume?.phases, phaseAgentCounts, blockedPhaseLabels, relationalPhaseFallback]);
-
-  const resolvePhaseDecision = useCallback(
-    async (
-      item: AttentionItemDto,
-      input: {
-        selectedOptionId: string;
-        rationale: string;
-        directionTarget: string;
-        directionText: string;
-        idempotencyKey: string;
-      },
-    ) => {
-      const decision = item.decision;
-      if (!decision) return;
-      setPhaseAttentionBusy(item.key);
-      try {
-        await postJson(
-          `/api/v2/projects/${item.project_id}/decision-points/${encodeURIComponent(decision.decision_point_id)}/resolve`,
-          {
-            expected_condition_fingerprint: decision.condition_fingerprint,
-            selected_option_id: input.selectedOptionId,
-            rationale: input.rationale,
-            direction_target: input.directionTarget,
-            direction_text: input.directionText,
-            idempotency_key: input.idempotencyKey,
-          },
-        );
-        // A retry can replace the designated run immediately. Refresh the
-        // task/run read model in the same user action so Overview never keeps
-        // showing the failed attempt while the attention feed already refers
-        // to its replacement.
-        await Promise.all([loadProjectAttention(), loadPhaseExecution(), loadResume()]);
-      } catch (err) {
-        if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
-        else setResumeError(err instanceof Error ? err.message : String(err));
-      } finally {
-        setPhaseAttentionBusy(null);
-      }
-    },
-    [onLogout, loadProjectAttention, loadPhaseExecution, loadResume],
-  );
 
   // ADR-1: approval is a POST that persists server-side; on success the server
   // reports it as current, so we show the hash as evidence.
@@ -2003,244 +1894,6 @@ function ProjectGraph({
                       <span>ACTIVE AGENTS</span>
                     </div>
                   </div>
-                  <div
-                    className={`workspace-update-digest digest-${updatePreferences.detailLevel}`}
-                    data-testid="workspace-update-digest"
-                  >
-                    <div>
-                      <span className="eyebrow">Periodic update</span>
-                      <strong>
-                        {updatePreferences.detailLevel === "attention"
-                          ? projectNeedsAttention
-                            ? "This project needs your attention"
-                            : "No blockers or decisions need you"
-                          : `${resume.progress?.overall_percent_complete ?? 0}% complete across ${
-                              resume.phases.length || (relationalPhaseFallback ? 1 : 0)
-                            } phase${
-                              resume.phases.length === 1 || relationalPhaseFallback ? "" : "s"
-                            }`}
-                      </strong>
-                    </div>
-                    {updatePreferences.detailLevel === "detailed" ? (
-                      <p>
-                        {resume.attention.active_runs} active run
-                        {resume.attention.active_runs === 1 ? "" : "s"} ·{" "}
-                        {resume.recent_completions?.length ?? 0} recent completion
-                        {(resume.recent_completions?.length ?? 0) === 1 ? "" : "s"} ·{" "}
-                        {resume.active_memory_entries ?? 0} saved project context items
-                      </p>
-                    ) : updatePreferences.detailLevel === "summary" ? (
-                      <p>{relationalPhaseFallback?.nextAction ?? resume.next_recommended_action}</p>
-                    ) : null}
-                    <span className="muted">
-                      Every {Math.round(updatePreferences.intervalSeconds / 60)} minute
-                      {updatePreferences.intervalSeconds === 60 ? "" : "s"}
-                    </span>
-                  </div>
-                  {resume.architecture ? (
-                    <div data-testid="resume-architecture">
-                      <strong>{resume.architecture.title}</strong>
-                      <p className="muted">{resume.architecture.summary}</p>
-                    </div>
-                  ) : null}
-                  {/* POLISH P3: `next_recommended_action` is guidance, not a
-                   *  failure — it rendered in the red `<Alert>` (exclamation
-                   *  icon) and users read "Analyze the repository…" as an
-                   *  error. Neutral NextStep now; `<Alert>` stays for real
-                   *  problems (the `error` state above, analyze failures).
-                   *  When the recommended step is the repository analysis,
-                   *  the button that actually performs it rides along. */}
-                  <NextStep
-                    testId="next-step"
-                    action={
-                      !resume.architecture && resume.repositories.length > 0 ? (
-                        <AnalyzeRepositoryControl
-                          projectId={project.id}
-                          onAnalyzed={() => void loadResume()}
-                          onUnauthorized={() => onLogout("Session expired. Sign in again.")}
-                        />
-                      ) : undefined
-                    }
-                  >
-                    {relationalPhaseFallback?.nextAction ?? resume.next_recommended_action}
-                  </NextStep>
-                  {/* FRONT DOOR P1b: the mini-Gantt strip on the workspace phase
-                   *  board — compact per-phase gates + progress at a glance. */}
-                  {ganttPhases.length > 0 ? (
-                    <>
-                      <div data-testid="workspace-mini-gantt">
-                        <Gantt phases={ganttPhases} mini />
-                      </div>
-                      <div className="overview-project-timeline" data-testid="project-timeline">
-                        <div className="section-head">
-                          <div>
-                            <div className="eyebrow">Schedule</div>
-                            <h3>Project timeline</h3>
-                          </div>
-                        </div>
-                        <Gantt phases={ganttPhases} />
-                      </div>
-                    </>
-                  ) : null}
-                  {resume.phases.map((phase) => (
-                    <div className="project-row" key={phase.id}>
-                      <div>
-                        <strong>{phase.objective_summary}</strong>
-                        <div className="muted">
-                          {phase.status} · {phase.completed_tasks}/{phase.tasks} tasks complete
-                        </div>
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        {/* EXECUTION E2: the "Start phase" trigger — only
-                         *  ever enabled when the real server-side gate
-                         *  (PhaseLaunchService) reports the phase ready. */}
-                        <StartPhaseControl
-                          projectId={project.id}
-                          phaseId={phase.id}
-                          phaseStatus={phase.status}
-                          onStarted={() => void loadResume()}
-                          onUnauthorized={() => onLogout("Session expired. Sign in again.")}
-                        />
-                        <Button
-                          className="btn-small"
-                          variant={monitoredPhaseId === phase.id ? "primary" : "default"}
-                          onClick={() => setMonitoredPhaseId(phase.id)}
-                        >
-                          {monitoredPhaseId === phase.id ? "Monitoring" : "Monitor"}
-                        </Button>
-                      </div>
-                    </div>
-                  ))}
-                  {relationalPhaseFallback ? (
-                    <div
-                      className="project-row"
-                      data-testid="relational-overview-phase"
-                      key={relationalPhaseFallback.id}
-                    >
-                      <div>
-                        <strong>{relationalPhaseFallback.title}</strong>
-                        <div className="muted">
-                          {relationalPhaseFallback.statusLabel} ·{" "}
-                          {relationalPhaseFallback.completedTasks}/
-                          {relationalPhaseFallback.taskCount} tasks complete
-                        </div>
-                      </div>
-                      <Button
-                        className="btn-small"
-                        variant={relationalPhaseFallback.needsAttention ? "primary" : "default"}
-                        onClick={() => setWorkspaceTab("work")}
-                      >
-                        Open in Work
-                      </Button>
-                    </div>
-                  ) : null}
-                  {phaseExecution ? (
-                    <section className="phase-execution" aria-labelledby="phase-execution-heading">
-                      <div className="section-head">
-                        <div>
-                          <div className="eyebrow">Live phase</div>
-                          <h3 id="phase-execution-heading">
-                            {phaseExecution.phase.objective_summary}
-                          </h3>
-                        </div>
-                        <Badge
-                          tone={
-                            monitoredPhaseStatus === "needs attention"
-                              ? "danger"
-                              : monitoredPhaseStatus === "completed"
-                                ? "success"
-                                : "info"
-                          }
-                        >
-                          {monitoredPhaseStatus}
-                        </Badge>
-                      </div>
-                      <div className="phase-progress" aria-label="Phase task progress">
-                        <span
-                          style={{
-                            width: `${phaseExecution.phase.total_tasks ? (phaseExecution.phase.completed_tasks / phaseExecution.phase.total_tasks) * 100 : 0}%`,
-                          }}
-                        />
-                      </div>
-                      <p className="muted">
-                        {phaseExecution.phase.completed_tasks}/{phaseExecution.phase.total_tasks}{" "}
-                        tasks complete · updates every{" "}
-                        {phaseHasActiveRun
-                          ? "5 seconds"
-                          : `${updatePreferences.intervalSeconds} seconds`}
-                      </p>
-                      {/* EXECUTION E13 — live cost for the whole phase. */}
-                      <CostLine
-                        spendUsd={phaseExecution.phase.spend_usd}
-                        budgetUsd={phaseExecution.phase.budget_usd}
-                        testId="phase-cost"
-                      />
-                      <DismissibleNote
-                        storageKey="norns:e13-cost-log-note"
-                        testId="e13-honesty-note"
-                      >
-                        Spend and run-log figures come from real metered provider calls and streamed
-                        runner output recorded since this instrumentation shipped. A run or task
-                        with nothing recorded yet shows as "no data", never as $0.00 or an empty log
-                        presented as complete.
-                      </DismissibleNote>
-                      <div className="phase-task-list" data-testid="phase-task-list">
-                        {phaseExecution.tasks.map((task) => (
-                          <TaskQcPanel
-                            key={task.id}
-                            task={task}
-                            projectId={project.id}
-                            phaseId={phaseExecution.phase.id}
-                            reviewRequired={phaseExecution.phase.planning_mode !== "quick"}
-                            focused={focusedTaskId === task.id}
-                            onUnauthorized={() => onLogout("Session expired. Sign in again.")}
-                          />
-                        ))}
-                      </div>
-                    </section>
-                  ) : monitoredPhaseId && !executionError ? (
-                    <Spinner label="Loading phase execution…" />
-                  ) : null}
-                  {executionError ? <Alert testId="execution-error">{executionError}</Alert> : null}
-
-                  {/* FRONT DOOR P1 human-approved addition: the monitored phase's
-                   *  Q&A / decision thread, scoped to exactly this phase — reached
-                   *  by clicking a dashboard phase line's "Open →"/"Answer →"
-                   *  button (which sets focus_phase_id -> monitoredPhaseId). */}
-                  {monitoredPhaseId && phaseAttention.length > 0 ? (
-                    <section
-                      className="card needs-you-panel"
-                      aria-labelledby="phase-needs-you-heading"
-                      data-testid="phase-needs-you"
-                    >
-                      <div className="section-head">
-                        <div>
-                          <div className="eyebrow">Needs you</div>
-                          <h3 id="phase-needs-you-heading">
-                            {phaseAttention.length} item{phaseAttention.length === 1 ? "" : "s"} in
-                            this phase
-                          </h3>
-                        </div>
-                      </div>
-                      {phaseAttention.map((item) => (
-                        <article
-                          key={item.key}
-                          className={`attention-item severity-${item.severity}`}
-                        >
-                          <h4>{item.title}</h4>
-                          <p>{item.summary}</p>
-                          {item.decision ? (
-                            <AttentionDecisionForm
-                              item={{ ...item, decision: item.decision }}
-                              busy={phaseAttentionBusy === item.key}
-                              onResolve={(input) => resolvePhaseDecision(item, input)}
-                            />
-                          ) : null}
-                        </article>
-                      ))}
-                    </section>
-                  ) : null}
-
                   {resumeError ? <Alert testId="resume-error">{resumeError}</Alert> : null}
                 </div>
               </section>
@@ -2266,37 +1919,8 @@ function ProjectGraph({
               <ProjectOperationsDashboard
                 projectId={project.id}
                 onUnauthorized={() => onLogout("Session expired. Sign in again.")}
-                onOpenLegacyPlanningRun={(planningRunId) => {
-                  setActivePlanningRunId(planningRunId);
-                }}
               />
             </Suspense>
-
-            <Suspense fallback={<Spinner label="Loading project conversations…" />}>
-              <ConversationOverview
-                projectId={project.id}
-                onOpenConversation={(conversationId) => {
-                  setWorkspaceTab("work");
-                  onConversationSelected?.(conversationId);
-                }}
-                onUnauthorized={handleWorkspaceUnauthorized}
-              />
-            </Suspense>
-
-            <KnowledgeStatusPanel
-              projectId={project.id}
-              phaseId={monitoredPhaseId}
-              relationalPhase={
-                relationalPhaseFallback
-                  ? {
-                      name: relationalPhaseFallback.title,
-                      status: relationalPhaseFallback.statusLabel,
-                      nextAction: relationalPhaseFallback.nextAction,
-                    }
-                  : null
-              }
-              onUnauthorized={handleWorkspaceUnauthorized}
-            />
           </div>
         ) : null}
 
@@ -2396,7 +2020,7 @@ function ProjectGraph({
                 }}
                 onOpenRecoveryDetails={(phaseId) => {
                   setMonitoredPhaseId(phaseId);
-                  setWorkspaceTab("overview");
+                  setWorkspaceTab("work");
                   if (phaseId === monitoredPhaseId) void loadPhaseExecution();
                 }}
                 onConversationSelected={onConversationSelected}
@@ -2404,6 +2028,92 @@ function ProjectGraph({
                 onUnauthorized={() => onLogout("Session expired. Sign in again.")}
               />
             </Suspense>
+
+            {phaseExecution ? (
+              <section className="card phase-execution" aria-labelledby="phase-execution-heading">
+                <div className="section-head">
+                  <div>
+                    <div className="eyebrow">Execution details</div>
+                    <h3 id="phase-execution-heading">{phaseExecution.phase.objective_summary}</h3>
+                  </div>
+                  <Badge
+                    tone={
+                      monitoredPhaseStatus === "needs attention"
+                        ? "danger"
+                        : monitoredPhaseStatus === "completed"
+                          ? "success"
+                          : "info"
+                    }
+                  >
+                    {monitoredPhaseStatus}
+                  </Badge>
+                </div>
+                <div className="phase-progress" aria-label="Phase task progress">
+                  <span
+                    style={{
+                      width: `${phaseExecution.phase.total_tasks ? (phaseExecution.phase.completed_tasks / phaseExecution.phase.total_tasks) * 100 : 0}%`,
+                    }}
+                  />
+                </div>
+                <p className="muted">
+                  {phaseExecution.phase.completed_tasks}/{phaseExecution.phase.total_tasks} tasks
+                  complete
+                </p>
+                <CostLine
+                  spendUsd={phaseExecution.phase.spend_usd}
+                  budgetUsd={phaseExecution.phase.budget_usd}
+                  testId="phase-cost"
+                />
+                <div className="phase-task-list" data-testid="phase-task-list">
+                  {phaseExecution.tasks.map((task) => (
+                    <TaskQcPanel
+                      key={task.id}
+                      task={task}
+                      projectId={project.id}
+                      phaseId={phaseExecution.phase.id}
+                      reviewRequired={phaseExecution.phase.planning_mode !== "quick"}
+                      focused={focusedTaskId === task.id}
+                      onUnauthorized={() => onLogout("Session expired. Sign in again.")}
+                    />
+                  ))}
+                </div>
+              </section>
+            ) : monitoredPhaseId && !executionError ? (
+              <Spinner label="Loading execution details…" />
+            ) : null}
+            {executionError ? <Alert testId="execution-error">{executionError}</Alert> : null}
+
+            {monitoredPhaseId && phaseAttention.length > 0 ? (
+              <section
+                className="card needs-you-panel"
+                aria-labelledby="phase-needs-you-heading"
+                data-testid="phase-needs-you"
+              >
+                <div className="section-head">
+                  <div>
+                    <div className="eyebrow">Needs you</div>
+                    <h3 id="phase-needs-you-heading">
+                      {phaseAttention.length} item{phaseAttention.length === 1 ? "" : "s"} in this
+                      phase
+                    </h3>
+                  </div>
+                </div>
+                {phaseAttention.map((item) => (
+                  <article key={item.key} className={`attention-item severity-${item.severity}`}>
+                    <h4>{item.title}</h4>
+                    <p>{item.summary}</p>
+                    {item.decision ? (
+                      <AttentionDecisionForm
+                        item={{ ...item, decision: item.decision }}
+                        busy={phaseAttentionBusy === item.key}
+                        onResolve={(input) => resolvePhaseDecision(item, input)}
+                      />
+                    ) : null}
+                  </article>
+                ))}
+              </section>
+            ) : null}
+            {resumeError ? <Alert testId="resume-error">{resumeError}</Alert> : null}
           </div>
         ) : null}
 

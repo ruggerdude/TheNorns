@@ -65,9 +65,7 @@ describe("FRONT DOOR P5: tracking update interval", () => {
     expect(screen.getByText("Update preferences saved")).toBeVisible();
 
     await user.click(within(workspaceNav).getByRole("button", { name: "Overview" }));
-    await waitFor(() =>
-      expect(screen.getByTestId("workspace-update-digest")).toHaveTextContent("Every 1 minute"),
-    );
+    await screen.findByTestId("overview-dashboard");
 
     const callsAfterSave = resumeCalls;
     // The poll cadence now honors the just-saved 60s interval, not the

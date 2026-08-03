@@ -108,7 +108,7 @@ describe("EXECUTION E10 workspace surfaces", () => {
     });
     mock.install();
 
-    await renderAppAndOpenProject(projectAlpha.name);
+    await renderAppAndOpenProject(projectAlpha.name, { workspaceTab: "Work" });
     expect(await screen.findByRole("heading", { name: "Release safely" })).toBeVisible();
 
     const failures = screen.getByTestId("task-verification-task-2");
@@ -141,7 +141,7 @@ describe("EXECUTION E10 workspace surfaces", () => {
     });
     mock.install();
 
-    await renderAppAndOpenProject(projectAlpha.name);
+    await renderAppAndOpenProject(projectAlpha.name, { workspaceTab: "Work" });
     const link = await screen.findByTestId("task-pr-task-2");
     expect(link).toHaveAttribute("href", "https://github.com/acme/repo/pull/42");
     expect(link).toHaveTextContent("View pull request");
@@ -169,7 +169,7 @@ describe("EXECUTION E10 workspace surfaces", () => {
     });
     mock.install();
 
-    await renderAppAndOpenProject(projectAlpha.name);
+    await renderAppAndOpenProject(projectAlpha.name, { workspaceTab: "Work" });
     const branch = await screen.findByTestId("task-branch-task-2");
     expect(branch).toHaveTextContent("Branch norns/task-2");
     expect(branch).toHaveTextContent(/no GitHub token is configured/);
@@ -202,7 +202,7 @@ describe("EXECUTION E10 workspace surfaces", () => {
     });
     mock.install();
 
-    await renderAppAndOpenProject(projectAlpha.name);
+    await renderAppAndOpenProject(projectAlpha.name, { workspaceTab: "Work" });
     expect(await screen.findByRole("heading", { name: "Release safely" })).toBeVisible();
     expect(screen.queryByTestId("task-verification-task-2")).toBeNull();
     expect(screen.queryByTestId("task-pr-task-2")).toBeNull();

@@ -1,5 +1,4 @@
 import { render, screen } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProjectOperationsDashboard } from "./ProjectOperationsDashboard";
 
@@ -157,52 +156,24 @@ afterEach(() => {
 });
 
 describe("Phase 6 project operations dashboard", () => {
-  it("renders every authoritative section, honest empty states, deep links, and legacy recovery", async () => {
-    const onOpenLegacyPlanningRun = vi.fn();
+  it("keeps spending, status, and actionable items in a compact overview", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => Response.json(dashboard())),
     );
-    const user = userEvent.setup();
 
-    render(
-      <ProjectOperationsDashboard
-        projectId={projectId}
-        onUnauthorized={() => undefined}
-        onOpenLegacyPlanningRun={onOpenLegacyPlanningRun}
-      />,
-    );
+    render(<ProjectOperationsDashboard projectId={projectId} onUnauthorized={() => undefined} />);
 
-    expect(await screen.findByRole("heading", { name: "Project operations" })).toBeInTheDocument();
-    for (const heading of [
-      "Active work and progress",
-      "Status",
-      "Open decisions and blockers",
-      "Spend and projected budget",
-      "Deployments and verification",
-      "Planning and development chats",
-      "Approved mockups and recent artifacts",
-      "Legacy planning runs",
-    ]) {
-      expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
-    }
+    expect(await screen.findByRole("heading", { name: "Spending and status" })).toBeInTheDocument();
     expect(screen.getByText("Visual collection failed")).toBeInTheDocument();
-    expect(screen.getAllByText("$12.50")).toHaveLength(2);
+    expect(screen.getByText("Deployment decision")).toBeInTheDocument();
+    expect(screen.getByText("$12.50")).toBeInTheDocument();
     expect(screen.getByText("$42.00")).toBeInTheDocument();
-    expect(screen.getByText("No deployment observations are recorded.")).toBeInTheDocument();
-    expect(screen.getByText("No verification results are recorded.")).toBeInTheDocument();
-    expect(screen.getByText("No approved mockups are recorded.")).toBeInTheDocument();
-    expect(screen.getByText("No recent artifacts are recorded.")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Open planning/ })).toHaveAttribute(
-      "href",
-      `/projects/${projectId}/work/planning-1`,
-    );
-    expect(screen.getByRole("link", { name: /Open Development chat/ })).toHaveAttribute(
-      "href",
-      `/projects/${projectId}/work/execution-1`,
-    );
-    await user.click(screen.getByRole("button", { name: "Open legacy run" }));
-    expect(onOpenLegacyPlanningRun).toHaveBeenCalledWith("legacy-1");
+    expect(screen.queryByText("No deployment observations are recorded.")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Planning and development chats" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Legacy planning runs" })).not.toBeInTheDocument();
   });
 
   it("does not convert an unavailable source into a zero or an empty result", async () => {
@@ -221,16 +192,10 @@ describe("Phase 6 project operations dashboard", () => {
       vi.fn(async () => Response.json(payload)),
     );
 
-    render(
-      <ProjectOperationsDashboard
-        projectId={projectId}
-        onUnauthorized={() => undefined}
-        onOpenLegacyPlanningRun={() => undefined}
-      />,
-    );
+    render(<ProjectOperationsDashboard projectId={projectId} onUnauthorized={() => undefined} />);
 
     expect(await screen.findByText("The usage ledger timed out.")).toBeInTheDocument();
-    expect(screen.getByText("Unavailable")).toBeInTheDocument();
+    expect(screen.getByText("Spending unavailable")).toBeInTheDocument();
     expect(screen.queryByText("$0.00")).not.toBeInTheDocument();
   });
 });

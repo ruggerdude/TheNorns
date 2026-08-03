@@ -151,9 +151,6 @@ describe("relational Graph read model", () => {
     seedAuth();
 
     const { user } = await renderAppAndOpenProject(project.name);
-    expect(await screen.findByTestId("knowledge-status-unavailable")).toHaveTextContent(
-      "Knowledge status is not available yet",
-    );
     await user.click(await screen.findByRole("button", { name: "Graph" }));
 
     expect(await screen.findByText("Notification API")).toBeInTheDocument();
@@ -306,24 +303,11 @@ describe("relational Graph read model", () => {
     expect(screen.queryByTestId("overview-no-plan-pointer")).not.toBeInTheDocument();
     expect(within(resumePanel).getByTestId("overview-phase-count")).toHaveTextContent("1");
     expect(within(resumePanel).getByTestId("overview-attention-count")).toHaveTextContent("1");
-    expect(screen.getByTestId("next-step")).toHaveTextContent("Retry coding start in Work");
-    expect(screen.getByTestId("relational-overview-phase")).toHaveTextContent(
-      "Correct the workspace empty-state copy",
-    );
-    expect(screen.getByTestId("relational-overview-phase")).toHaveTextContent(
-      "approved · coding needs restart · 0/1 tasks complete",
-    );
-
-    const knowledge = screen.getByTestId("knowledge-status-relational");
-    expect(knowledge).toHaveTextContent("Correct the workspace empty-state copy");
-    expect(knowledge).toHaveTextContent("approved · coding needs restart");
-    expect(knowledge).not.toHaveTextContent("No phase selected");
-
-    const tracking = screen.getByTestId("project-timeline");
-    expect(
-      within(tracking).getByText("Correct the workspace empty-state copy"),
-    ).toBeInTheDocument();
-    expect(within(tracking).getByTestId("gantt-gate")).toHaveAttribute("data-state", "blocked");
+    expect(screen.queryByTestId("next-step")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("relational-overview-phase")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("knowledge-status-relational")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("project-timeline")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Open in Work" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Graph" }));
     expect(await screen.findByText("Correct empty-state copy")).toBeInTheDocument();

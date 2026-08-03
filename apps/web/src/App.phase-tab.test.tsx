@@ -878,7 +878,7 @@ describe("PHASE TAB (P2)", () => {
     expect(screen.queryByTestId("phase-retry-execution")).not.toBeInTheDocument();
 
     await user.click(screen.getByTestId("phase-open-recovery-details"));
-    expect(screen.getByRole("button", { name: "Overview" })).toHaveClass("on");
+    expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
   });
 
   it("lets a current blocked execution override a stale successful kickoff", async () => {

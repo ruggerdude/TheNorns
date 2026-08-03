@@ -129,7 +129,7 @@ describe("EXECUTION E13: live cost is honest", () => {
     });
     mock.install();
 
-    await renderAppAndOpenProject(projectAlpha.name);
+    await renderAppAndOpenProject(projectAlpha.name, { workspaceTab: "Work" });
     const taskCost = await screen.findByTestId("task-cost-task-2");
     expect(taskCost).toHaveTextContent("$0.27");
     expect(taskCost).toHaveTextContent("$5.00");
@@ -164,7 +164,7 @@ describe("EXECUTION E13: live cost is honest", () => {
     });
     mock.install();
 
-    await renderAppAndOpenProject(projectAlpha.name);
+    await renderAppAndOpenProject(projectAlpha.name, { workspaceTab: "Work" });
     const taskCost = await screen.findByTestId("task-cost-task-2");
     expect(taskCost).toHaveTextContent("no metered spend yet");
     expect(taskCost).toHaveTextContent("$5.00");
@@ -201,7 +201,7 @@ describe("EXECUTION E13: live run log", () => {
     });
     mock.install();
 
-    await renderAppAndOpenProject(projectAlpha.name);
+    await renderAppAndOpenProject(projectAlpha.name, { workspaceTab: "Work" });
     const output = await screen.findByTestId("task-run-log-output-task-2");
     expect(output).toHaveTextContent("building...");
     expect(output).toHaveTextContent("running tests...");
@@ -241,7 +241,7 @@ describe("dashboard effective status and quick-change review semantics", () => {
     });
     mock.install();
 
-    await renderAppAndOpenProject(projectAlpha.name);
+    await renderAppAndOpenProject(projectAlpha.name, { workspaceTab: "Work" });
 
     expect(await screen.findByRole("heading", { name: "Release safely" })).toBeVisible();
     expect(screen.getAllByText("needs attention").length).toBeGreaterThan(0);
@@ -279,7 +279,7 @@ describe("EXECUTION E13: phase-execution polling cadence", () => {
     // switching timer implementations AFTER an interval is already
     // scheduled would leave that interval running on the real clock,
     // unaffected by `advanceTimersByTimeAsync`.
-    await renderAppAndOpenProject(projectAlpha.name);
+    await renderAppAndOpenProject(projectAlpha.name, { workspaceTab: "Work" });
     await screen.findByTestId("phase-task-list");
     const callsAfterMount = executionCalls;
 
@@ -312,7 +312,7 @@ describe("EXECUTION E13: phase-execution polling cadence", () => {
     });
     mock.install();
 
-    await renderAppAndOpenProject(projectAlpha.name);
+    await renderAppAndOpenProject(projectAlpha.name, { workspaceTab: "Work" });
     await screen.findByTestId("phase-task-list");
     const callsAfterMount = executionCalls;
 
