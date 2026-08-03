@@ -134,6 +134,9 @@ describe("QcWorkspace", () => {
     expect(screen.getByRole("button", { name: "Accept all 2" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Choose individually" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Accept none" })).toBeVisible();
+    expect(screen.getByText("Waiting on you")).toBeVisible();
+    expect(screen.getByText("Independent reviewer")).toBeVisible();
+    expect(screen.getByText("OpenAI · gpt")).toBeVisible();
     expect(
       within(screen.getByRole("group", { name: "Quality control actions" }))
         .getAllByRole("button")
@@ -341,7 +344,10 @@ describe("QcWorkspace", () => {
       }),
     );
     expect(screen.getByText("4:12 on this step")).toBeVisible();
-    expect(screen.getByText("gpt")).toBeVisible();
+    expect(screen.getAllByText("gpt").length).toBeGreaterThan(0);
+    expect(screen.getByText("Working now")).toBeVisible();
+    expect(screen.getByText("Independent reviewer")).toBeVisible();
+    expect(screen.getByText("OpenAI · gpt")).toBeVisible();
     expect(screen.getByText("2 completed of 5 items")).toBeVisible();
     expect(screen.getByText("1,284 characters received")).toBeVisible();
     expect(screen.getByRole("heading", { name: "Quality control" })).toBeVisible();

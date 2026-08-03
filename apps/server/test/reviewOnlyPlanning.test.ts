@@ -1486,6 +1486,162 @@ describe("review-only conversational planning", () => {
     expect(result.final_plan.plan.modules[1]?.description).toContain("clarified UI");
   });
 
+  it("runs a complete mixed-scope QC cycle without collapsing every PM change into one oversized batch", async () => {
+    const seed = twoModuleEnvelope();
+    const findings: ReviewFindingT[] = [
+      {
+        severity: "must_fix",
+        module_id: "contracts",
+        finding: "Contracts finding one.",
+        recommendation: "Clarify the contracts boundary.",
+      },
+      {
+        severity: "must_fix",
+        module_id: null,
+        finding: "Plan finding one.",
+        recommendation: "Clarify the plan risk.",
+      },
+      {
+        severity: "should_fix",
+        module_id: "contracts",
+        finding: "Contracts finding two.",
+        recommendation: "Clarify contracts verification.",
+      },
+      {
+        severity: "must_fix",
+        module_id: "ui",
+        finding: "UI finding one.",
+        recommendation: "Clarify the UI boundary.",
+      },
+      {
+        severity: "should_fix",
+        module_id: null,
+        finding: "Plan finding two.",
+        recommendation: "Clarify the plan mitigation.",
+      },
+      {
+        severity: "should_fix",
+        module_id: "ui",
+        finding: "UI finding two.",
+        recommendation: "Clarify UI verification.",
+      },
+      {
+        severity: "should_fix",
+        module_id: "contracts",
+        finding: "Contracts finding three.",
+        recommendation: "Clarify contracts ownership.",
+      },
+      {
+        severity: "should_fix",
+        module_id: null,
+        finding: "Plan finding three.",
+        recommendation: "Clarify the plan rollout risk.",
+      },
+    ];
+    const planRevision = {
+      base_plan_content_hash: canonicalSha256(seed),
+      responses: [1, 4, 7].map((findingIndex) => ({
+        finding_index: findingIndex,
+        disposition: "accept" as const,
+        rationale: `Applied plan finding ${findingIndex}.`,
+      })),
+      changes: [
+        {
+          op: "set_risks" as const,
+          finding_indices: [1, 4, 7],
+          value: [
+            {
+              description: "Reviewed mixed-scope risk",
+              mitigation: "Keep every QC change bounded and attributable.",
+            },
+          ],
+        },
+      ],
+    };
+    const afterPlan = V2WorkPlanContract.parse({
+      ...seed,
+      plan: { ...seed.plan, risks: planRevision.changes[0]?.value ?? [] },
+    });
+    const contractsRevision = {
+      base_plan_content_hash: canonicalSha256(afterPlan),
+      responses: [0, 2, 6].map((findingIndex) => ({
+        finding_index: findingIndex,
+        disposition: "accept" as const,
+        rationale: `Applied contracts finding ${findingIndex}.`,
+      })),
+      changes: [
+        {
+          op: "patch_module" as const,
+          finding_indices: [0, 2, 6],
+          module_id: "contracts",
+          patch: { description: "Deliver the fully reviewed contracts boundary." },
+        },
+      ],
+    };
+    const afterContracts = V2WorkPlanContract.parse({
+      ...afterPlan,
+      plan: {
+        ...afterPlan.plan,
+        modules: afterPlan.plan.modules.map((module) =>
+          module.id === "contracts"
+            ? { ...module, description: "Deliver the fully reviewed contracts boundary." }
+            : module,
+        ),
+      },
+    });
+    const uiRevision = {
+      base_plan_content_hash: canonicalSha256(afterContracts),
+      responses: [3, 5].map((findingIndex) => ({
+        finding_index: findingIndex,
+        disposition: "accept" as const,
+        rationale: `Applied UI finding ${findingIndex}.`,
+      })),
+      changes: [
+        {
+          op: "patch_module" as const,
+          finding_indices: [3, 5],
+          module_id: "ui",
+          patch: { description: "Deliver the fully reviewed UI boundary." },
+        },
+      ],
+    };
+    const pm = new FakeAdapter("anthropic");
+    const reviewer = new FakeAdapter("openai");
+    reviewer.enqueue({ findings }, { findings: [] });
+    pm.enqueue(planRevision, contractsRevision, uiRevision);
+
+    const result = await runReviewOnlyPlanning({
+      pm,
+      reviewer,
+      projectId: "project-mixed-scope-cycle",
+      initiatedByUserId: "user-mixed-scope-cycle",
+      seedPlan: seed,
+      frozenContext: {},
+      telemetryGroupId: "review-only-mixed-scope-cycle",
+      maxRounds: 2,
+      revisionFormat: "targeted_v1_with_fallback",
+    });
+
+    assertTerminal(result);
+    expect(result.status).toBe("converged");
+    expect(pm.requests).toHaveLength(3);
+    expect(pm.requests.every((request) => request.schemaName === "targeted_plan_revision")).toBe(
+      true,
+    );
+    expect(pm.requests[0]?.prompt).toContain("Plan finding one.");
+    expect(pm.requests[0]?.prompt).not.toContain("Contracts finding one.");
+    expect(pm.requests[1]?.prompt).toContain("Contracts finding one.");
+    expect(pm.requests[1]?.prompt).not.toContain("UI finding one.");
+    expect(pm.requests[2]?.prompt).toContain("UI finding one.");
+    expect(result.final_plan.plan.risks[0]?.description).toBe("Reviewed mixed-scope risk");
+    expect(
+      result.final_plan.plan.modules.find((module) => module.id === "contracts")?.description,
+    ).toBe("Deliver the fully reviewed contracts boundary.");
+    expect(result.final_plan.plan.modules.find((module) => module.id === "ui")?.description).toBe(
+      "Deliver the fully reviewed UI boundary.",
+    );
+  });
+
   it("repairs a targeted response without asking the PM to regenerate the full plan", async () => {
     const seed = envelope();
     const module = seed.plan.modules[0];

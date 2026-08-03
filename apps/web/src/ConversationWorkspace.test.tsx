@@ -3256,7 +3256,8 @@ describe("conversation workspace", () => {
       await vi.advanceTimersByTimeAsync(2_500);
     });
     expect(detailCalls).toBe(2);
-    expect(screen.getByText("Quality review is working")).toBeInTheDocument();
+    expect(screen.getByText("Working now")).toBeInTheDocument();
+    expect(screen.getByText("Independent reviewer")).toBeInTheDocument();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2_500);
@@ -6221,6 +6222,65 @@ describe("conversation workspace", () => {
     expect(screen.getByRole("button", { name: /Accept all 1/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Choose individually/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Accept none/ })).toBeInTheDocument();
+  });
+
+  it("opens PM progress on the first Send to PM click while the handoff request is pending", async () => {
+    const awaitingDecision = planReview({
+      status: "awaiting_human",
+      qc_mode: "gated_when_contested",
+      paused_checkpoint: "after_review",
+      paused_at_round: 1,
+      rounds_completed: 1,
+      completed_at: null,
+      dispositions: [],
+    });
+    let resolveResume!: (response: Response) => void;
+    const pendingResume = new Promise<Response>((resolve) => {
+      resolveResume = resolve;
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = urlOf(input);
+      if (url.endsWith("/work-items")) return listResponse();
+      if (
+        url.endsWith(`/conversations/${conversationId}`) &&
+        (!init?.method || init.method === "GET")
+      ) {
+        return detailResponse([], null, null, { reviews: [awaitingDecision] });
+      }
+      if (url.endsWith(`/plan-reviews/${awaitingDecision.id}/resume`) && init?.method === "POST") {
+        return pendingResume;
+      }
+      throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("button", { name: "Send to PM" }));
+
+    expect(await screen.findByLabelText("Quality control progress")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Send to PM" })).not.toBeInTheDocument();
+    expect(screen.getByText("Working now")).toBeVisible();
+    expect(screen.getByText("Planning manager")).toBeVisible();
+    expect(screen.getByText("Anthropic · claude-sonnet-5")).toBeVisible();
+    expect(
+      fetchMock.mock.calls.filter(
+        ([input, init]) =>
+          urlOf(input).endsWith(`/plan-reviews/${awaitingDecision.id}/resume`) &&
+          init?.method === "POST",
+      ),
+    ).toHaveLength(1);
+
+    await act(async () => {
+      resolveResume(Response.json({ review: awaitingDecision }));
+      await pendingResume;
+    });
   });
 
   it("refreshes a stale QC decision instead of showing the raw state race", async () => {

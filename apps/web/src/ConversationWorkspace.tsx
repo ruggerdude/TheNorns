@@ -619,6 +619,11 @@ type EditableConversationMessage = {
   text: string;
 };
 
+type OptimisticReviewHandoff = {
+  sourceRound: number;
+  review: V2ConversationPlanReviewT;
+};
+
 type ConversationEditContextValue = {
   messages: Map<string, EditableConversationMessage>;
   editMessage: (sourceMessageId: string, text: string) => Promise<void>;
@@ -3552,6 +3557,9 @@ function ConversationThread({
   const [planChangeLockedIds, setPlanChangeLockedIds] = useState(() => new Set<string>());
   const [reviewBusyId, setReviewBusyId] = useState<string | null>(null);
   const [reviewErrors, setReviewErrors] = useState(() => new Map<string, ReviewActionError>());
+  const [optimisticReviewHandoffs, setOptimisticReviewHandoffs] = useState(
+    () => new Map<string, OptimisticReviewHandoff>(),
+  );
   const [executionProposalBusy, setExecutionProposalBusy] = useState(false);
   const [executionProposalError, setExecutionProposalError] = useState<string | null>(null);
   const [agentsOpen, setAgentsOpen] = useState(false);
@@ -3683,11 +3691,36 @@ function ConversationThread({
     executionProjection?.run?.cancellation,
     onUnauthorized,
   ]);
+  useEffect(() => {
+    setOptimisticReviewHandoffs((current) => {
+      const next = new Map(current);
+      let changed = false;
+      for (const [reviewId, handoff] of current) {
+        const authoritative = detail.plan_reviews.find((review) => review.id === reviewId);
+        const stillAtSourceGate =
+          authoritative?.status === "awaiting_human" &&
+          authoritative.paused_checkpoint === "after_review" &&
+          authoritative.paused_at_round === handoff.sourceRound;
+        if (!stillAtSourceGate) {
+          next.delete(reviewId);
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [detail.plan_reviews]);
+  const visiblePlanReviews = useMemo(
+    () =>
+      detail.plan_reviews.map(
+        (review) => optimisticReviewHandoffs.get(review.id)?.review ?? review,
+      ),
+    [detail.plan_reviews, optimisticReviewHandoffs],
+  );
   const resources = useMemo<ConversationResources>(
     () => ({
       planVersions: new Map(detail.plan_versions.map((version) => [version.id, version])),
       actions: new Map(detail.actions.map((action) => [action.id, action])),
-      reviews: detail.plan_reviews,
+      reviews: visiblePlanReviews,
       handoff: detail.handoff ?? null,
       excerptReceipts: new Map(
         (detail.planning_excerpt_receipts ?? []).map((receipt) => [receipt.id, receipt]),
@@ -3699,10 +3732,10 @@ function ConversationThread({
     [
       detail.actions,
       detail.handoff,
-      detail.plan_reviews,
       detail.plan_versions,
       detail.planning_excerpt_receipts,
       detail.human_waits,
+      visiblePlanReviews,
     ],
   );
   const initialMessages = useMemo(
@@ -3878,6 +3911,7 @@ function ConversationThread({
       .map((review) => review.action_id),
   );
   const awaitingBackgroundSettlement =
+    optimisticReviewHandoffs.size > 0 ||
     detail.plan_reviews.some(
       (review) => review.status === "queued" || review.status === "running",
     ) ||
@@ -4097,6 +4131,7 @@ function ConversationThread({
       apiCall: () => Promise<T>,
       onSuccess?: (result: T) => void,
       onStale?: () => void,
+      onFailure?: (error: unknown) => void,
     ): Promise<void> => {
       if (reviewBusyId !== null) return;
       setReviewBusyId(review.id);
@@ -4140,6 +4175,7 @@ function ConversationThread({
           onRefresh();
           return;
         }
+        onFailure?.(caught);
         const capBlocked = caught instanceof ApiError && caught.code === "round_cap_requires_raise";
         setReviewErrors((current) =>
           new Map(current).set(review.id, {
@@ -4309,8 +4345,65 @@ function ConversationThread({
       review: V2ConversationPlanReviewT,
       decisions: Record<string, "accept" | "reject">,
     ): Promise<void> => {
+      if (reviewBusyId !== null) return Promise.resolve();
+      const now = new Date().toISOString();
+      const sourceRound = review.paused_at_round ?? Math.max(1, review.rounds_completed);
+      const acceptedCount = Object.values(decisions).filter(
+        (decision) => decision === "accept",
+      ).length;
+      const currentFindings = new Map(review.findings.map((finding) => [finding.id, finding]));
+      setOptimisticReviewHandoffs((current) =>
+        new Map(current).set(review.id, {
+          sourceRound,
+          review: {
+            ...review,
+            status: "running",
+            paused_checkpoint: null,
+            paused_at_round: null,
+            finding_decisions: [
+              ...(review.finding_decisions ?? []),
+              ...Object.entries(decisions).flatMap(([findingId, decision]) => {
+                const finding = currentFindings.get(findingId);
+                return finding
+                  ? [
+                      {
+                        finding_id: findingId,
+                        finding_index: finding.index,
+                        decision,
+                        decided_by_user_id: review.initiated_by_user_id,
+                        decided_at: now,
+                      },
+                    ]
+                  : [];
+              }),
+            ],
+            live_progress: {
+              stage: "preparing",
+              round: sourceRound,
+              attempt: 1,
+              provider: review.pm_provider,
+              model: review.pm_model,
+              completed_items: 0,
+              total_items: acceptedCount,
+              output_characters: 0,
+              activity: `Sending ${acceptedCount} accepted finding${acceptedCount === 1 ? "" : "s"} to the planning manager`,
+              output_preview: null,
+              started_at: now,
+              checkpoint_at: now,
+            },
+            updated_at: now,
+          },
+        }),
+      );
       const clearTriageKey = () =>
         clearDurableRequestKey("qc-triage", review.id, reviewRecoveryKeys.current);
+      const clearOptimisticHandoff = () =>
+        setOptimisticReviewHandoffs((current) => {
+          if (!current.has(review.id)) return current;
+          const next = new Map(current);
+          next.delete(review.id);
+          return next;
+        });
       return runReviewAction(
         review,
         () => {
@@ -4328,10 +4421,20 @@ function ConversationThread({
           );
         },
         clearTriageKey,
-        clearTriageKey,
+        () => {
+          clearTriageKey();
+          clearOptimisticHandoff();
+        },
+        clearOptimisticHandoff,
       );
     },
-    [detail.conversation.id, detail.work_item.id, detail.work_item.project_id, runReviewAction],
+    [
+      detail.conversation.id,
+      detail.work_item.id,
+      detail.work_item.project_id,
+      reviewBusyId,
+      runReviewAction,
+    ],
   );
 
   // Gate C ruling (QC-PAUSE-POINTS "Outcomes") — one ruling per contested
@@ -5240,7 +5343,7 @@ function ConversationThread({
                 data-testid="conversation-work-tab-qc"
               >
                 <ConversationQcActivity
-                  reviews={detail.plan_reviews}
+                  reviews={visiblePlanReviews}
                   planVersions={detail.plan_versions}
                 />
               </div>

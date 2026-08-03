@@ -5,6 +5,7 @@ import type {
   V2WorkPlanVersionT,
 } from "@norns/contracts";
 import { useEffect, useMemo, useState } from "react";
+import { aiProviderLabel } from "./aiProviders";
 import type { QcModeT } from "./conversationApi";
 import { Button } from "./ui";
 import "./QcWorkspace.css";
@@ -77,12 +78,37 @@ function currentRound(review: V2ConversationPlanReviewT): number {
   return Math.max(1, Math.min(review.rounds_completed + 1, review.max_rounds));
 }
 
+function activeQcAgent(review: V2ConversationPlanReviewT): {
+  state: string;
+  role: string;
+  provider: string;
+  model: string;
+} {
+  const live = review.live_progress;
+  const liveIsPm =
+    live?.provider === review.pm_provider && live.model !== null && live.model === review.pm_model;
+  const waitingOnHuman = review.status === "awaiting_human";
+  const pmOwnsStep =
+    liveIsPm ||
+    (waitingOnHuman && review.paused_checkpoint === "after_revision") ||
+    (!waitingOnHuman && !live && (review.finding_decisions?.length ?? 0) > 0);
+  return {
+    state: waitingOnHuman
+      ? "Waiting on you"
+      : TERMINAL.has(review.status)
+        ? "Review completed"
+        : review.status === "queued"
+          ? "Queued next"
+          : "Working now",
+    role: pmOwnsStep ? "Planning manager" : "Independent reviewer",
+    provider: aiProviderLabel(pmOwnsStep ? review.pm_provider : review.reviewer_provider),
+    model: pmOwnsStep ? review.pm_model : review.reviewer_model,
+  };
+}
+
 function ownerLabel(review: V2ConversationPlanReviewT): string {
-  if (review.status === "awaiting_human") return "Waiting for your decision";
-  if (review.live_progress?.stage === "revising") return "Plan revision in progress";
-  if (review.live_progress?.stage === "reviewing") return "Review in progress";
-  if (review.status === "queued") return "Review is queued";
-  return "Quality review is working";
+  const agent = activeQcAgent(review);
+  return `${agent.role} · ${agent.provider} · ${agent.model}`;
 }
 
 /** Live elapsed time for the current QC operation. Counts from the durable
@@ -745,6 +771,7 @@ export function QcWorkspace({
                 : review.status === "cancelled"
                   ? "The review was stopped. The plan remains unchanged."
                   : null;
+  const activeAgent = activeQcAgent(review);
 
   return (
     <main className="qc-new-workspace" data-testid="qc-new-workspace">
@@ -753,6 +780,13 @@ export function QcWorkspace({
           <h1>Quality control</h1>
           <p className="qc-new-stage-title">{stageTitle}</p>
           {stageDetail ? <p className="qc-new-header-detail">{stageDetail}</p> : null}
+          <p className="qc-new-agent-identity">
+            <span>{activeAgent.state}</span>
+            <strong>{activeAgent.role}</strong>
+            <span>
+              {activeAgent.provider} · {activeAgent.model}
+            </span>
+          </p>
         </div>
       </header>
 

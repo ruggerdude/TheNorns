@@ -622,22 +622,25 @@ interface TargetedRevisionBatch {
 }
 
 /** Module-scoped findings can be revised independently in one parallel wave.
- * A plan-level finding may legitimately touch several regions, so it keeps
- * the whole revision in one bounded call to avoid conflicting patches. */
+ * Plan-level findings get their own batch instead of absorbing every module
+ * finding into one oversized response. When that batch exists, the caller
+ * applies all batches sequentially so a broad plan change and a module patch
+ * can safely touch the same target without producing conflicting operations. */
 function targetedRevisionBatches(findings: readonly ReviewFindingT[]): TargetedRevisionBatch[] {
-  if (findings.some((finding) => finding.module_id === null)) {
-    return [{ key: "plan", findingIndices: findings.map((_, index) => index) }];
-  }
   const batches = new Map<string, TargetedRevisionBatch>();
   findings.forEach((finding, index) => {
-    const key = `module-${finding.module_id}`;
+    const key = finding.module_id === null ? "plan" : `module-${finding.module_id}`;
     const batch = batches.get(key) ?? { key, findingIndices: [] };
     batch.findingIndices.push(index);
     batches.set(key, batch);
   });
   return [...batches.values()]
     .map((batch) => ({ ...batch, findingIndices: [...batch.findingIndices].sort((a, b) => a - b) }))
-    .sort((left, right) => left.key.localeCompare(right.key));
+    .sort((left, right) => {
+      if (left.key === "plan") return -1;
+      if (right.key === "plan") return 1;
+      return left.key.localeCompare(right.key);
+    });
 }
 
 function findingsForTargetedBatch(
@@ -1072,6 +1075,7 @@ async function runBatchedTargetedRevision(input: {
   const runBatch = async (
     batch: TargetedRevisionBatch,
     compactRetry: boolean,
+    basePlan: V2WorkPlanContractT,
   ): Promise<{
     batch: TargetedRevisionBatch;
     value: V2QcTargetedRevisionT;
@@ -1084,19 +1088,14 @@ async function runBatchedTargetedRevision(input: {
         input.pm,
         {
           system: input.system,
-          prompt: targetedBatchPrompt(
-            input.plan,
-            input.findings,
-            batch.findingIndices,
-            compactRetry,
-          ),
+          prompt: targetedBatchPrompt(basePlan, input.findings, batch.findingIndices, compactRetry),
           maxTokens: compactRetry
             ? TARGETED_PATCH_COMPACT_RETRY_MAX_OUTPUT_TOKENS
             : TARGETED_PATCH_MAX_OUTPUT_TOKENS,
           ...input.meter,
           ...(input.signal ? { signal: input.signal } : {}),
         },
-        targetedBatchSchemaFor(input.plan, input.findings, batch),
+        targetedBatchSchemaFor(basePlan, input.findings, batch),
         "targeted_plan_revision",
         requestId,
         failedUsage,
@@ -1110,7 +1109,7 @@ async function runBatchedTargetedRevision(input: {
           activity: `Reviewing and applying ${batch.findingIndices.length} QC finding${batch.findingIndices.length === 1 ? "" : "s"} in ${batch.key}`,
           markdown: (value) => {
             const materialized = applyTargetedQcRevision(
-              input.plan,
+              basePlan,
               value,
               findingsForTargetedBatch(input.findings, batch),
             );
@@ -1133,37 +1132,63 @@ async function runBatchedTargetedRevision(input: {
     } catch (error) {
       if (!compactRetry && error instanceof AdapterError && outputWasTruncated(error)) {
         if (error.metadata?.usage) input.usage.push(error.metadata.usage);
-        return runBatch(batch, true);
+        return runBatch(batch, true, basePlan);
       }
       throw error;
     }
   };
 
-  const outcomes = await Promise.all(
-    batches.map(async (batch) => {
+  let revisions: Array<Awaited<ReturnType<typeof runBatch>>>;
+  let revisedPlan: V2WorkPlanContractT;
+  if (batches.some((batch) => batch.key === "plan")) {
+    revisions = [];
+    revisedPlan = input.plan;
+    for (const batch of batches) {
       try {
-        return { ok: true as const, value: await runBatch(batch, false) };
+        const revision = await runBatch(batch, false, revisedPlan);
+        revisions.push(revision);
+        revisedPlan = applyTargetedQcRevision(
+          revisedPlan,
+          revision.value,
+          findingsForTargetedBatch(input.findings, batch),
+        );
       } catch (error) {
-        return { ok: false as const, error };
+        if (error instanceof AdapterError && error.metadata?.usage) {
+          input.usage.push(error.metadata.usage);
+        }
+        throw error;
       }
-    }),
-  );
-  for (const outcome of outcomes) {
-    if (!outcome.ok && outcome.error instanceof AdapterError && outcome.error.metadata?.usage) {
-      input.usage.push(outcome.error.metadata.usage);
     }
+  } else {
+    const outcomes = await Promise.all(
+      batches.map(async (batch) => {
+        try {
+          return { ok: true as const, value: await runBatch(batch, false, input.plan) };
+        } catch (error) {
+          return { ok: false as const, error };
+        }
+      }),
+    );
+    for (const outcome of outcomes) {
+      if (!outcome.ok && outcome.error instanceof AdapterError && outcome.error.metadata?.usage) {
+        input.usage.push(outcome.error.metadata.usage);
+      }
+    }
+    const failed = outcomes.find((outcome) => !outcome.ok);
+    if (failed && !failed.ok) throw failed.error;
+    revisions = outcomes.flatMap((outcome) => (outcome.ok ? [outcome.value] : []));
+    const changes = revisions.flatMap((revision) => revision.value.changes);
+    revisedPlan = applyTargetedQcRevision(
+      input.plan,
+      {
+        base_plan_content_hash: canonicalSha256(input.plan),
+        responses: revisions.flatMap((revision) => revision.value.responses),
+        changes,
+      },
+      input.findings,
+    );
   }
-  const failed = outcomes.find((outcome) => !outcome.ok);
-  if (failed && !failed.ok) throw failed.error;
-  const revisions = outcomes.flatMap((outcome) => (outcome.ok ? [outcome.value] : []));
   const responses = revisions.flatMap((revision) => revision.value.responses);
-  const changes = revisions.flatMap((revision) => revision.value.changes);
-  const revision = {
-    base_plan_content_hash: canonicalSha256(input.plan),
-    responses,
-    changes,
-  };
-  const revisedPlan = applyTargetedQcRevision(input.plan, revision, input.findings);
   const lastRevision = revisions.at(-1);
   return {
     responses,

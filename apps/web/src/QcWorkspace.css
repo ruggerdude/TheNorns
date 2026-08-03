@@ -58,6 +58,30 @@
   line-height: 1.45;
 }
 
+.qc-new-header .qc-new-agent-identity {
+  display: flex;
+  width: fit-content;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.6rem;
+  margin-top: 0.35rem;
+  padding: 0.45rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--ink-muted);
+  font-size: 0.78rem;
+}
+
+.qc-new-agent-identity > span:first-child {
+  color: var(--qc-blue);
+  font-weight: 800;
+}
+
+.qc-new-agent-identity > strong {
+  color: var(--ink);
+}
+
 .qc-new-stage-rail {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
