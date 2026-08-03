@@ -463,6 +463,81 @@ describe("workspace connections settings", () => {
     expect(screen.getByText("gpt-5.6-sol")).toBeInTheDocument();
     expect(screen.getByText("deepseek-v4-flash")).toBeInTheDocument();
     expect(screen.getByText(/DeepSeek is API-only/)).toBeInTheDocument();
-    expect(screen.getByText("Configured")).toBeInTheDocument();
+    expect(screen.getByText("API configured")).toBeInTheDocument();
+  });
+
+  it("gives exact local subscription setup and verification directions", async () => {
+    mock = accountMock();
+    mock.get("/api/auth/sessions", { body: { sessions: [] } });
+    mock.get("/api/integrations/github/status", {
+      body: {
+        configured: false,
+        setup_available: true,
+        configuration_source: null,
+        user_authorization: { connected: false, login: null },
+        connections: [],
+      },
+    });
+    mock.get("/api/integrations/ai/status", {
+      body: {
+        cross_provider_ready: false,
+        providers: [
+          {
+            id: "anthropic",
+            name: "Anthropic",
+            configured: false,
+            model: "claude-sonnet-5",
+            credential_modes: ["api", "subscription"],
+            required_environment: ["ANTHROPIC_API_KEY"],
+          },
+          {
+            id: "openai",
+            name: "OpenAI",
+            configured: false,
+            model: "gpt-5.6-sol",
+            credential_modes: ["api", "subscription"],
+            required_environment: ["OPENAI_API_KEY", "NORNS_OPENAI_MODEL"],
+          },
+          {
+            id: "deepseek",
+            name: "DeepSeek",
+            configured: false,
+            model: "deepseek-v4-flash",
+            credential_modes: ["api"],
+            required_environment: ["DEEPSEEK_API_KEY"],
+          },
+        ],
+      },
+    });
+    mock.install();
+
+    render(<Account user={admin} initialTab="connections" onClose={vi.fn()} onSignOut={vi.fn()} />);
+
+    await userEvent.click(screen.getByRole("button", { name: "Manage providers" }));
+
+    expect(
+      await screen.findByText("Connect local Claude and Codex subscriptions"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("codex login", { selector: "code" })).toBeInTheDocument();
+    expect(screen.getByText("codex login status", { selector: "code" })).toBeInTheDocument();
+    expect(screen.getByText("Logged in using ChatGPT", { selector: "code" })).toBeInTheDocument();
+    expect(screen.getByText("claude auth login", { selector: "code" })).toBeInTheDocument();
+    expect(screen.getByText("claude auth status --json", { selector: "code" })).toBeInTheDocument();
+    expect(screen.getByText("authMethod", { selector: "code" })).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        (_content, element) =>
+          element?.matches(".subscription-next-step p") === true &&
+          /choose Subscription as the execution credential/i.test(element.textContent ?? ""),
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/server API status below will not change/i)).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /official Codex sign-in guide/i })).toHaveAttribute(
+      "href",
+      "https://learn.chatgpt.com/docs/auth#sign-in-with-chatgpt",
+    );
+    expect(
+      screen.getByRole("link", { name: /official Claude Code sign-in guide/i }),
+    ).toHaveAttribute("href", "https://code.claude.com/docs/en/authentication");
   });
 });

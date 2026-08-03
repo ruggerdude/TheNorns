@@ -902,10 +902,104 @@ export function Account({
                 </div>
                 {openConnection === "ai" ? (
                   <div className="connection-details" id="ai-connection-details">
-                    <p className="muted">
-                      Keys remain in the server secret store. This page shows configuration status
-                      and model routing without exposing secret values.
-                    </p>
+                    <section
+                      className="connection-setup subscription-setup"
+                      aria-labelledby="subscription-setup-heading"
+                    >
+                      <div>
+                        <strong id="subscription-setup-heading">
+                          Connect local Claude and Codex subscriptions
+                        </strong>
+                        <p className="muted">
+                          Complete these steps on every execution computer, using the same operating
+                          system account that runs the Norns Local Agent. The sign-in stays on that
+                          computer and is never copied to the Norns server.
+                        </p>
+                      </div>
+                      <div className="subscription-provider-grid">
+                        <section
+                          className="subscription-provider-instructions"
+                          aria-labelledby="codex-subscription-heading"
+                        >
+                          <strong id="codex-subscription-heading">OpenAI via Codex</strong>
+                          <ol>
+                            <li>
+                              Install or update the official Codex CLI, then run{" "}
+                              <code>codex login</code> in a terminal on the execution computer.
+                            </li>
+                            <li>
+                              Complete <strong>Sign in with ChatGPT</strong> in the browser. Select
+                              the ChatGPT workspace whose subscription should be used; do not choose
+                              API-key sign-in.
+                            </li>
+                            <li>
+                              Run <code>codex login status</code> and confirm it reports{" "}
+                              <code>Logged in using ChatGPT</code>.
+                            </li>
+                          </ol>
+                          <a
+                            href="https://learn.chatgpt.com/docs/auth#sign-in-with-chatgpt"
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Open the official Codex sign-in guide ↗
+                          </a>
+                        </section>
+                        <section
+                          className="subscription-provider-instructions"
+                          aria-labelledby="claude-subscription-heading"
+                        >
+                          <strong id="claude-subscription-heading">
+                            Anthropic via Claude Code
+                          </strong>
+                          <ol>
+                            <li>
+                              Install or update the official Claude Code CLI, then run{" "}
+                              <code>claude auth login</code> on the execution computer.
+                            </li>
+                            <li>
+                              Sign in with a Claude.ai Pro, Max, Team, or Enterprise subscription.
+                              Do not use <code>--console</code>, which selects API billing.
+                            </li>
+                            <li>
+                              Run <code>claude auth status --json</code>. Confirm{" "}
+                              <code>loggedIn</code> is true, <code>authMethod</code> is{" "}
+                              <code>claude.ai</code>, and a subscription type is present.
+                            </li>
+                          </ol>
+                          <a
+                            href="https://code.claude.com/docs/en/authentication"
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            Open the official Claude Code sign-in guide ↗
+                          </a>
+                        </section>
+                      </div>
+                      <div className="subscription-next-step">
+                        <strong>Then select the connection for work</strong>
+                        <p>
+                          In the project or phase staffing controls, choose{" "}
+                          <strong>Subscription</strong> as the execution credential for the matching
+                          provider. The Local Agent verifies the login when execution starts and
+                          fails safely if it is missing or uses the wrong account type.
+                        </p>
+                        <p>
+                          Subscription login is local, so the server API status below will not
+                          change. DeepSeek does not support this connection method and remains
+                          API-only.
+                        </p>
+                      </div>
+                    </section>
+                    <div className="provider-api-status-heading">
+                      <div>
+                        <strong>Server API connections</strong>
+                        <p className="muted">
+                          Keys remain in the server secret store. Status and model routing are shown
+                          here without exposing secret values.
+                        </p>
+                      </div>
+                    </div>
                     <div className="connection-actions">
                       <Button
                         variant="ghost"
@@ -930,7 +1024,7 @@ export function Account({
                               ) : null}
                             </div>
                             <Badge tone={provider.configured ? "success" : "warn"}>
-                              {provider.configured ? "Configured" : "Action required"}
+                              {provider.configured ? "API configured" : "API not configured"}
                             </Badge>
                           </div>
                         ))}
