@@ -5443,6 +5443,7 @@ export function ConversationWorkspace({
   } | null>(null);
   const [threadVersion, setThreadVersion] = useState(0);
   const initialSelectionHandled = useRef<string | null>(null);
+  const createdConversationRoute = useRef<string | null>(null);
   const handleUnauthorized = useCallback(() => callbacks.current.onUnauthorized(), []);
 
   useEffect(() => {
@@ -5577,6 +5578,16 @@ export function ConversationWorkspace({
   }, [handleError, projectId]);
 
   useEffect(() => {
+    if (!initialNewConversation && createdConversationRoute.current !== null) {
+      // createWork has already installed the new conversation and queued its
+      // first message. The URL update is an acknowledgement of that local
+      // transition, not a fresh route that should reset the workspace.
+      const conversationId = createdConversationRoute.current;
+      createdConversationRoute.current = null;
+      initialSelectionHandled.current = conversationId;
+      return;
+    }
+    createdConversationRoute.current = null;
     setGroups(null);
     setGroupsLoadFailed(false);
     setSelected(null);
@@ -5834,6 +5845,7 @@ export function ConversationWorkspace({
         model,
         workflow,
       });
+      createdConversationRoute.current = created.conversation.id;
       setNewWorkInitialBrief(null);
       setShowNew(false);
       setConversationListOpen(false);
@@ -6818,7 +6830,12 @@ export function ConversationWorkspace({
                   ? initialMessage.autoPlan
                   : false
               }
-              onInitialMessageStarted={() => setInitialMessage(null)}
+              onInitialMessageStarted={() => {
+                if (createdConversationRoute.current === detail.conversation.id) {
+                  createdConversationRoute.current = null;
+                }
+                setInitialMessage(null);
+              }}
               onEditMessage={editConversationMessage}
               onOpenConversation={(conversationId) => void openConversationById(conversationId)}
               onConversationModelChanged={(conversation) => {

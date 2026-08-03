@@ -4008,14 +4008,25 @@ describe("conversation workspace", () => {
     const user = userEvent.setup();
 
     const selectedConversations: string[] = [];
-    render(
-      <ConversationWorkspace
-        projectId={projectId}
-        initialNewConversation
-        onConversationSelected={(selectedId) => selectedConversations.push(selectedId)}
-        onUnauthorized={() => undefined}
-      />,
-    );
+    function RoutedNewWorkspace(): React.ReactElement {
+      const [route, setRoute] = useState<{ conversationId: string | null; isNew: boolean }>({
+        conversationId: null,
+        isNew: true,
+      });
+      return (
+        <ConversationWorkspace
+          projectId={projectId}
+          initialConversationId={route.conversationId}
+          initialNewConversation={route.isNew}
+          onConversationSelected={(selectedId) => {
+            selectedConversations.push(selectedId);
+            setRoute({ conversationId: selectedId, isNew: false });
+          }}
+          onUnauthorized={() => undefined}
+        />
+      );
+    }
+    render(<RoutedNewWorkspace />);
 
     const composer = await screen.findByRole("textbox", { name: "Describe the work" });
     const modelSelect = await screen.findByRole("combobox", { name: "Conversation model" });
@@ -4030,7 +4041,8 @@ describe("conversation workspace", () => {
     });
     expect(await screen.findByText("brief.pdf")).toBeInTheDocument();
     expect(await screen.findByText("design-assets.zip")).toBeInTheDocument();
-    await user.type(composer, `${firstMessage}{enter}`);
+    await user.type(composer, firstMessage);
+    await user.click(screen.getByRole("button", { name: "Start Planning" }));
 
     expect(await screen.findByText("Ready to plan.")).toBeInTheDocument();
     await waitFor(() => expect(planSaved).toBe(true));
