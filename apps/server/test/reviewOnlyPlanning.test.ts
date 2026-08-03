@@ -1390,8 +1390,11 @@ describe("review-only conversational planning", () => {
     expect(result.final_plan.staffing[0]?.model).toBe("gpt-5.6-terra");
     expect(pm.requests.map((request) => request.schemaName)).toEqual(["targeted_plan_revision"]);
     expect(pm.requests[0]?.maxTokens).toBe(3_500);
+    expect(pm.requests[0]?.outputEffort).toBe("low");
     expect(pm.requests[0]?.prompt).toContain("responses:");
     expect(pm.requests[0]?.prompt).toContain("Do not return the complete plan");
+    expect(pm.requests[0]?.prompt).toContain("CURRENT MODULE REVISION CONTEXT");
+    expect(pm.requests[0]?.prompt).not.toContain("set_objective");
     const pmArtifact = [...chat]
       .reverse()
       .find((event) => event.channel === "pm" && event.speaker === "pm" && event.artifact_valid);
@@ -1538,32 +1541,8 @@ describe("review-only conversational planning", () => {
         recommendation: "Clarify the plan rollout risk.",
       },
     ];
-    const planRevision = {
-      base_plan_content_hash: canonicalSha256(seed),
-      responses: [1, 4, 7].map((findingIndex) => ({
-        finding_index: findingIndex,
-        disposition: "accept" as const,
-        rationale: `Applied plan finding ${findingIndex}.`,
-      })),
-      changes: [
-        {
-          op: "set_risks" as const,
-          finding_indices: [1, 4, 7],
-          value: [
-            {
-              description: "Reviewed mixed-scope risk",
-              mitigation: "Keep every QC change bounded and attributable.",
-            },
-          ],
-        },
-      ],
-    };
-    const afterPlan = V2WorkPlanContract.parse({
-      ...seed,
-      plan: { ...seed.plan, risks: planRevision.changes[0]?.value ?? [] },
-    });
     const contractsRevision = {
-      base_plan_content_hash: canonicalSha256(afterPlan),
+      base_plan_content_hash: canonicalSha256(seed),
       responses: [0, 2, 6].map((findingIndex) => ({
         finding_index: findingIndex,
         disposition: "accept" as const,
@@ -1578,19 +1557,8 @@ describe("review-only conversational planning", () => {
         },
       ],
     };
-    const afterContracts = V2WorkPlanContract.parse({
-      ...afterPlan,
-      plan: {
-        ...afterPlan.plan,
-        modules: afterPlan.plan.modules.map((module) =>
-          module.id === "contracts"
-            ? { ...module, description: "Deliver the fully reviewed contracts boundary." }
-            : module,
-        ),
-      },
-    });
     const uiRevision = {
-      base_plan_content_hash: canonicalSha256(afterContracts),
+      base_plan_content_hash: canonicalSha256(seed),
       responses: [3, 5].map((findingIndex) => ({
         finding_index: findingIndex,
         disposition: "accept" as const,
@@ -1605,10 +1573,49 @@ describe("review-only conversational planning", () => {
         },
       ],
     };
+    const afterModules = V2WorkPlanContract.parse({
+      ...seed,
+      plan: {
+        ...seed.plan,
+        modules: seed.plan.modules.map((module) =>
+          module.id === "contracts"
+            ? { ...module, description: "Deliver the fully reviewed contracts boundary." }
+            : module.id === "ui"
+              ? { ...module, description: "Deliver the fully reviewed UI boundary." }
+              : module,
+        ),
+      },
+    });
+    const planPatches = [1, 4, 7].map((findingIndex, patchIndex) => ({
+      findingIndex,
+      risk: {
+        description: "Reviewed mixed-scope risk",
+        mitigation: `Bounded plan patch ${patchIndex + 1} of 3.`,
+      },
+    }));
+    let planBase = afterModules;
+    const planRevisions = planPatches.map(({ findingIndex, risk }) => {
+      const revision = {
+        base_plan_content_hash: canonicalSha256(planBase),
+        responses: [
+          {
+            finding_index: findingIndex,
+            disposition: "accept" as const,
+            rationale: `Applied plan finding ${findingIndex}.`,
+          },
+        ],
+        changes: [{ op: "set_risks" as const, finding_indices: [findingIndex], value: [risk] }],
+      };
+      planBase = V2WorkPlanContract.parse({
+        ...planBase,
+        plan: { ...planBase.plan, risks: [risk] },
+      });
+      return revision;
+    });
     const pm = new FakeAdapter("anthropic");
     const reviewer = new FakeAdapter("openai");
     reviewer.enqueue({ findings }, { findings: [] });
-    pm.enqueue(planRevision, contractsRevision, uiRevision);
+    pm.enqueue(contractsRevision, uiRevision, ...planRevisions);
 
     const result = await runReviewOnlyPlanning({
       pm,
@@ -1624,15 +1631,21 @@ describe("review-only conversational planning", () => {
 
     assertTerminal(result);
     expect(result.status).toBe("converged");
-    expect(pm.requests).toHaveLength(3);
+    expect(pm.requests).toHaveLength(5);
     expect(pm.requests.every((request) => request.schemaName === "targeted_plan_revision")).toBe(
       true,
     );
-    expect(pm.requests[0]?.prompt).toContain("Plan finding one.");
-    expect(pm.requests[0]?.prompt).not.toContain("Contracts finding one.");
-    expect(pm.requests[1]?.prompt).toContain("Contracts finding one.");
-    expect(pm.requests[1]?.prompt).not.toContain("UI finding one.");
-    expect(pm.requests[2]?.prompt).toContain("UI finding one.");
+    expect(pm.requests[0]?.prompt).toContain("Contracts finding one.");
+    expect(pm.requests[0]?.prompt).not.toContain("UI finding one.");
+    expect(pm.requests[1]?.prompt).toContain("UI finding one.");
+    expect(pm.requests.slice(2).map((request) => request.prompt)).toEqual([
+      expect.stringContaining("Plan finding one."),
+      expect.stringContaining("Plan finding two."),
+      expect.stringContaining("Plan finding three."),
+    ]);
+    expect(pm.requests.slice(2).every((request) => !request.prompt.includes("patch_module"))).toBe(
+      true,
+    );
     expect(result.final_plan.plan.risks[0]?.description).toBe("Reviewed mixed-scope risk");
     expect(
       result.final_plan.plan.modules.find((module) => module.id === "contracts")?.description,
@@ -1705,7 +1718,7 @@ describe("review-only conversational planning", () => {
     expect(repaired?.prompt).not.toContain("CURRENT WORK PLAN CONTRACT ENVELOPE");
   });
 
-  it("retries an output-limited module patch compactly without using the legacy envelope", async () => {
+  it("does not repeat an output-limited patch with a larger doomed budget", async () => {
     const seed = envelope();
     const pm = new FakeAdapter("anthropic");
     const reviewer = new FakeAdapter("openai");
@@ -1716,18 +1729,6 @@ describe("review-only conversational planning", () => {
           module_id: "contracts",
           finding: "Clarify the module.",
           recommendation: "Update its description.",
-        },
-      ],
-    });
-    pm.enqueue({
-      base_plan_content_hash: canonicalSha256(seed),
-      responses: [{ finding_index: 0, disposition: "accept", rationale: "Clarified it." }],
-      changes: [
-        {
-          op: "patch_module",
-          finding_indices: [0],
-          module_id: "contracts",
-          patch: { description: "Clarified with a compact retry." },
         },
       ],
     });
@@ -1761,26 +1762,25 @@ describe("review-only conversational planning", () => {
     }) as typeof pm.completeStructured);
     const chat: ReviewOnlyChatEvent[] = [];
 
-    const result = await runReviewOnlyPlanning({
-      pm,
-      reviewer,
-      projectId: "project-targeted-truncated",
-      initiatedByUserId: "user-targeted",
-      seedPlan: seed,
-      frozenContext: {},
-      telemetryGroupId: "review-only-targeted-truncated",
-      maxRounds: 1,
-      revisionFormat: "targeted_v1_with_fallback",
-      onChatEvent: (event) => {
-        chat.push(event);
-      },
-    });
+    await expect(
+      runReviewOnlyPlanning({
+        pm,
+        reviewer,
+        projectId: "project-targeted-truncated",
+        initiatedByUserId: "user-targeted",
+        seedPlan: seed,
+        frozenContext: {},
+        telemetryGroupId: "review-only-targeted-truncated",
+        maxRounds: 1,
+        revisionFormat: "targeted_v1_with_fallback",
+        onChatEvent: (event) => {
+          chat.push(event);
+        },
+      }),
+    ).rejects.toMatchObject({ kind: "invalid_response" });
 
-    assertTerminal(result);
-    expect(result.final_plan.plan.modules[0]?.description).toContain("compact retry");
-    expect(completion).toHaveBeenCalledTimes(2);
+    expect(completion).toHaveBeenCalledTimes(1);
     expect(completion.mock.calls[0]?.[0].maxTokens).toBe(3_500);
-    expect(completion.mock.calls[1]?.[0].maxTokens).toBe(6_000);
     expect(chat.filter((event) => event.kind === "repair_reminder")).toHaveLength(0);
     expect(chat.find((event) => event.error_code === "output_truncated")).toMatchObject({
       error_code: "output_truncated",

@@ -13,6 +13,7 @@ import {
   ReviewFindings,
   type UsageEventT,
   type V2QcModeT,
+  V2QcPlanChange,
   type V2QcPlanChangeT,
   type V2QcRevisionFormatT,
   V2QcTargetedRevision,
@@ -36,7 +37,6 @@ const ReviewOnlyRevision = z
 
 const REVIEWER_MAX_OUTPUT_TOKENS = 5_000;
 const TARGETED_PATCH_MAX_OUTPUT_TOKENS = 3_500;
-const TARGETED_PATCH_COMPACT_RETRY_MAX_OUTPUT_TOKENS = 6_000;
 const TARGETED_REPAIR_MAX_OUTPUT_TOKENS = 2_500;
 const QC_APPROVED_KNOWLEDGE_ITEM_LIMIT = 24;
 const QC_APPROVED_KNOWLEDGE_CHARACTER_LIMIT = 24_000;
@@ -340,30 +340,35 @@ function revisionPrompt(plan: V2WorkPlanContractT, findings: readonly ReviewFind
 function targetedBatchPrompt(
   plan: V2WorkPlanContractT,
   findings: readonly ReviewFindingT[],
-  findingIndices: readonly number[],
-  compactRetry: boolean,
+  batch: TargetedRevisionBatch,
 ): string {
-  const batchFindings = findingIndices
+  const batchFindings = batch.findingIndices
     .map((index) => {
       const finding = findings[index];
       if (!finding) throw new Error(`targeted revision batch requires finding ${index}`);
       return `${index}. [${finding.severity}] (${finding.module_id ?? "plan-level"}) ${finding.finding} — ${finding.recommendation}`;
     })
     .join("\n");
+  const operations =
+    batch.scope === "plan"
+      ? "set_objective, set_assumptions, set_risks, set_out_of_scope, set_verification_requirements, set_open_decisions, set_estimated_budget"
+      : "add_module, patch_module, replace_module, remove_module, add_staffing, replace_staffing, remove_staffing";
+  const changeGuidance =
+    batch.scope === "plan"
+      ? "Keep the response compact and change only the plan-level field needed for this finding."
+      : "Keep the response compact. Use exact current module IDs. Prefer patch_module with only changed fields; use replace_module only when most of a module must change. Module add/remove and staffing add/remove are separate explicit operations.";
   return [
     "Disposition and apply only the QC findings below as one bounded revision batch.",
     batchFindings,
     `Return only JSON { base_plan_content_hash: "${canonicalSha256(plan)}", responses: [{ finding_index, disposition: accept|rebut, rationale }], changes: [...] }.`,
     "Return exactly one concise disposition for every listed finding. Every accepted finding must be attributed by at least one bounded change; a rebutted finding must not be attributed by a change.",
-    "Use only these operations: set_objective, set_assumptions, set_risks, set_out_of_scope, add_module, patch_module, replace_module, remove_module, add_staffing, replace_staffing, remove_staffing, set_verification_requirements, set_open_decisions, set_estimated_budget.",
+    `Use only these ${batch.scope}-scope operations: ${operations}.`,
     "Every change requires finding_indices and may reference only the finding indices listed above. Do not return the complete plan.",
-    compactRetry
-      ? "This is a compact retry after an output limit. Use patch_module rather than replace_module for existing modules, include only changed fields, and keep text concise."
-      : "Use exact current module IDs. Prefer patch_module with only changed fields; use replace_module only when most of a module must change. Module add/remove and staffing add/remove are separate explicit operations.",
+    changeGuidance,
     SCOPE_DISCIPLINE,
     "The server rejects a revision that adds more modules than accepted must_fix or should_fix findings justify.",
     "The server applies the bounded operations and validates the complete strict Work Plan Contract.",
-    `CURRENT WORK PLAN CONTRACT ENVELOPE:\n${JSON.stringify(plan)}`,
+    `CURRENT ${batch.scope.toUpperCase()} REVISION CONTEXT:\n${JSON.stringify(targetedBatchContext(plan, batch))}`,
   ].join("\n\n");
 }
 
@@ -618,29 +623,110 @@ function legacyRevisionSchemaFor(
 
 interface TargetedRevisionBatch {
   key: string;
+  scope: "plan" | "module";
+  moduleId: string | null;
   findingIndices: number[];
 }
 
-/** Module-scoped findings can be revised independently in one parallel wave.
- * Plan-level findings get their own batch instead of absorbing every module
- * finding into one oversized response. When that batch exists, the caller
- * applies all batches sequentially so a broad plan change and a module patch
- * can safely touch the same target without producing conflicting operations. */
+/** Module-scoped findings sharing a target can be revised in one parallel wave.
+ * Each plan-level finding is deliberately its own compact patch: production
+ * measurements showed that grouping three plan findings exhausted 3,500 and
+ * 6,000 output tokens, while one finding completed well inside the first cap. */
 function targetedRevisionBatches(findings: readonly ReviewFindingT[]): TargetedRevisionBatch[] {
   const batches = new Map<string, TargetedRevisionBatch>();
+  const planBatches: TargetedRevisionBatch[] = [];
   findings.forEach((finding, index) => {
-    const key = finding.module_id === null ? "plan" : `module-${finding.module_id}`;
-    const batch = batches.get(key) ?? { key, findingIndices: [] };
+    if (finding.module_id === null) {
+      planBatches.push({
+        key: `plan-${index}`,
+        scope: "plan",
+        moduleId: null,
+        findingIndices: [index],
+      });
+      return;
+    }
+    const key = `module-${finding.module_id}`;
+    const batch = batches.get(key) ?? {
+      key,
+      scope: "module" as const,
+      moduleId: finding.module_id,
+      findingIndices: [],
+    };
     batch.findingIndices.push(index);
     batches.set(key, batch);
   });
-  return [...batches.values()]
+  const moduleBatches = [...batches.values()]
     .map((batch) => ({ ...batch, findingIndices: [...batch.findingIndices].sort((a, b) => a - b) }))
-    .sort((left, right) => {
-      if (left.key === "plan") return -1;
-      if (right.key === "plan") return 1;
-      return left.key.localeCompare(right.key);
-    });
+    .sort((left, right) => left.key.localeCompare(right.key));
+  return [...moduleBatches, ...planBatches];
+}
+
+function targetedBatchContext(
+  plan: V2WorkPlanContractT,
+  batch: TargetedRevisionBatch,
+): Record<string, unknown> {
+  const moduleIndex = plan.plan.modules.map((module) => ({
+    id: module.id,
+    title: module.title,
+    dependencies: module.dependencies,
+  }));
+  if (batch.scope === "plan") {
+    return {
+      objective: plan.plan.objective,
+      assumptions: plan.plan.assumptions,
+      risks: plan.plan.risks,
+      out_of_scope: plan.plan.out_of_scope,
+      verification_requirements: plan.verification_requirements,
+      open_decisions: plan.open_decisions,
+      estimated_budget: plan.estimated_budget,
+      module_index: moduleIndex,
+    };
+  }
+  return {
+    plan_objective: plan.plan.objective,
+    module_index: moduleIndex,
+    target_module: plan.plan.modules.find((module) => module.id === batch.moduleId) ?? null,
+    target_staffing: plan.staffing.find((choice) => choice.module_id === batch.moduleId) ?? null,
+  };
+}
+
+const PLAN_LEVEL_QC_OPERATIONS = new Set<V2QcPlanChangeT["op"]>([
+  "set_objective",
+  "set_assumptions",
+  "set_risks",
+  "set_out_of_scope",
+  "set_verification_requirements",
+  "set_open_decisions",
+  "set_estimated_budget",
+]);
+const MODULE_LEVEL_QC_OPERATIONS = new Set<V2QcPlanChangeT["op"]>([
+  "add_module",
+  "replace_module",
+  "patch_module",
+  "remove_module",
+  "add_staffing",
+  "replace_staffing",
+  "remove_staffing",
+]);
+
+function scopedTargetedRevisionSchema(
+  scope: TargetedRevisionBatch["scope"],
+): z.ZodType<V2QcTargetedRevisionT> {
+  const allowed = scope === "plan" ? PLAN_LEVEL_QC_OPERATIONS : MODULE_LEVEL_QC_OPERATIONS;
+  const options = V2QcPlanChange.options.filter((option) =>
+    allowed.has(option.shape.op.value as V2QcPlanChangeT["op"]),
+  );
+  if (options.length < 2) throw new Error(`QC ${scope} scope has no bounded change schema`);
+  const changeSchema = z.union(
+    options as [
+      (typeof options)[number],
+      (typeof options)[number],
+      ...Array<(typeof options)[number]>,
+    ],
+  );
+  return V2QcTargetedRevision.extend({
+    changes: z.array(changeSchema).max(20),
+  }) as z.ZodType<V2QcTargetedRevisionT>;
 }
 
 function findingsForTargetedBatch(
@@ -660,7 +746,7 @@ function targetedBatchSchemaFor(
 ): z.ZodType<V2QcTargetedRevisionT> {
   const allowed = new Set(batch.findingIndices);
   const validationFindings = findingsForTargetedBatch(findings, batch);
-  return V2QcTargetedRevision.superRefine((revision, ctx) => {
+  return scopedTargetedRevisionSchema(batch.scope).superRefine((revision, ctx) => {
     const answered = new Set<number>();
     for (const response of revision.responses) {
       if (!allowed.has(response.finding_index)) {
@@ -1074,7 +1160,6 @@ async function runBatchedTargetedRevision(input: {
 
   const runBatch = async (
     batch: TargetedRevisionBatch,
-    compactRetry: boolean,
     basePlan: V2WorkPlanContractT,
   ): Promise<{
     batch: TargetedRevisionBatch;
@@ -1082,111 +1167,109 @@ async function runBatchedTargetedRevision(input: {
     progressAttempt: number;
     progressRequestId: string;
   }> => {
-    const requestId = `${input.requestId}:batch:${batch.key}${compactRetry ? ":compact-retry" : ""}`;
-    try {
-      const result = await completeStructuredWithRepair(
-        input.pm,
-        {
-          system: input.system,
-          prompt: targetedBatchPrompt(basePlan, input.findings, batch.findingIndices, compactRetry),
-          maxTokens: compactRetry
-            ? TARGETED_PATCH_COMPACT_RETRY_MAX_OUTPUT_TOKENS
-            : TARGETED_PATCH_MAX_OUTPUT_TOKENS,
-          ...input.meter,
-          ...(input.signal ? { signal: input.signal } : {}),
+    const requestId = `${input.requestId}:batch:${batch.key}`;
+    const result = await completeStructuredWithRepair(
+      input.pm,
+      {
+        system: input.system,
+        prompt: targetedBatchPrompt(basePlan, input.findings, batch),
+        maxTokens: TARGETED_PATCH_MAX_OUTPUT_TOKENS,
+        outputEffort: "low",
+        ...input.meter,
+        ...(input.signal ? { signal: input.signal } : {}),
+      },
+      targetedBatchSchemaFor(basePlan, input.findings, batch),
+      "targeted_plan_revision",
+      requestId,
+      failedUsage,
+      {
+        channel: "pm",
+        round: input.round,
+        ...(input.onChatEvent ? { onEvent: input.onChatEvent } : {}),
+        ...(input.onStage ? { onStage: input.onStage } : {}),
+        ...(input.onOutput ? { onOutput: input.onOutput } : {}),
+        totalItems: batch.findingIndices.length,
+        activity: `Reviewing and applying ${batch.findingIndices.length} QC finding${batch.findingIndices.length === 1 ? "" : "s"} in ${batch.key}`,
+        markdown: (value) => {
+          const materialized = applyTargetedQcRevision(
+            basePlan,
+            value,
+            findingsForTargetedBatch(input.findings, batch),
+          );
+          return targetedRevisionMarkdown(input.round, value, materialized);
         },
-        targetedBatchSchemaFor(basePlan, input.findings, batch),
-        "targeted_plan_revision",
-        requestId,
-        failedUsage,
-        {
-          channel: "pm",
-          round: input.round,
-          ...(input.onChatEvent ? { onEvent: input.onChatEvent } : {}),
-          ...(input.onStage ? { onStage: input.onStage } : {}),
-          ...(input.onOutput ? { onOutput: input.onOutput } : {}),
-          totalItems: batch.findingIndices.length,
-          activity: `Reviewing and applying ${batch.findingIndices.length} QC finding${batch.findingIndices.length === 1 ? "" : "s"} in ${batch.key}`,
-          markdown: (value) => {
-            const materialized = applyTargetedQcRevision(
-              basePlan,
-              value,
-              findingsForTargetedBatch(input.findings, batch),
-            );
-            return targetedRevisionMarkdown(input.round, value, materialized);
+        maxAttempts: 2,
+        repairInstruction:
+          batch.scope === "plan"
+            ? "Return a fresh compact targeted envelope with base_plan_content_hash, responses, and changes only. Change only the required plan-level field."
+            : "Return a fresh compact targeted envelope with base_plan_content_hash, responses, and changes only. Use patch_module for existing modules and include only changed fields.",
+        repairMaxTokens: TARGETED_REPAIR_MAX_OUTPUT_TOKENS,
+        previousResponseOnlyRepair: true,
+      },
+    );
+    input.usage.push(result.usage);
+    return {
+      batch,
+      value: result.value,
+      progressAttempt: result.progress_attempt,
+      progressRequestId: result.progress_request_id,
+    };
+  };
+
+  const moduleBatches = batches.filter((batch) => batch.scope === "module");
+  const planBatches = batches.filter((batch) => batch.scope === "plan");
+  const moduleOutcomes = await Promise.all(
+    moduleBatches.map(async (batch) => {
+      try {
+        return { ok: true as const, value: await runBatch(batch, input.plan) };
+      } catch (error) {
+        return { ok: false as const, error };
+      }
+    }),
+  );
+  for (const outcome of moduleOutcomes) {
+    if (!outcome.ok && outcome.error instanceof AdapterError && outcome.error.metadata?.usage) {
+      input.usage.push(outcome.error.metadata.usage);
+    }
+  }
+  const failedModule = moduleOutcomes.find((outcome) => !outcome.ok);
+  if (failedModule && !failedModule.ok) throw failedModule.error;
+
+  const revisions = moduleOutcomes.flatMap((outcome) => (outcome.ok ? [outcome.value] : []));
+  const moduleChanges = revisions.flatMap((revision) => revision.value.changes);
+  const moduleFindingIndices = new Set(moduleBatches.flatMap((batch) => batch.findingIndices));
+  let revisedPlan =
+    moduleChanges.length === 0
+      ? input.plan
+      : applyTargetedQcRevision(
+          input.plan,
+          {
+            base_plan_content_hash: canonicalSha256(input.plan),
+            responses: revisions.flatMap((revision) => revision.value.responses),
+            changes: moduleChanges,
           },
-          maxAttempts: compactRetry ? 1 : 2,
-          repairInstruction:
-            "Return a fresh compact targeted envelope with base_plan_content_hash, responses, and changes only. Use patch_module for existing modules and include only changed fields.",
-          repairMaxTokens: TARGETED_REPAIR_MAX_OUTPUT_TOKENS,
-          previousResponseOnlyRepair: true,
-        },
+          input.findings.map((finding, index) =>
+            moduleFindingIndices.has(index)
+              ? finding
+              : { ...finding, severity: "suggestion" as const },
+          ),
+        );
+
+  for (const batch of planBatches) {
+    try {
+      const revision = await runBatch(batch, revisedPlan);
+      revisions.push(revision);
+      revisedPlan = applyTargetedQcRevision(
+        revisedPlan,
+        revision.value,
+        findingsForTargetedBatch(input.findings, batch),
       );
-      input.usage.push(result.usage);
-      return {
-        batch,
-        value: result.value,
-        progressAttempt: result.progress_attempt,
-        progressRequestId: result.progress_request_id,
-      };
     } catch (error) {
-      if (!compactRetry && error instanceof AdapterError && outputWasTruncated(error)) {
-        if (error.metadata?.usage) input.usage.push(error.metadata.usage);
-        return runBatch(batch, true, basePlan);
+      if (error instanceof AdapterError && error.metadata?.usage) {
+        input.usage.push(error.metadata.usage);
       }
       throw error;
     }
-  };
-
-  let revisions: Array<Awaited<ReturnType<typeof runBatch>>>;
-  let revisedPlan: V2WorkPlanContractT;
-  if (batches.some((batch) => batch.key === "plan")) {
-    revisions = [];
-    revisedPlan = input.plan;
-    for (const batch of batches) {
-      try {
-        const revision = await runBatch(batch, false, revisedPlan);
-        revisions.push(revision);
-        revisedPlan = applyTargetedQcRevision(
-          revisedPlan,
-          revision.value,
-          findingsForTargetedBatch(input.findings, batch),
-        );
-      } catch (error) {
-        if (error instanceof AdapterError && error.metadata?.usage) {
-          input.usage.push(error.metadata.usage);
-        }
-        throw error;
-      }
-    }
-  } else {
-    const outcomes = await Promise.all(
-      batches.map(async (batch) => {
-        try {
-          return { ok: true as const, value: await runBatch(batch, false, input.plan) };
-        } catch (error) {
-          return { ok: false as const, error };
-        }
-      }),
-    );
-    for (const outcome of outcomes) {
-      if (!outcome.ok && outcome.error instanceof AdapterError && outcome.error.metadata?.usage) {
-        input.usage.push(outcome.error.metadata.usage);
-      }
-    }
-    const failed = outcomes.find((outcome) => !outcome.ok);
-    if (failed && !failed.ok) throw failed.error;
-    revisions = outcomes.flatMap((outcome) => (outcome.ok ? [outcome.value] : []));
-    const changes = revisions.flatMap((revision) => revision.value.changes);
-    revisedPlan = applyTargetedQcRevision(
-      input.plan,
-      {
-        base_plan_content_hash: canonicalSha256(input.plan),
-        responses: revisions.flatMap((revision) => revision.value.responses),
-        changes,
-      },
-      input.findings,
-    );
   }
   const responses = revisions.flatMap((revision) => revision.value.responses);
   const lastRevision = revisions.at(-1);

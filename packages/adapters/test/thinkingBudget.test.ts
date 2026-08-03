@@ -101,4 +101,28 @@ describe("anthropic structured output token budget", () => {
       }),
     ]);
   });
+
+  it("passes bounded low effort to Fable without changing its model or schema fallback", async () => {
+    const adapter = adapterFor("claude-fable-5");
+    const body = await sentBody(() =>
+      adapter.completeStructured(
+        {
+          prompt: "STRUCTURED please",
+          maxTokens: 3500,
+          outputEffort: "low",
+          ...attribution,
+        },
+        schema,
+        "targeted_plan_revision",
+      ),
+    );
+
+    expect(body.model).toBe("claude-fable-5");
+    expect(body.output_config).toEqual({ effort: "low" });
+    expect(body.messages).toEqual([
+      expect.objectContaining({
+        content: expect.stringContaining('JSON Schema named "targeted_plan_revision"'),
+      }),
+    ]);
+  });
 });

@@ -66,6 +66,12 @@ export interface CompletionRequest extends CompletionAttribution {
   system?: string;
   prompt: string;
   maxTokens?: number;
+  /**
+   * Provider-neutral output effort for tightly bounded completion work. This
+   * changes how much inference the pinned model spends; it never selects a
+   * different model. Callers should omit it for open-ended work.
+   */
+  outputEffort?: "low" | "medium" | "high" | "max";
   signal?: AbortSignal;
   /** The caller already appended structuredOutputInstruction verbatim. */
   structuredOutputPrepared?: boolean;

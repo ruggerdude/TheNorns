@@ -42,6 +42,26 @@ function outputOnlyThinking(model: string): { thinking?: Anthropic.ThinkingConfi
   return THINKING_ALWAYS_ON.test(model) ? {} : { thinking: { type: "disabled" } };
 }
 
+function outputConfig(
+  request: CompletionRequest,
+  structuredSchema?: Record<string, unknown>,
+): {
+  output_config?: {
+    effort?: NonNullable<CompletionRequest["outputEffort"]>;
+    format?: { type: "json_schema"; schema: Record<string, unknown> };
+  };
+} {
+  if (request.outputEffort === undefined && structuredSchema === undefined) return {};
+  return {
+    output_config: {
+      ...(request.outputEffort !== undefined ? { effort: request.outputEffort } : {}),
+      ...(structuredSchema !== undefined
+        ? { format: { type: "json_schema" as const, schema: structuredSchema } }
+        : {}),
+    },
+  };
+}
+
 export interface AnthropicAdapterOptions {
   apiKey: string;
   model: string;
@@ -128,16 +148,10 @@ export class AnthropicAdapter implements LlmAdapter {
           model: this.model,
           max_tokens: request.maxTokens ?? 16000,
           ...outputOnlyThinking(this.model),
-          ...(nativeStructuredOutput
-            ? {
-                output_config: {
-                  format: {
-                    type: "json_schema" as const,
-                    schema: structuredOutputJsonSchema(schema),
-                  },
-                },
-              }
-            : {}),
+          ...outputConfig(
+            request,
+            nativeStructuredOutput ? structuredOutputJsonSchema(schema) : undefined,
+          ),
           ...(request.system !== undefined ? { system: request.system } : {}),
           messages: [{ role: "user", content: this.userContent(structuredRequest) }],
         },
@@ -256,13 +270,7 @@ export class AnthropicAdapter implements LlmAdapter {
           // Covers both `complete` and `completeStructured` — every buffered
           // completion path assumes max_tokens bounds visible output alone.
           ...outputOnlyThinking(this.model),
-          ...(structuredSchema
-            ? {
-                output_config: {
-                  format: { type: "json_schema" as const, schema: structuredSchema },
-                },
-              }
-            : {}),
+          ...outputConfig(request, structuredSchema),
           ...(request.system !== undefined ? { system: request.system } : {}),
           messages: [{ role: "user", content: this.userContent(request) }],
         },
