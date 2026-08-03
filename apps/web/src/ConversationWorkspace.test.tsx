@@ -2116,7 +2116,7 @@ describe("conversation workspace", () => {
   });
 
   it.each(["typed command", "Plan button", "Plan button — skip QC"] as const)(
-    "turns the conversation into a saved plan via the %s and advances to the QC handoff",
+    "turns the conversation into a saved plan via the %s and requires explicit handoff confirmation",
     async (trigger) => {
       const openedFromPlanButton = trigger !== "typed command";
       const skipsQc = trigger === "Plan button — skip QC";
@@ -2413,19 +2413,19 @@ describe("conversation workspace", () => {
         expect(screen.queryByText("UI preview", { exact: true })).not.toBeInTheDocument();
         await user.click(screen.getByRole("button", { name: "Use conversation as plan" }));
         const handoffDialog = await screen.findByRole("dialog", {
-          name: "How should this plan proceed?",
+          name: "Prepare the plan handoff",
         });
         expect(handoffDialog.closest(".plan-handoff-backdrop")?.parentElement).toBe(document.body);
         if (skipsQc) {
           await user.click(await screen.findByRole("radio", { name: /Skip QC/ }));
           expect(screen.queryByRole("combobox", { name: "QC agent" })).not.toBeInTheDocument();
-          await user.click(screen.getByRole("button", { name: "Create plan & start" }));
+          await user.click(screen.getByRole("button", { name: "Create plan for review" }));
         } else {
           const qcAgent = await screen.findByRole("combobox", { name: "QC agent" });
           expect(qcAgent).toHaveValue("gpt-5.6-sol");
           await user.selectOptions(qcAgent, ["gpt-5.6-terra"]);
           await user.selectOptions(screen.getByRole("combobox", { name: "QC rounds" }), ["2"]);
-          await user.click(screen.getByRole("button", { name: "Create plan & send to QC" }));
+          await user.click(screen.getByRole("button", { name: "Create plan for review" }));
         }
       }
 
@@ -2435,10 +2435,30 @@ describe("conversation workspace", () => {
         expect(await screen.findByText("UI preview", { exact: true })).toBeInTheDocument();
         expect(screen.queryByRole("button", { name: "Send to QC" })).not.toBeInTheDocument();
       } else if (skipsQc) {
-        await waitFor(() => expect(approved).toBe(true));
+        await waitFor(() => expect(saved).toBe(true));
+        expect(handedOff).toBe(false);
+        expect(approved).toBe(false);
+        await user.click(
+          await screen.findByRole("button", {
+            name: "Confirm action: Skip QC and continue",
+          }),
+        );
+        await waitFor(() => expect(handedOff).toBe(true));
+        expect(approved).toBe(false);
         expect(await screen.findByTestId("qc-new-workspace")).toBeInTheDocument();
         expect(screen.getByRole("heading", { name: "Quality review passed" })).toBeInTheDocument();
+        expect(
+          await screen.findByRole("button", { name: "Approve plan and start development" }),
+        ).toBeInTheDocument();
       } else {
+        await waitFor(() => expect(saved).toBe(true));
+        expect(handedOff).toBe(false);
+        expect(
+          await screen.findByRole("button", { name: "Confirm action: Send to QC" }),
+        ).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Plan with PM" })).toBeInTheDocument();
+        await user.click(screen.getByRole("button", { name: "Confirm action: Send to QC" }));
+        await waitFor(() => expect(handedOff).toBe(true));
         expect(await screen.findByTestId("qc-new-workspace")).toBeInTheDocument();
         expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
         expect(await screen.findByText("QC checks planned: 2 · Agents: 1")).toBeInTheDocument();
@@ -3886,7 +3906,7 @@ describe("conversation workspace", () => {
     expect(screen.queryByText("Please inspect the API.")).not.toBeInTheDocument();
   });
 
-  it("starts by sending the first message and assigns an automatic title", async () => {
+  it("starts the PM chat with the first message and files without generating a plan", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     const uploadContentTypes: string[] = [];
     const firstMessage =
@@ -4045,7 +4065,8 @@ describe("conversation workspace", () => {
     await user.click(screen.getByRole("button", { name: "Start Planning" }));
 
     expect(await screen.findByText("Ready to plan.")).toBeInTheDocument();
-    await waitFor(() => expect(planSaved).toBe(true));
+    expect(await screen.findByRole("button", { name: "Send message" })).toBeInTheDocument();
+    await act(async () => undefined);
     const create = calls.find(
       ({ url, init }) => url.endsWith("/work-items") && init?.method === "POST",
     );
@@ -4073,8 +4094,10 @@ describe("conversation workspace", () => {
     ]);
     expect(new Headers(submit?.init?.headers).get("content-type")).toBe("application/json");
     expect(uploadContentTypes).toEqual(["application/pdf", "application/octet-stream"]);
-    expect(calls.some(({ url }) => url.endsWith("/plan-proposals/stream"))).toBe(true);
-    expect(calls.some(({ url }) => url.endsWith(`/actions/${saveAction.id}/confirm`))).toBe(true);
+    expect(planRequested).toBe(false);
+    expect(planSaved).toBe(false);
+    expect(calls.some(({ url }) => url.endsWith("/plan-proposals/stream"))).toBe(false);
+    expect(calls.some(({ url }) => url.endsWith(`/actions/${saveAction.id}/confirm`))).toBe(false);
     expect(selectedConversations).toContain(conversationId);
   });
 

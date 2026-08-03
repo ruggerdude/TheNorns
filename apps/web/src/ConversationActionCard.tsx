@@ -630,7 +630,9 @@ export function ConversationActionCard({
       {reviewPreference ? (
         <p>
           {reviewPreference.mode === "skip_qc"
-            ? "QC was explicitly skipped for this exact plan."
+            ? action.status === "proposed"
+              ? "QC will be skipped only if you confirm this exact plan waiver."
+              : "QC was explicitly skipped for this exact plan."
             : `QC agent: ${aiProviderLabel(reviewPreference.reviewer.provider)} · ${reviewPreference.reviewer.model} · ${reviewPreference.rounds} round${reviewPreference.rounds === 1 ? "" : "s"}`}
         </p>
       ) : null}

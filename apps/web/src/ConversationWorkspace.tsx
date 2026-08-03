@@ -2617,13 +2617,11 @@ function InitialConversationMessage({
   projectId,
   attachments,
   onStarted,
-  onCompleted,
 }: {
   text: string;
   projectId: string;
   attachments: AttachmentDescriptor[];
   onStarted: () => void;
-  onCompleted: () => void;
 }): null {
   const chat = useAISDKChat<NornsUIMessage>();
   const started = useRef(false);
@@ -2644,15 +2642,10 @@ function InitialConversationMessage({
         })),
       ],
     });
-    void submission
-      .then(() => {
-        onStarted();
-        onCompleted();
-      })
-      .catch(() => {
-        // The runtime surfaces the request error in the conversation.
-      });
-  }, [attachments, chat, onCompleted, onStarted, projectId, text]);
+    void submission.then(onStarted).catch(() => {
+      // The runtime surfaces the request error in the conversation.
+    });
+  }, [attachments, chat, onStarted, projectId, text]);
   return null;
 }
 
@@ -2990,7 +2983,7 @@ function PlanHandoffDialog({
         <header>
           <div>
             <div className="eyebrow">Plan handoff</div>
-            <h2 id="plan-handoff-title">How should this plan proceed?</h2>
+            <h2 id="plan-handoff-title">Prepare the plan handoff</h2>
           </div>
           <Button type="button" variant="ghost" disabled={busy} onClick={onCancel}>
             Cancel
@@ -3007,7 +3000,7 @@ function PlanHandoffDialog({
             />
             <span>
               <strong>Run QC</strong>
-              <small>An independent agent reviews the exact plan before execution.</small>
+              <small>Choose the independent review that can run after you approve the plan.</small>
             </span>
           </label>
           <label className={reviewMode === "skip_qc" ? "is-selected" : undefined}>
@@ -3019,7 +3012,7 @@ function PlanHandoffDialog({
             />
             <span>
               <strong>Skip QC</strong>
-              <small>Approve this plan directly and begin with the selected agent.</small>
+              <small>Prepare a QC waiver that still requires your explicit confirmation.</small>
             </span>
           </label>
         </div>
@@ -3104,11 +3097,7 @@ function PlanHandoffDialog({
             });
           }}
         >
-          {busy
-            ? "Preparing plan…"
-            : reviewMode === "qc"
-              ? "Create plan & send to QC"
-              : "Create plan & start"}
+          {busy ? "Preparing plan…" : "Create plan for review"}
         </Button>
       </dialog>
     </div>,
@@ -3359,7 +3348,6 @@ function ConversationThread({
   detail,
   initialMessage,
   initialAttachments = [],
-  autoPlanInitialMessage = false,
   onInitialMessageStarted,
   onEditMessage,
   onOpenConversation,
@@ -3378,7 +3366,6 @@ function ConversationThread({
   detail: ConversationDetail;
   initialMessage?: string | null;
   initialAttachments?: AttachmentDescriptor[];
-  autoPlanInitialMessage?: boolean;
   onInitialMessageStarted?: () => void;
   onEditMessage: (sourceMessageId: string, text: string) => Promise<void>;
   onOpenConversation: (conversationId: string) => void;
@@ -3802,78 +3789,13 @@ function ConversationThread({
             } catch {
               // The plan is already durably saved.
             }
-            if (handoff) {
-              const afterSave = await getConversation(
-                detail.work_item.project_id,
-                detail.work_item.id,
-                conversationId,
-              );
-              const handoffAction = afterSave.actions.find(
-                (action) =>
-                  action.action_type === "send_plan_to_qc" && action.status === "proposed",
-              );
-              if (!handoffAction) {
-                throw new Error("The saved plan is missing its QC or start handoff.");
-              }
-              const handoffConfirmationKey = confirmationKeyFor(
-                handoffAction,
-                confirmationKeys.current,
-              );
-              const handedOff = await confirmConversationAction(
-                detail.work_item.project_id,
-                detail.work_item.id,
-                conversationId,
-                handoffAction.id,
-                handoffConfirmationKey,
-              );
-              setActionOverrides((current) =>
-                new Map(current).set(handoffAction.id, handedOff.action),
-              );
-              setEffectOverrides((current) =>
-                new Map(current).set(handoffAction.id, handedOff.effect),
-              );
-              confirmationKeys.current.delete(handoffAction.id);
-              if (handoff.review.mode === "skip_qc") {
-                const afterWaiver = await getConversation(
-                  detail.work_item.project_id,
-                  detail.work_item.id,
-                  conversationId,
-                );
-                const approvalAction = afterWaiver.actions.find(
-                  (action) => action.action_type === "approve_plan" && action.status === "proposed",
-                );
-                if (!approvalAction) {
-                  throw new Error("QC was skipped, but the plan is missing its start action.");
-                }
-                const approvalKey = confirmationKeyFor(approvalAction, confirmationKeys.current);
-                const approved = await confirmConversationAction(
-                  detail.work_item.project_id,
-                  detail.work_item.id,
-                  conversationId,
-                  approvalAction.id,
-                  approvalKey,
-                );
-                confirmationKeys.current.delete(approvalAction.id);
-                setActionOverrides((current) =>
-                  new Map(current).set(approvalAction.id, approved.action),
-                );
-                setEffectOverrides((current) =>
-                  new Map(current).set(approvalAction.id, approved.effect),
-                );
-                const targetId = executionConversationId(approved.effect);
-                if (targetId) {
-                  onOpenConversation(targetId);
-                  return;
-                }
-              }
-            }
           } catch (caught) {
             if (caught instanceof UnauthorizedError) {
               onUnauthorized();
               return;
             }
             setProposalError(
-              `The plan was created, but its handoff did not finish. Use the visible workflow action to retry. ${
+              `The plan was created, but saving it did not finish. Use the visible workflow action to retry. ${
                 caught instanceof Error ? caught.message : String(caught)
               }`,
             );
@@ -3916,7 +3838,6 @@ function ConversationThread({
       detail.conversation.id,
       detail.work_item.id,
       detail.work_item.project_id,
-      onOpenConversation,
       onRefresh,
       onUnauthorized,
       proposalBusy,
@@ -4759,9 +4680,6 @@ function ConversationThread({
           projectId={detail.work_item.project_id}
           attachments={initialAttachments}
           onStarted={onInitialMessageStarted ?? (() => undefined)}
-          onCompleted={() => {
-            if (autoPlanInitialMessage) void generatePlanProposal(undefined, true);
-          }}
         />
       ) : null}
       <ConversationActionContext.Provider value={actionContext}>
@@ -5428,7 +5346,6 @@ export function ConversationWorkspace({
     conversationId: string;
     text: string;
     attachments: AttachmentDescriptor[];
-    autoPlan: boolean;
   } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [renamingWorkItemId, setRenamingWorkItemId] = useState<string | null>(null);
@@ -5817,7 +5734,6 @@ export function ConversationWorkspace({
           conversationId: created.conversation.id,
           text,
           attachments: [],
-          autoPlan: false,
         });
         setThreadVersion((version) => version + 1);
         callbacks.current.onConversationSelected?.(created.conversation.id);
@@ -5853,7 +5769,6 @@ export function ConversationWorkspace({
         conversationId: created.conversation.id,
         text: message,
         attachments,
-        autoPlan: workflow === "phased",
       });
       setDetail({
         work_item: created.work_item,
@@ -6824,11 +6739,6 @@ export function ConversationWorkspace({
                 initialMessage?.conversationId === detail.conversation.id
                   ? initialMessage.attachments
                   : []
-              }
-              autoPlanInitialMessage={
-                initialMessage?.conversationId === detail.conversation.id
-                  ? initialMessage.autoPlan
-                  : false
               }
               onInitialMessageStarted={() => {
                 if (createdConversationRoute.current === detail.conversation.id) {
