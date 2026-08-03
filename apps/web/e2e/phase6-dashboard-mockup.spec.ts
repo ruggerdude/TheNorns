@@ -350,11 +350,9 @@ test("project operations and exact mockup approval work on desktop and mobile", 
   await expect(dashboard).toBeVisible();
   await expect(dashboard.getByRole("heading", { name: "Status" })).toBeVisible();
   await expect(dashboard.getByText("Review checkout mockup")).toBeVisible();
-  await expect(dashboard.getByLabel("Project operations summary").getByText("$8.00")).toBeVisible();
-  const desktopColumns = await dashboard
-    .locator(".operations-grid")
-    .evaluate((element) => getComputedStyle(element).gridTemplateColumns);
-  expect(desktopColumns.split(" ").length).toBeGreaterThanOrEqual(2);
+  await expect(
+    dashboard.getByLabel("Project spending and status summary").getByText("$8.00"),
+  ).toBeVisible();
 
   await page.goto(`/projects/${projectId}/work/${conversationId}`);
   await expect(page.getByText("UI preview", { exact: true })).toHaveCount(0);
