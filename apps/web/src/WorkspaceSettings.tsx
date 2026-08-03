@@ -247,7 +247,7 @@ export function WorkspaceSettings({
 
   const [qcSettings, setQcSettings] = useState<PlanningQcSettingsDto | null>(null);
   const [qcMode, setQcMode] = useState<QcModeT>("automatic");
-  const [qcRounds, setQcRounds] = useState(3);
+  const [qcRounds, setQcRounds] = useState(1);
   const [qcRebuttals, setQcRebuttals] = useState(false);
   const [qcSaving, setQcSaving] = useState(false);
   const [qcSaved, setQcSaved] = useState(false);
@@ -441,6 +441,15 @@ export function WorkspaceSettings({
                     +
                   </Button>
                 </div>
+                <span className="muted">
+                  {qcRounds === 1
+                    ? "Routine · one reviewer/PM cycle"
+                    : qcRounds === 2
+                      ? "High-risk · includes an independent recheck"
+                      : qcRounds === 0
+                        ? "QC is off"
+                        : `${qcRounds} review cycles`}
+                </span>
               </Field>
               <Field label="Pause mode">
                 <div className="qc-mode-control">

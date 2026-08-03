@@ -325,7 +325,7 @@ export class PlanningRunService {
     options: PlanningRunServiceOptions = {},
   ) {
     this.now = options.now ?? (() => new Date());
-    this.defaultMaxRounds = options.defaultMaxRounds ?? 3;
+    this.defaultMaxRounds = options.defaultMaxRounds ?? 1;
   }
 
   async create(projectId: string, input: CreatePlanningRunInput): Promise<PlanningRunDto> {

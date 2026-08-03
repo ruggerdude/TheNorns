@@ -17,7 +17,7 @@ import {
   type StructuredResult,
   boundedImageParts,
   kindForStatus,
-  prepareStructuredOutputPrompt,
+  structuredOutputJsonSchema,
 } from "./types.js";
 
 export interface OpenAiAdapterOptions {
@@ -62,13 +62,26 @@ export class OpenAiAdapter implements LlmAdapter {
     schemaName: string,
   ): Promise<StructuredResult<T>> {
     const startedAt = Date.now();
+    const nativeStructuredOutput = !request.structuredOutputPrepared;
     const structuredRequest: CompletionRequest = {
       ...request,
-      prompt: request.structuredOutputPrepared
-        ? request.prompt
-        : prepareStructuredOutputPrompt(request.prompt, schema, schemaName),
+      prompt: request.prompt,
     };
-    const response = await this.call(structuredRequest);
+    const response = await this.call(
+      structuredRequest,
+      nativeStructuredOutput
+        ? {
+            type: "json_schema",
+            name: schemaName,
+            // The shared contracts intentionally contain optional patch
+            // fields. OpenAI's strict subset requires every property to be
+            // listed as required, so keep native schema guidance enabled and
+            // retain Zod as the authoritative validator below.
+            strict: false,
+            schema: structuredOutputJsonSchema(schema),
+          }
+        : undefined,
+    );
     return this.structuredResult(response, request, startedAt, schema, schemaName);
   }
 
@@ -84,11 +97,10 @@ export class OpenAiAdapter implements LlmAdapter {
     onDelta: (delta: string) => void,
   ): Promise<StructuredResult<T>> {
     const startedAt = Date.now();
+    const nativeStructuredOutput = !request.structuredOutputPrepared;
     const structuredRequest: CompletionRequest = {
       ...request,
-      prompt: request.structuredOutputPrepared
-        ? request.prompt
-        : prepareStructuredOutputPrompt(request.prompt, schema, schemaName),
+      prompt: request.prompt,
     };
     let response: OpenAI.Responses.Response | null = null;
     let streamedText = "";
@@ -100,6 +112,19 @@ export class OpenAiAdapter implements LlmAdapter {
           stream: true,
           ...(request.system !== undefined ? { instructions: request.system } : {}),
           ...(request.maxTokens !== undefined ? { max_output_tokens: request.maxTokens } : {}),
+          ...(nativeStructuredOutput
+            ? {
+                text: {
+                  format: {
+                    type: "json_schema" as const,
+                    name: schemaName,
+                    strict: false,
+                    schema: structuredOutputJsonSchema(schema),
+                  },
+                  verbosity: "low" as const,
+                },
+              }
+            : {}),
           ...(this.reasoningEffort !== undefined
             ? { reasoning: { effort: this.reasoningEffort } }
             : {}),
@@ -318,7 +343,10 @@ export class OpenAiAdapter implements LlmAdapter {
     })();
   }
 
-  private async call(request: CompletionRequest): Promise<OpenAI.Responses.Response> {
+  private async call(
+    request: CompletionRequest,
+    structuredFormat?: OpenAI.Responses.ResponseFormatTextJSONSchemaConfig,
+  ): Promise<OpenAI.Responses.Response> {
     try {
       return await this.client.responses.create(
         {
@@ -326,6 +354,9 @@ export class OpenAiAdapter implements LlmAdapter {
           input: this.buildInput(request),
           ...(request.system !== undefined ? { instructions: request.system } : {}),
           ...(request.maxTokens !== undefined ? { max_output_tokens: request.maxTokens } : {}),
+          ...(structuredFormat
+            ? { text: { format: structuredFormat, verbosity: "low" as const } }
+            : {}),
           ...(this.reasoningEffort !== undefined
             ? { reasoning: { effort: this.reasoningEffort } }
             : {}),

@@ -35,11 +35,9 @@ const ReviewOnlyRevision = z
   .strict();
 
 const REVIEWER_MAX_OUTPUT_TOKENS = 5_000;
-// Production-sized plans can legitimately need more than 4k output tokens even
-// with targeted changes. The patch operation below keeps the common case small;
-// this ceiling prevents a valid larger response from being cut off mid-JSON.
-const TARGETED_REVISION_MAX_OUTPUT_TOKENS = 8_000;
-const TARGETED_REVISION_REPAIR_MAX_OUTPUT_TOKENS = 6_000;
+const TARGETED_PATCH_MAX_OUTPUT_TOKENS = 3_500;
+const TARGETED_PATCH_COMPACT_RETRY_MAX_OUTPUT_TOKENS = 6_000;
+const TARGETED_REPAIR_MAX_OUTPUT_TOKENS = 2_500;
 const QC_APPROVED_KNOWLEDGE_ITEM_LIMIT = 24;
 const QC_APPROVED_KNOWLEDGE_CHARACTER_LIMIT = 24_000;
 
@@ -314,6 +312,10 @@ function reviewOnlyPrompt(plan: V2WorkPlanContractT): string {
   ].join("\n\n");
 }
 
+function hasActionableFindings(findings: readonly ReviewFindingT[]): boolean {
+  return findings.some((finding) => finding.severity !== "suggestion");
+}
+
 function revisionPrompt(plan: V2WorkPlanContractT, findings: readonly ReviewFindingT[]): string {
   const list = findings
     .map(
@@ -333,26 +335,32 @@ function revisionPrompt(plan: V2WorkPlanContractT, findings: readonly ReviewFind
   ].join("\n\n");
 }
 
-function targetedRevisionPrompt(
+function targetedBatchPrompt(
   plan: V2WorkPlanContractT,
   findings: readonly ReviewFindingT[],
+  findingIndices: readonly number[],
+  compactRetry: boolean,
 ): string {
-  const list = findings
-    .map(
-      (finding, index) =>
-        `${index}. [${finding.severity}] (${finding.module_id ?? "plan-level"}) ${finding.finding} — ${finding.recommendation}`,
-    )
+  const batchFindings = findingIndices
+    .map((index) => {
+      const finding = findings[index];
+      if (!finding) throw new Error(`targeted revision batch requires finding ${index}`);
+      return `${index}. [${finding.severity}] (${finding.module_id ?? "plan-level"}) ${finding.finding} — ${finding.recommendation}`;
+    })
     .join("\n");
   return [
-    "The independent reviewer returned the findings below.",
-    list,
-    `Return JSON { base_plan_content_hash: "${canonicalSha256(plan)}", responses: [{ finding_index, disposition: accept|rebut, rationale }], changes: [...] }.`,
-    "Do not return the complete plan. Use only these operations: set_objective, set_assumptions, set_risks, set_out_of_scope, add_module, patch_module, replace_module, remove_module, add_staffing, replace_staffing, remove_staffing, set_verification_requirements, set_open_decisions, set_estimated_budget.",
-    "Every change requires finding_indices and may reference only findings you disposition as accept. Every must_fix requires an accept or rebut disposition. Rebutted findings must not have attributed changes.",
-    "Use exact current module IDs. Prefer patch_module with only the changed fields; use replace_module only when most of a module must change. Module add/remove and staffing add/remove are separate explicit operations. replace_module requires module.id === module_id; replace_staffing requires staffing.module_id === module_id.",
+    "Disposition and apply only the QC findings below as one bounded revision batch.",
+    batchFindings,
+    `Return only JSON { base_plan_content_hash: "${canonicalSha256(plan)}", responses: [{ finding_index, disposition: accept|rebut, rationale }], changes: [...] }.`,
+    "Return exactly one concise disposition for every listed finding. Every accepted finding must be attributed by at least one bounded change; a rebutted finding must not be attributed by a change.",
+    "Use only these operations: set_objective, set_assumptions, set_risks, set_out_of_scope, add_module, patch_module, replace_module, remove_module, add_staffing, replace_staffing, remove_staffing, set_verification_requirements, set_open_decisions, set_estimated_budget.",
+    "Every change requires finding_indices and may reference only the finding indices listed above. Do not return the complete plan.",
+    compactRetry
+      ? "This is a compact retry after an output limit. Use patch_module rather than replace_module for existing modules, include only changed fields, and keep text concise."
+      : "Use exact current module IDs. Prefer patch_module with only changed fields; use replace_module only when most of a module must change. Module add/remove and staffing add/remove are separate explicit operations.",
     SCOPE_DISCIPLINE,
-    "The server rejects a revision that adds more modules than the findings you disposition accept at must_fix or should_fix severity.",
-    "The server applies these bounded operations, validates the complete strict Work Plan Contract, and writes the materialized plan to the durable Markdown artifact.",
+    "The server rejects a revision that adds more modules than accepted must_fix or should_fix findings justify.",
+    "The server applies the bounded operations and validates the complete strict Work Plan Contract.",
     `CURRENT WORK PLAN CONTRACT ENVELOPE:\n${JSON.stringify(plan)}`,
   ].join("\n\n");
 }
@@ -590,9 +598,7 @@ export function applyTargetedQcRevision(
   return parsed.data;
 }
 
-/** Legacy full-envelope counterpart of targetedRevisionSchemaFor: the scope
- * bound fails structured validation, so it routes through the existing repair
- * loop and its structured-failure diagnostics instead of a parallel path. */
+/** Legacy full-envelope scope bound, routed through structured repair. */
 function legacyRevisionSchemaFor(
   base: V2WorkPlanContractT,
   findings: readonly ReviewFindingT[],
@@ -608,13 +614,95 @@ function legacyRevisionSchemaFor(
   }) as z.ZodType<z.infer<typeof ReviewOnlyRevision>>;
 }
 
-function targetedRevisionSchemaFor(
+interface TargetedRevisionBatch {
+  key: string;
+  findingIndices: number[];
+}
+
+/** Module-scoped findings can be revised independently in one parallel wave.
+ * A plan-level finding may legitimately touch several regions, so it keeps
+ * the whole revision in one bounded call to avoid conflicting patches. */
+function targetedRevisionBatches(findings: readonly ReviewFindingT[]): TargetedRevisionBatch[] {
+  if (findings.some((finding) => finding.module_id === null)) {
+    return [{ key: "plan", findingIndices: findings.map((_, index) => index) }];
+  }
+  const batches = new Map<string, TargetedRevisionBatch>();
+  findings.forEach((finding, index) => {
+    const key = `module-${finding.module_id}`;
+    const batch = batches.get(key) ?? { key, findingIndices: [] };
+    batch.findingIndices.push(index);
+    batches.set(key, batch);
+  });
+  return [...batches.values()]
+    .map((batch) => ({ ...batch, findingIndices: [...batch.findingIndices].sort((a, b) => a - b) }))
+    .sort((left, right) => left.key.localeCompare(right.key));
+}
+
+function findingsForTargetedBatch(
+  findings: readonly ReviewFindingT[],
+  batch: TargetedRevisionBatch,
+): ReviewFindingT[] {
+  const allowed = new Set(batch.findingIndices);
+  return findings.map((finding, index) =>
+    allowed.has(index) ? finding : { ...finding, severity: "suggestion" as const },
+  );
+}
+
+function targetedBatchSchemaFor(
   base: V2WorkPlanContractT,
   findings: readonly ReviewFindingT[],
+  batch: TargetedRevisionBatch,
 ): z.ZodType<V2QcTargetedRevisionT> {
+  const allowed = new Set(batch.findingIndices);
+  const validationFindings = findingsForTargetedBatch(findings, batch);
   return V2QcTargetedRevision.superRefine((revision, ctx) => {
+    const answered = new Set<number>();
+    for (const response of revision.responses) {
+      if (!allowed.has(response.finding_index)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["responses"],
+          message: `revision batch ${batch.key} may not disposition finding ${response.finding_index}`,
+        });
+      }
+      answered.add(response.finding_index);
+    }
+    const missing = batch.findingIndices.filter((index) => !answered.has(index));
+    if (missing.length > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["responses"],
+        message: `revision batch ${batch.key} is missing dispositions for findings ${missing.join(", ")}`,
+      });
+    }
+    const attributed = new Set<number>();
+    for (const change of revision.changes) {
+      for (const findingIndex of change.finding_indices) {
+        if (!allowed.has(findingIndex)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["changes"],
+            message: `revision batch ${batch.key} may not attribute finding ${findingIndex}`,
+          });
+        }
+        attributed.add(findingIndex);
+      }
+    }
+    const accepted = revision.responses
+      .filter(
+        (response) => response.disposition === "accept" && allowed.has(response.finding_index),
+      )
+      .map((response) => response.finding_index);
+    const omitted = accepted.filter((index) => !attributed.has(index));
+    if (omitted.length > 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["changes"],
+        message: `accepted findings ${omitted.join(", ")} have no attributed change`,
+      });
+    }
     try {
-      applyTargetedQcRevision(base, revision, findings);
+      applyTargetedQcRevision(base, revision, validationFindings);
     } catch (error) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -952,6 +1040,132 @@ async function completeStructuredWithRepair<T>(
   throw new Error("unreachable: structured completion attempts always return or throw");
 }
 
+async function runBatchedTargetedRevision(input: {
+  pm: LlmAdapter;
+  plan: V2WorkPlanContractT;
+  findings: readonly ReviewFindingT[];
+  system: string;
+  round: number;
+  requestId: string;
+  meter: Pick<CompletionRequest, "projectId" | "initiatedByUserId">;
+  signal?: AbortSignal;
+  usage: UsageEventT[];
+  onChatEvent?: ReviewOnlyPlanningOptions["onChatEvent"];
+  onStage?: ReviewOnlyPlanningOptions["onStage"];
+  onOutput?: ReviewOnlyPlanningOptions["onOutput"];
+}): Promise<{
+  responses: FindingResponseT[];
+  revisedPlan: V2WorkPlanContractT;
+  progressAttempt: number;
+  progressRequestId: string;
+}> {
+  const failedUsage = (event: UsageEventT) => input.usage.push(event);
+  const batches = targetedRevisionBatches(input.findings);
+
+  const runBatch = async (
+    batch: TargetedRevisionBatch,
+    compactRetry: boolean,
+  ): Promise<{
+    batch: TargetedRevisionBatch;
+    value: V2QcTargetedRevisionT;
+    progressAttempt: number;
+    progressRequestId: string;
+  }> => {
+    const requestId = `${input.requestId}:batch:${batch.key}${compactRetry ? ":compact-retry" : ""}`;
+    try {
+      const result = await completeStructuredWithRepair(
+        input.pm,
+        {
+          system: input.system,
+          prompt: targetedBatchPrompt(
+            input.plan,
+            input.findings,
+            batch.findingIndices,
+            compactRetry,
+          ),
+          maxTokens: compactRetry
+            ? TARGETED_PATCH_COMPACT_RETRY_MAX_OUTPUT_TOKENS
+            : TARGETED_PATCH_MAX_OUTPUT_TOKENS,
+          ...input.meter,
+          ...(input.signal ? { signal: input.signal } : {}),
+        },
+        targetedBatchSchemaFor(input.plan, input.findings, batch),
+        "targeted_plan_revision",
+        requestId,
+        failedUsage,
+        {
+          channel: "pm",
+          round: input.round,
+          ...(input.onChatEvent ? { onEvent: input.onChatEvent } : {}),
+          ...(input.onStage ? { onStage: input.onStage } : {}),
+          ...(input.onOutput ? { onOutput: input.onOutput } : {}),
+          totalItems: batch.findingIndices.length,
+          activity: `Reviewing and applying ${batch.findingIndices.length} QC finding${batch.findingIndices.length === 1 ? "" : "s"} in ${batch.key}`,
+          markdown: (value) => {
+            const materialized = applyTargetedQcRevision(
+              input.plan,
+              value,
+              findingsForTargetedBatch(input.findings, batch),
+            );
+            return targetedRevisionMarkdown(input.round, value, materialized);
+          },
+          maxAttempts: compactRetry ? 1 : 2,
+          repairInstruction:
+            "Return a fresh compact targeted envelope with base_plan_content_hash, responses, and changes only. Use patch_module for existing modules and include only changed fields.",
+          repairMaxTokens: TARGETED_REPAIR_MAX_OUTPUT_TOKENS,
+          previousResponseOnlyRepair: true,
+        },
+      );
+      input.usage.push(result.usage);
+      return {
+        batch,
+        value: result.value,
+        progressAttempt: result.progress_attempt,
+        progressRequestId: result.progress_request_id,
+      };
+    } catch (error) {
+      if (!compactRetry && error instanceof AdapterError && outputWasTruncated(error)) {
+        if (error.metadata?.usage) input.usage.push(error.metadata.usage);
+        return runBatch(batch, true);
+      }
+      throw error;
+    }
+  };
+
+  const outcomes = await Promise.all(
+    batches.map(async (batch) => {
+      try {
+        return { ok: true as const, value: await runBatch(batch, false) };
+      } catch (error) {
+        return { ok: false as const, error };
+      }
+    }),
+  );
+  for (const outcome of outcomes) {
+    if (!outcome.ok && outcome.error instanceof AdapterError && outcome.error.metadata?.usage) {
+      input.usage.push(outcome.error.metadata.usage);
+    }
+  }
+  const failed = outcomes.find((outcome) => !outcome.ok);
+  if (failed && !failed.ok) throw failed.error;
+  const revisions = outcomes.flatMap((outcome) => (outcome.ok ? [outcome.value] : []));
+  const responses = revisions.flatMap((revision) => revision.value.responses);
+  const changes = revisions.flatMap((revision) => revision.value.changes);
+  const revision = {
+    base_plan_content_hash: canonicalSha256(input.plan),
+    responses,
+    changes,
+  };
+  const revisedPlan = applyTargetedQcRevision(input.plan, revision, input.findings);
+  const lastRevision = revisions.at(-1);
+  return {
+    responses,
+    revisedPlan,
+    progressAttempt: Math.max(...revisions.map((candidate) => candidate.progressAttempt)),
+    progressRequestId: lastRevision?.progressRequestId ?? input.requestId,
+  };
+}
+
 /**
  * The additive review-only mode for durable planning runs. It never calls the
  * draft prompt: the reviewer is the first provider to receive the exact saved
@@ -1072,7 +1286,7 @@ export async function runReviewOnlyPlanning(
       reviewedPlan = record.reviewed_plan;
       findings = record.findings;
       if (operationalResume) {
-        if (findings.length === 0) {
+        if (!hasActionableFindings(findings)) {
           return {
             status: "converged",
             rounds: round,
@@ -1154,7 +1368,9 @@ export async function runReviewOnlyPlanning(
         activity: "Saving the reviewer findings",
       });
       await options.onProgress?.(rounds);
-      if (findings.length === 0) {
+      // Suggestions remain visible in the durable review record, but they do
+      // not spend a PM call or force another independent-review round.
+      if (!hasActionableFindings(findings)) {
         return {
           status: "converged",
           rounds: round,
@@ -1178,10 +1394,11 @@ export async function runReviewOnlyPlanning(
       }
     }
 
-    const acceptedFindingIndices =
+    const acceptedFindingIndices = (
       round === startRound && skipReviewerAtStart && resume?.acceptedFindingIndices
         ? [...resume.acceptedFindingIndices]
-        : findings.map((_, index) => index);
+        : findings.map((_, index) => index)
+    ).filter((index) => findings[index]?.severity !== "suggestion");
     const revisionFindings = acceptedFindingIndices.map((index) => {
       const finding = findings[index];
       if (!finding) {
@@ -1192,6 +1409,18 @@ export async function runReviewOnlyPlanning(
       }
       return finding;
     });
+    if (revisionFindings.length === 0) {
+      return {
+        status: "converged",
+        rounds: round,
+        seed_plan: seedPlan,
+        final_plan: plan,
+        result_plan_content_hash: canonicalSha256(plan),
+        final_plan_markdown: finalPlanMarkdown(plan),
+        review_rounds: rounds,
+        usage,
+      };
+    }
 
     const revisionRequestId = `${options.telemetryGroupId}:revision:${round}${
       options.executionAttempt === undefined ? "" : `:exec:${options.executionAttempt}`
@@ -1240,42 +1469,24 @@ export async function runReviewOnlyPlanning(
       revisionProgressRequestId = legacy.progress_request_id;
     } else {
       try {
-        const targeted = await completeStructuredWithRepair(
-          options.pm,
-          {
-            system: revisionSystem,
-            prompt: targetedRevisionPrompt(reviewedPlan, revisionFindings),
-            maxTokens: TARGETED_REVISION_MAX_OUTPUT_TOKENS,
-            ...meter,
-            ...(options.signal ? { signal: options.signal } : {}),
-          },
-          targetedRevisionSchemaFor(reviewedPlan, revisionFindings),
-          "targeted_plan_revision",
-          revisionRequestId,
-          (failedUsage) => usage.push(failedUsage),
-          {
-            channel: "pm",
-            round,
-            ...(options.onChatEvent ? { onEvent: options.onChatEvent } : {}),
-            ...(options.onStage ? { onStage: options.onStage } : {}),
-            ...(options.onOutput ? { onOutput: options.onOutput } : {}),
-            totalItems: revisionFindings.length,
-            activity: `Applying ${revisionFindings.length} accepted QC finding${revisionFindings.length === 1 ? "" : "s"} to the plan`,
-            markdown: (value) => {
-              const materialized = applyTargetedQcRevision(reviewedPlan, value, revisionFindings);
-              return targetedRevisionMarkdown(round, value, materialized);
-            },
-            repairInstruction:
-              "Try once more. Return a fresh targeted JSON envelope with base_plan_content_hash, responses, and bounded changes only. Correct the validation failure and include every required field. Do not return the complete plan; the server materializes and validates it.",
-            repairMaxTokens: TARGETED_REVISION_REPAIR_MAX_OUTPUT_TOKENS,
-            previousResponseOnlyRepair: true,
-          },
-        );
-        usage.push(targeted.usage);
-        revisionResponses = [...targeted.value.responses];
-        revisedPlan = applyTargetedQcRevision(reviewedPlan, targeted.value, revisionFindings);
-        revisionProgressAttempt = targeted.progress_attempt;
-        revisionProgressRequestId = targeted.progress_request_id;
+        const targeted = await runBatchedTargetedRevision({
+          pm: options.pm,
+          plan: reviewedPlan,
+          findings: revisionFindings,
+          system: revisionSystem,
+          round,
+          requestId: revisionRequestId,
+          meter,
+          ...(options.signal ? { signal: options.signal } : {}),
+          usage,
+          ...(options.onChatEvent ? { onChatEvent: options.onChatEvent } : {}),
+          ...(options.onStage ? { onStage: options.onStage } : {}),
+          ...(options.onOutput ? { onOutput: options.onOutput } : {}),
+        });
+        revisionResponses = targeted.responses;
+        revisedPlan = targeted.revisedPlan;
+        revisionProgressAttempt = targeted.progressAttempt;
+        revisionProgressRequestId = targeted.progressRequestId;
       } catch (error) {
         if (
           revisionFormat !== "targeted_v1_with_fallback" ||
@@ -1285,7 +1496,6 @@ export async function runReviewOnlyPlanning(
         ) {
           throw error;
         }
-        if (error.metadata?.usage) usage.push(error.metadata.usage);
         await options.onChatEvent?.({
           request_id: `${revisionRequestId}:legacy-fallback:transition`,
           channel: "pm",

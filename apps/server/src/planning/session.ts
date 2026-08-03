@@ -166,7 +166,7 @@ export async function runQuickPlanning(options: {
 
 export async function runPlanning(options: PlanningOptions): Promise<PlanningResult> {
   const memory = options.memory ?? [];
-  const maxRounds = options.maxRounds ?? 3;
+  const maxRounds = options.maxRounds ?? 1;
   const maxValidationRetries = options.maxValidationRetries ?? 2;
   const usage: UsageEventT[] = [];
 

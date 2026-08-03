@@ -187,6 +187,7 @@ async function openPhaseTab(): Promise<UserEvent> {
   await openProjectFromPortfolio();
   await user.click(await screen.findByRole("button", { name: "Work" }));
   await screen.findByTestId("workspace-tab-work");
+  await screen.findByTestId("phase-goal");
   return user;
 }
 

@@ -126,6 +126,11 @@ export function prepareStructuredOutputPrompt<T>(
   return `${prompt}\n\n${structuredOutputInstruction(schema, schemaName)}`;
 }
 
+/** Provider-neutral JSON Schema used by native structured-output APIs. */
+export function structuredOutputJsonSchema<T>(schema: z.ZodType<T>): Record<string, unknown> {
+  return zodToJsonSchema(schema, { $refStrategy: "none" }) as Record<string, unknown>;
+}
+
 /** Provider-neutral metadata retained when the upstream API exposes it. */
 export interface ProviderCompletionMetadata {
   provider_execution_id?: string;
@@ -213,10 +218,7 @@ export interface ConversationLlmAdapter extends LlmAdapter {
 
 /** Provider-neutral full schema instruction used when native schema mode is unavailable. */
 export function structuredOutputInstruction<T>(schema: z.ZodType<T>, schemaName: string): string {
-  const jsonSchema = zodToJsonSchema(schema, {
-    name: schemaName,
-    $refStrategy: "none",
-  });
+  const jsonSchema = structuredOutputJsonSchema(schema);
   return [
     `Respond with ONLY one JSON object matching the JSON Schema named "${schemaName}".`,
     "Do not add prose, Markdown, or code fences.",

@@ -382,7 +382,7 @@ describe.sequential("durable planning run HTTP API", () => {
       id: runId,
       project_id: projectId,
       objective: "do the thing",
-      max_rounds: 3,
+      max_rounds: 1,
     });
     expect(Array.isArray(body.transcript)).toBe(true);
     expect([

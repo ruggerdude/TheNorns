@@ -16,7 +16,7 @@ import {
   type StructuredResult,
   boundedImageParts,
   kindForStatus,
-  prepareStructuredOutputPrompt,
+  structuredOutputJsonSchema,
 } from "./types.js";
 
 /**
@@ -80,13 +80,15 @@ export class AnthropicAdapter implements LlmAdapter {
     schemaName: string,
   ): Promise<StructuredResult<T>> {
     const startedAt = Date.now();
+    const nativeStructuredOutput = !request.structuredOutputPrepared;
     const structuredRequest: CompletionRequest = {
       ...request,
-      prompt: request.structuredOutputPrepared
-        ? request.prompt
-        : prepareStructuredOutputPrompt(request.prompt, schema, schemaName),
+      prompt: request.prompt,
     };
-    const response = await this.call(structuredRequest);
+    const response = await this.call(
+      structuredRequest,
+      nativeStructuredOutput ? structuredOutputJsonSchema(schema) : undefined,
+    );
     return this.structuredResult(response, request, startedAt, schema, schemaName);
   }
 
@@ -102,11 +104,10 @@ export class AnthropicAdapter implements LlmAdapter {
     onDelta: (delta: string) => void,
   ): Promise<StructuredResult<T>> {
     const startedAt = Date.now();
+    const nativeStructuredOutput = !request.structuredOutputPrepared;
     const structuredRequest: CompletionRequest = {
       ...request,
-      prompt: request.structuredOutputPrepared
-        ? request.prompt
-        : prepareStructuredOutputPrompt(request.prompt, schema, schemaName),
+      prompt: request.prompt,
     };
     let response: Anthropic.Message;
     try {
@@ -115,6 +116,16 @@ export class AnthropicAdapter implements LlmAdapter {
           model: this.model,
           max_tokens: request.maxTokens ?? 16000,
           ...outputOnlyThinking(this.model),
+          ...(nativeStructuredOutput
+            ? {
+                output_config: {
+                  format: {
+                    type: "json_schema" as const,
+                    schema: structuredOutputJsonSchema(schema),
+                  },
+                },
+              }
+            : {}),
           ...(request.system !== undefined ? { system: request.system } : {}),
           messages: [{ role: "user", content: this.userContent(structuredRequest) }],
         },
@@ -221,7 +232,10 @@ export class AnthropicAdapter implements LlmAdapter {
     })();
   }
 
-  private async call(request: CompletionRequest): Promise<Anthropic.Message> {
+  private async call(
+    request: CompletionRequest,
+    structuredSchema?: Record<string, unknown>,
+  ): Promise<Anthropic.Message> {
     try {
       return await this.client.messages.create(
         {
@@ -230,6 +244,13 @@ export class AnthropicAdapter implements LlmAdapter {
           // Covers both `complete` and `completeStructured` — every buffered
           // completion path assumes max_tokens bounds visible output alone.
           ...outputOnlyThinking(this.model),
+          ...(structuredSchema
+            ? {
+                output_config: {
+                  format: { type: "json_schema" as const, schema: structuredSchema },
+                },
+              }
+            : {}),
           ...(request.system !== undefined ? { system: request.system } : {}),
           messages: [{ role: "user", content: this.userContent(request) }],
         },

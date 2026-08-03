@@ -25,6 +25,7 @@ export {
   boundedImageParts,
   kindForStatus,
   structuredOutputInstruction,
+  structuredOutputJsonSchema,
   prepareStructuredOutputPrompt,
 } from "./types.js";
 export {

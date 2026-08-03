@@ -107,6 +107,39 @@ function fixtureStaffing() {
   return staffing;
 }
 
+function twoModuleEnvelope() {
+  const seed = envelope();
+  const contracts = seed.plan.modules[0];
+  const staffing = seed.staffing[0];
+  if (!contracts || !staffing) throw new Error("fixture requires contracts module and staffing");
+  return V2WorkPlanContract.parse({
+    ...seed,
+    plan: {
+      ...seed.plan,
+      modules: [
+        contracts,
+        {
+          ...contracts,
+          id: "ui",
+          title: "UI",
+          description: "Deliver the planning interface.",
+          deliverables: ["Planning interface"],
+          acceptance: contracts.acceptance.map((criterion) => ({
+            ...criterion,
+            id: `ui-${criterion.id}`,
+          })),
+          execution: {
+            ...contracts.execution,
+            likely_paths: ["apps/web/src/Planning.tsx"],
+            owned_components: ["planning interface"],
+          },
+        },
+      ],
+    },
+    staffing: [staffing, { ...staffing, module_id: "ui" }],
+  });
+}
+
 describe("review-only conversational planning", () => {
   it("builds a deterministic bounded prompt view without altering essential frozen context", () => {
     const receipt = {
@@ -825,6 +858,39 @@ describe("review-only conversational planning", () => {
     expect(result.status).toBe("converged");
   });
 
+  it("preserves suggestion-only findings without spending a PM revision call", async () => {
+    const seed = envelope();
+    const pm = new FakeAdapter("anthropic");
+    const reviewer = new FakeAdapter("openai");
+    const suggestion: ReviewFindingT = {
+      severity: "suggestion",
+      module_id: "contracts",
+      finding: "Consider adding an example.",
+      recommendation: "Document one representative workflow when convenient.",
+    };
+    reviewer.enqueue({ findings: [suggestion] });
+
+    const result = await runReviewOnlyPlanning({
+      pm,
+      reviewer,
+      projectId: "project-suggestion-only",
+      initiatedByUserId: "user-review-only",
+      seedPlan: seed,
+      frozenContext: {},
+      telemetryGroupId: "review-only-suggestion-only",
+      maxRounds: 3,
+      qcMode: "gated_each_step",
+    });
+
+    assertTerminal(result);
+    expect(result.status).toBe("converged");
+    expect(result.final_plan).toEqual(seed);
+    expect(result.review_rounds[0]?.findings).toEqual([suggestion]);
+    expect(result.review_rounds[0]?.responses).toBeNull();
+    expect(reviewer.requests).toHaveLength(1);
+    expect(pm.requests).toHaveLength(0);
+  });
+
   it("resuming from after_review does not re-run the reviewer pass", async () => {
     const seed = envelope();
     const revised = envelope(
@@ -1288,15 +1354,102 @@ describe("review-only conversational planning", () => {
     assertTerminal(result);
     expect(result.status).toBe("cap_reached");
     expect(result.final_plan.staffing[0]?.model).toBe("gpt-5.6-terra");
-    expect(pm.requests[0]?.schemaName).toBe("targeted_plan_revision");
-    expect(pm.requests[0]?.maxTokens).toBe(8_000);
+    expect(pm.requests.map((request) => request.schemaName)).toEqual(["targeted_plan_revision"]);
+    expect(pm.requests[0]?.maxTokens).toBe(3_500);
+    expect(pm.requests[0]?.prompt).toContain("responses:");
     expect(pm.requests[0]?.prompt).toContain("Do not return the complete plan");
-    const pmArtifact = chat.find(
-      (event) => event.channel === "pm" && event.speaker === "pm" && event.artifact_valid,
-    );
+    const pmArtifact = [...chat]
+      .reverse()
+      .find((event) => event.channel === "pm" && event.speaker === "pm" && event.artifact_valid);
     expect(pmArtifact?.artifact_markdown).toContain("Applied bounded changes");
     expect(pmArtifact?.artifact_markdown).toContain("Complete server-materialized revised plan");
     expect(pmArtifact?.artifact_markdown).toContain("gpt-5.6-terra");
+  });
+
+  it("applies independent module patch batches in parallel", async () => {
+    const seed = twoModuleEnvelope();
+    const pm = new FakeAdapter("anthropic");
+    const reviewer = new FakeAdapter("openai");
+    reviewer.enqueue({
+      findings: [
+        {
+          severity: "must_fix",
+          module_id: "contracts",
+          finding: "Clarify the contracts boundary.",
+          recommendation: "Tighten the contracts description.",
+        },
+        {
+          severity: "should_fix",
+          module_id: "ui",
+          finding: "Clarify the UI boundary.",
+          recommendation: "Tighten the UI description.",
+        },
+      ],
+    });
+    pm.enqueue(
+      {
+        base_plan_content_hash: canonicalSha256(seed),
+        responses: [{ finding_index: 0, disposition: "accept", rationale: "Clarified contracts." }],
+        changes: [
+          {
+            op: "patch_module",
+            finding_indices: [0],
+            module_id: "contracts",
+            patch: { description: "Deliver the clarified contracts boundary." },
+          },
+        ],
+      },
+      {
+        base_plan_content_hash: canonicalSha256(seed),
+        responses: [{ finding_index: 1, disposition: "accept", rationale: "Clarified UI." }],
+        changes: [
+          {
+            op: "patch_module",
+            finding_indices: [1],
+            module_id: "ui",
+            patch: { description: "Deliver the clarified UI boundary." },
+          },
+        ],
+      },
+    );
+    const originalComplete = pm.completeStructured.bind(pm);
+    let activePatchCalls = 0;
+    let maximumActivePatchCalls = 0;
+    let releasePatchCalls: (() => void) | undefined;
+    const patchGate = new Promise<void>((resolve) => {
+      releasePatchCalls = resolve;
+    });
+    vi.spyOn(pm, "completeStructured").mockImplementation((async (request, schema, schemaName) => {
+      if (schemaName !== "targeted_plan_revision") {
+        return originalComplete(request, schema, schemaName);
+      }
+      activePatchCalls += 1;
+      maximumActivePatchCalls = Math.max(maximumActivePatchCalls, activePatchCalls);
+      if (activePatchCalls === 2) releasePatchCalls?.();
+      await patchGate;
+      try {
+        return await originalComplete(request, schema, schemaName);
+      } finally {
+        activePatchCalls -= 1;
+      }
+    }) as typeof pm.completeStructured);
+
+    const result = await runReviewOnlyPlanning({
+      pm,
+      reviewer,
+      projectId: "project-parallel-targeted",
+      initiatedByUserId: "user-targeted",
+      seedPlan: seed,
+      frozenContext: {},
+      telemetryGroupId: "review-only-parallel-targeted",
+      maxRounds: 1,
+      revisionFormat: "targeted_v1",
+    });
+
+    assertTerminal(result);
+    expect(maximumActivePatchCalls).toBe(2);
+    expect(result.final_plan.plan.modules[0]?.description).toContain("clarified contracts");
+    expect(result.final_plan.plan.modules[1]?.description).toContain("clarified UI");
   });
 
   it("repairs a targeted response without asking the PM to regenerate the full plan", async () => {
@@ -1330,13 +1483,16 @@ describe("review-only conversational planning", () => {
       ],
     });
     const originalComplete = pm.completeStructured.bind(pm);
-    vi.spyOn(pm, "completeStructured")
-      .mockRejectedValueOnce(
-        new AdapterError("invalid_response", "targeted_plan_revision: invalid operation", {
+    let rejectedPatch = false;
+    vi.spyOn(pm, "completeStructured").mockImplementation((async (request, schema, schemaName) => {
+      if (schemaName === "targeted_plan_revision" && !rejectedPatch) {
+        rejectedPatch = true;
+        throw new AdapterError("invalid_response", "targeted_plan_revision: invalid operation", {
           metadata: { response_text: '{"changes":[]}' },
-        }),
-      )
-      .mockImplementation(originalComplete);
+        });
+      }
+      return originalComplete(request, schema, schemaName);
+    }) as typeof pm.completeStructured);
 
     const result = await runReviewOnlyPlanning({
       pm,
@@ -1352,14 +1508,14 @@ describe("review-only conversational planning", () => {
 
     assertTerminal(result);
     expect(result.final_plan.plan.modules[0]?.description).toContain("targeted repair");
-    expect(pm.requests[0]?.maxTokens).toBe(6_000);
-    expect(pm.requests[0]?.prompt).toContain("Do not return the complete plan");
-    expect(pm.requests[0]?.prompt).toContain("Do not return the complete plan;");
-    expect(pm.requests[0]?.prompt).not.toContain("preserve the full plan");
-    expect(pm.requests[0]?.prompt).not.toContain("CURRENT WORK PLAN CONTRACT ENVELOPE");
+    const repaired = pm.requests.find((request) => request.telemetryRetryAttempt === 1);
+    expect(repaired?.maxTokens).toBe(2_500);
+    expect(repaired?.prompt).toContain("base_plan_content_hash, responses, and changes only");
+    expect(repaired?.prompt).not.toContain("preserve the full plan");
+    expect(repaired?.prompt).not.toContain("CURRENT WORK PLAN CONTRACT ENVELOPE");
   });
 
-  it("does not repair or fall back after an output-limit truncation", async () => {
+  it("retries an output-limited module patch compactly without using the legacy envelope", async () => {
     const seed = envelope();
     const pm = new FakeAdapter("anthropic");
     const reviewer = new FakeAdapter("openai");
@@ -1373,27 +1529,49 @@ describe("review-only conversational planning", () => {
         },
       ],
     });
-    const completion = vi.spyOn(pm, "completeStructured").mockRejectedValueOnce(
-      new AdapterError("invalid_response", "targeted_plan_revision: response is not JSON", {
-        metadata: {
-          finish_reason: "max_tokens",
-          response_text: '{"base_plan_content_hash":"partial',
-          structured_failure: {
-            kind: "output_truncated",
-            issues: [
-              {
-                path: "$",
-                code: "output_truncated",
-                message: "The provider stopped because the configured output limit was reached.",
-              },
-            ],
-          },
+    pm.enqueue({
+      base_plan_content_hash: canonicalSha256(seed),
+      responses: [{ finding_index: 0, disposition: "accept", rationale: "Clarified it." }],
+      changes: [
+        {
+          op: "patch_module",
+          finding_indices: [0],
+          module_id: "contracts",
+          patch: { description: "Clarified with a compact retry." },
         },
-      }),
-    );
+      ],
+    });
+    const originalComplete = pm.completeStructured.bind(pm);
+    let truncatedPatch = false;
+    const completion = vi.spyOn(pm, "completeStructured").mockImplementation((async (
+      request,
+      schema,
+      schemaName,
+    ) => {
+      if (schemaName === "targeted_plan_revision" && !truncatedPatch) {
+        truncatedPatch = true;
+        throw new AdapterError("invalid_response", "targeted_plan_revision: response is not JSON", {
+          metadata: {
+            finish_reason: "max_tokens",
+            response_text: '{"base_plan_content_hash":"partial',
+            structured_failure: {
+              kind: "output_truncated",
+              issues: [
+                {
+                  path: "$",
+                  code: "output_truncated",
+                  message: "The provider stopped because the configured output limit was reached.",
+                },
+              ],
+            },
+          },
+        });
+      }
+      return originalComplete(request, schema, schemaName);
+    }) as typeof pm.completeStructured);
     const chat: ReviewOnlyChatEvent[] = [];
 
-    const error = await runReviewOnlyPlanning({
+    const result = await runReviewOnlyPlanning({
       pm,
       reviewer,
       projectId: "project-targeted-truncated",
@@ -1406,22 +1584,21 @@ describe("review-only conversational planning", () => {
       onChatEvent: (event) => {
         chat.push(event);
       },
-    }).then(
-      () => null,
-      (failure: unknown) => failure,
-    );
+    });
 
-    expect(error).toMatchObject({ kind: "invalid_response" });
-    expect(completion).toHaveBeenCalledTimes(1);
-    expect(completion.mock.calls[0]?.[0].maxTokens).toBe(8_000);
+    assertTerminal(result);
+    expect(result.final_plan.plan.modules[0]?.description).toContain("compact retry");
+    expect(completion).toHaveBeenCalledTimes(2);
+    expect(completion.mock.calls[0]?.[0].maxTokens).toBe(3_500);
+    expect(completion.mock.calls[1]?.[0].maxTokens).toBe(6_000);
     expect(chat.filter((event) => event.kind === "repair_reminder")).toHaveLength(0);
-    expect(chat.find((event) => event.channel === "pm" && event.speaker === "pm")).toMatchObject({
+    expect(chat.find((event) => event.error_code === "output_truncated")).toMatchObject({
       error_code: "output_truncated",
       artifact_valid: false,
     });
-    expect(
-      chat.find((event) => event.error_code === "targeted_revision_legacy_fallback"),
-    ).toBeUndefined();
+    expect(chat.find((event) => event.error_code === "targeted_revision_legacy_fallback")).toBe(
+      undefined,
+    );
   });
 
   it("falls back exactly once to the legacy envelope after targeted repair failure", async () => {

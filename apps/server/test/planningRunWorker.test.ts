@@ -92,6 +92,7 @@ describe.sequential("durable planning run worker", () => {
 
     const created = await service.create("project-1", { objective: "objective one" });
     expect(created.status).toBe("queued");
+    expect(created.max_rounds).toBe(1);
 
     const worker = makeWorker();
     const outcome = await worker.runNow(created.id);

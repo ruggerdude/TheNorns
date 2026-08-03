@@ -68,6 +68,7 @@ describe.each(cases)("adapter conformance: $name", ({ name, make }) => {
   it("returns schema-validated structured output", async () => {
     const adapter = make();
     const schema = z.object({ name: z.string(), count: z.number().int() });
+    const requestStart = mock.requests.length;
     const result = await adapter.completeStructured(
       { prompt: "STRUCTURED please", ...attribution },
       schema,
@@ -75,6 +76,38 @@ describe.each(cases)("adapter conformance: $name", ({ name, make }) => {
     );
     expect(result.value).toEqual({ name: "mock", count: 3 });
     expect(result.text).toBe('{"name":"mock","count":3}');
+    const request = mock.requests.slice(requestStart).at(-1);
+    const body = JSON.parse(request?.body ?? "{}") as Record<string, unknown>;
+    if (name === "anthropic") {
+      expect(body).toMatchObject({
+        messages: [{ role: "user", content: "STRUCTURED please" }],
+        output_config: {
+          format: {
+            type: "json_schema",
+            schema: {
+              type: "object",
+              required: ["name", "count"],
+            },
+          },
+        },
+      });
+    } else {
+      expect(body).toMatchObject({
+        input: "STRUCTURED please",
+        text: {
+          verbosity: "low",
+          format: {
+            type: "json_schema",
+            name: "test_object",
+            strict: false,
+            schema: {
+              type: "object",
+              required: ["name", "count"],
+            },
+          },
+        },
+      });
+    }
   });
 
   it("enforces an explicit OpenAI output cap through the Responses API", async () => {

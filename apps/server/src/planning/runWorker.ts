@@ -541,8 +541,16 @@ export class PlanningRunWorker {
     let pm: LlmAdapter;
     let reviewer: LlmAdapter | null;
     try {
-      pm = this.createAdapter(models.pm.provider, models.pm.model, models.pm.reasoning_effort);
-      reviewer = quick ? null : this.createAdapter(models.reviewer.provider, models.reviewer.model);
+      const pmReasoningEffort =
+        reviewOnly && models.pm.provider === "openai" ? "low" : models.pm.reasoning_effort;
+      pm = this.createAdapter(models.pm.provider, models.pm.model, pmReasoningEffort);
+      reviewer = quick
+        ? null
+        : this.createAdapter(
+            models.reviewer.provider,
+            models.reviewer.model,
+            reviewOnly && models.reviewer.provider === "openai" ? "low" : undefined,
+          );
     } catch (error) {
       if (reviewOnly && this.options.failReviewOnly) {
         await this.options.failReviewOnly(claim.id, error, claim.lease_token);

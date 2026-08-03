@@ -136,7 +136,7 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       mode: "automatic",
       qc_mode: "automatic",
       allow_unadjudicated_rebuttals: false,
-      default_max_rounds: 3,
+      default_max_rounds: 1,
     });
   });
 
@@ -201,7 +201,7 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       mode: "explicit",
       qc_mode: "automatic",
       allow_unadjudicated_rebuttals: false,
-      default_max_rounds: 3,
+      default_max_rounds: 1,
     });
 
     // The existing resolution path (PlanningRunService.reviewerSelectionOf,
@@ -235,7 +235,7 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       mode: "automatic",
       qc_mode: "automatic",
       allow_unadjudicated_rebuttals: false,
-      default_max_rounds: 3,
+      default_max_rounds: 1,
     });
     await expect(planningRunService.reviewerSelectionOf(projectId)).resolves.toBeNull();
   });
@@ -265,7 +265,7 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       mode: "explicit",
       qc_mode: "automatic",
       allow_unadjudicated_rebuttals: false,
-      default_max_rounds: 3,
+      default_max_rounds: 1,
     });
   });
 
@@ -296,7 +296,7 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
     expect(res.json()).toMatchObject({
       qc_mode: "automatic",
       allow_unadjudicated_rebuttals: false,
-      default_max_rounds: 3,
+      default_max_rounds: 1,
     });
   });
 
@@ -322,7 +322,7 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       mode: "automatic",
       qc_mode: "gated_when_contested",
       allow_unadjudicated_rebuttals: false,
-      default_max_rounds: 3,
+      default_max_rounds: 1,
     });
 
     // Setting the escape hatch alone must not disturb the qc_mode just set,
@@ -348,7 +348,7 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       mode: "automatic",
       qc_mode: "gated_when_contested",
       allow_unadjudicated_rebuttals: true,
-      default_max_rounds: 3,
+      default_max_rounds: 1,
     });
 
     // And setting the reviewer override alone must not reset qc_mode back to
@@ -374,7 +374,7 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       mode: "explicit",
       qc_mode: "gated_when_contested",
       allow_unadjudicated_rebuttals: true,
-      default_max_rounds: 3,
+      default_max_rounds: 1,
     });
   });
 

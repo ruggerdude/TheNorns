@@ -65,7 +65,7 @@ function makeAgents() {
   return { pm: new FakeAdapter("anthropic"), reviewer: new FakeAdapter("openai") };
 }
 
-const base = { projectId: "proj-planning", memory: MEMORY };
+const base = { projectId: "proj-planning", memory: MEMORY, maxRounds: 3 };
 
 describe("planning loop — three objectives", () => {
   it("objective 1: converges in round one; memory + exact plan reach both agents", async () => {

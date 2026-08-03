@@ -360,6 +360,10 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     return action;
   }
 
+  async function allowMultiRoundQc(planningRunId: string) {
+    await pg.query("UPDATE planning_runs SET max_rounds=3 WHERE id=$1", [planningRunId]);
+  }
+
   async function reviewReady(
     scope: { workItemId: string; conversationId: string },
     candidate: V2WorkPlanContractT,
@@ -963,6 +967,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     expect(dispatches).toEqual([qc.effect.planning_run_id]);
 
     const seed = await workflow.loadReviewOnlySeed(qc.effect.planning_run_id);
+    await allowMultiRoundQc(qc.effect.planning_run_id);
     expect(seed.seedPlan).toEqual(candidate);
     expect(canonicalSha256(seed.seedPlan)).toBe(saved.content_hash);
     const frozen = JSON.stringify(seed.frozenContext);
@@ -2386,6 +2391,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     if (qc.effect.kind !== "qc_started") throw new Error("expected QC effect");
 
     const seed = await workflow.loadReviewOnlySeed(qc.effect.planning_run_id);
+    await allowMultiRoundQc(qc.effect.planning_run_id);
     await workflow.markReviewOnlyStarted(seed.reviewId);
     await workflow.completeReviewOnly({
       reviewId: seed.reviewId,
@@ -2822,7 +2828,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     expect(stopped).toMatchObject({
       status: "cancelled",
       rounds_completed: 1,
-      max_rounds: 3,
+      max_rounds: 1,
       cancelled_by_user_id: owner.id,
       cancellation_reason: "The human wants to revise staffing before continuing.",
       round_exchanges: [

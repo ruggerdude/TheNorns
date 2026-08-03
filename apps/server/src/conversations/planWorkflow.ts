@@ -2512,7 +2512,7 @@ export class ConversationPlanWorkflowService {
                       WHERE project_id=$1`,
                     [action.project_id],
                   )
-                ).rows[0]?.default_max_rounds ?? 3,
+                ).rows[0]?.default_max_rounds ?? 1,
               );
         await tx.query(
           `INSERT INTO planning_runs (

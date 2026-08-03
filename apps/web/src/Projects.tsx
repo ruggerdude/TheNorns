@@ -557,7 +557,7 @@ export function Projects({
   const [attention, setAttention] = useState<PortfolioAttentionDto | null>(null);
   const [attentionBusy, setAttentionBusy] = useState<string | null>(null);
   const [resumePollIssue, setResumePollIssue] = useState<string | null>(null);
-  const [roundsCount, setRoundsCount] = useState(3);
+  const [roundsCount, setRoundsCount] = useState(1);
   // FRONT DOOR P2b: reviewer selector. "auto" means no explicit override
   // (the server's automatic opposite-provider default); any other value is
   // "provider:model" as offered by MODEL_CHOICES below.
@@ -1083,7 +1083,7 @@ export function Projects({
       setAdoptionError(null);
       setCreationStatus(null);
       setReviewerSelection("auto");
-      setRoundsCount(3);
+      setRoundsCount(1);
       setQcMode("automatic");
       setAllowUnadjudicatedRebuttals(false);
       setProjectUpdatePreferences(loadGlobalUpdatePreferences());
@@ -1478,7 +1478,7 @@ export function Projects({
     setAdoptionError(null);
     setCreationStatus(null);
     setReviewerSelection("auto");
-    setRoundsCount(3);
+    setRoundsCount(1);
     setQcMode("automatic");
     setAllowUnadjudicatedRebuttals(false);
     setProjectUpdatePreferences(loadGlobalUpdatePreferences());
@@ -2666,6 +2666,15 @@ export function Projects({
                               +
                             </Button>
                           </div>
+                          <span className="muted">
+                            {roundsCount === 1
+                              ? "Routine · one reviewer/PM cycle"
+                              : roundsCount === 2
+                                ? "High-risk · includes an independent recheck"
+                                : roundsCount === 0
+                                  ? "QC is off"
+                                  : `${roundsCount} review cycles`}
+                          </span>
                         </Field>
                       </div>
                       {roundsCount > 0 ? (

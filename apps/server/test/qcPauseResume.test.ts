@@ -133,6 +133,11 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
   let pm: FakeAdapter;
   let reviewerV1: FakeAdapter;
   let reviewerV2: FakeAdapter;
+  let adapterCreations: Array<{
+    provider: ProviderName;
+    model: string;
+    reasoningEffort: string | undefined;
+  }>;
   let dispatchCount = 0;
   let id = 0;
 
@@ -173,6 +178,7 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
     // ever re-derived it from "current project settings" instead of reading
     // the pinned reviewer_provider/reviewer_model off the review row.
     reviewerV2 = new FakeAdapter("openai", "gpt-5.6-terra");
+    adapterCreations = [];
     workflow = new ConversationPlanWorkflowService(transactions, {
       newId: makeId,
       resolveReviewModels: async () => {
@@ -188,7 +194,8 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
     });
     worker = new PlanningRunWorker(
       transactions,
-      (provider: ProviderName, model: string): LlmAdapter => {
+      (provider, model, reasoningEffort): LlmAdapter => {
+        adapterCreations.push({ provider, model, reasoningEffort });
         if (provider === "anthropic") return pm;
         return model === "gpt-5.6-terra" ? reviewerV2 : reviewerV1;
       },
@@ -361,6 +368,10 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
 
     const outcome = await worker.runNow(sent.planningRunId);
     expect(outcome).toBe("processed");
+    expect(adapterCreations).toEqual([
+      { provider: "anthropic", model: "claude-sonnet-5", reasoningEffort: undefined },
+      { provider: "openai", model: "gpt-5.6-sol", reasoningEffort: "low" },
+    ]);
 
     const review = await reviewRow(sent.reviewId);
     expect(review.status).toBe("awaiting_human");

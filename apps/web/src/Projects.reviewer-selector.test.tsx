@@ -200,7 +200,11 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
           call.url === "/api/v2/projects/project-created/planning-reviewer",
       ),
     ).toMatchObject({
-      body: { qc_mode: "automatic", allow_unadjudicated_rebuttals: false },
+      body: {
+        qc_mode: "automatic",
+        allow_unadjudicated_rebuttals: false,
+        default_max_rounds: 1,
+      },
     });
   });
 
@@ -213,10 +217,8 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
 
     await user.click(await screen.findByRole("button", { name: /new project/i }));
     await user.type(screen.getByTestId("project-name"), "Zephyr zero rounds");
-    // Default is 3; drive it down to 0 with the stepper's "Fewer rounds" button.
+    // Routine default is 1; one click turns review off.
     const fewer = screen.getByRole("button", { name: /fewer rounds/i });
-    await user.click(fewer);
-    await user.click(fewer);
     await user.click(fewer);
     expect(screen.getByTestId("rounds-stepper")).toHaveTextContent("0");
     await user.type(await screen.findByTestId("github-new-repository-name"), "zephyr-zero-rounds");

@@ -114,6 +114,7 @@ describe("pilot dress rehearsal — full MVP flow", () => {
       objective: "Ship the pilot service",
       projectId: "proj-pilot",
       memory: MEMORY,
+      maxRounds: 3,
     });
     expect(planning.status).toBe("converged");
     expect(planning.rounds).toBe(2);

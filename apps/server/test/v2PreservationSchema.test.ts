@@ -58,6 +58,7 @@ import {
   QC_COMMUNICATION_MIGRATION_NAME,
   QC_CONTROL_TRANSCRIPT_MIGRATION_NAME,
   QC_FINDING_TRIAGE_MIGRATION_NAME,
+  QC_ROUTINE_ROUND_DEFAULT_MIGRATION_NAME,
   QC_TARGETED_REVISIONS_MIGRATION_NAME,
   QUICK_CHANGES_MIGRATION_NAME,
   RUN_PUBLICATION_MIGRATION_NAME,
@@ -532,6 +533,7 @@ describe.sequential("Phase 2 preservation schema", () => {
         { name: DEVICE_REPOSITORY_ACCESS_MIGRATION_NAME, applied: false },
         { name: QC_TARGETED_REVISIONS_MIGRATION_NAME, applied: false },
         { name: QC_FINDING_TRIAGE_MIGRATION_NAME, applied: false },
+        { name: QC_ROUTINE_ROUND_DEFAULT_MIGRATION_NAME, applied: false },
       ]),
     );
     const tracking = await pg.query<{ name: string }>(
@@ -604,6 +606,7 @@ describe.sequential("Phase 2 preservation schema", () => {
         DEVICE_REPOSITORY_ACCESS_MIGRATION_NAME,
         QC_TARGETED_REVISIONS_MIGRATION_NAME,
         QC_FINDING_TRIAGE_MIGRATION_NAME,
+        QC_ROUTINE_ROUND_DEFAULT_MIGRATION_NAME,
       ]),
     );
   });
