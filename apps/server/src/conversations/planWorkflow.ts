@@ -1905,13 +1905,18 @@ export class ConversationPlanWorkflowService {
       // sits outside reconcileOrphans()'s orphan-sweep filter
       // ('drafting'|'reviewing'|'revising'), so no further exclusion is
       // needed there.
+      const pausedCostUsd = input.result.usage.reduce(
+        (total, usage) => total + usage.estimated_cost_usd,
+        0,
+      );
       await tx.query(
         `UPDATE planning_runs
             SET status='awaiting_human', error=NULL,
                 live_progress=NULL,
-                lease_token=NULL, leased_until=NULL, updated_at=$2
+                total_cost_usd=total_cost_usd+$2,
+                lease_token=NULL, leased_until=NULL, updated_at=$3
           WHERE id=$1 AND mode='review_only'`,
-        [input.planningRunId, now],
+        [input.planningRunId, pausedCostUsd, now],
       );
     });
   }

@@ -655,8 +655,8 @@ export function ConversationActionCard({
             ))}
           </Select>
           <p>
-            {QC_MODE_OPTIONS.find((option) => option.value === qcMode)?.help} No mode skips Gate C —
-            an unresolved must-fix disagreement always pauses for you.
+            {QC_MODE_OPTIONS.find((option) => option.value === qcMode)?.help} Every mode stops
+            before findings go to the PM, and no mode skips Gate C.
           </p>
         </div>
       ) : null}

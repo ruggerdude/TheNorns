@@ -10,13 +10,14 @@ import { canonicalSha256 } from "../src/persistence/migration/canonicalJson.js";
 import { SCOPE_DISCIPLINE } from "../src/planning/prompts.js";
 import {
   type ReviewOnlyChatEvent,
+  type ReviewOnlyPlanningOptions,
   type ReviewOnlyPlanningPausedResult,
   type ReviewOnlyPlanningResult,
   type ReviewOnlyPlanningTerminalResult,
   type ReviewOnlyProgressEvent,
   applyTargetedQcRevision,
   compactFrozenQcContext,
-  runReviewOnlyPlanning,
+  runReviewOnlyPlanning as runReviewOnlyPlanningRaw,
 } from "../src/planning/reviewOnlySession.js";
 
 function assertTerminal(
@@ -33,6 +34,35 @@ function assertPaused(
   if (result.status !== "paused") {
     throw new Error(`expected a paused result, got ${result.status}`);
   }
+}
+
+/** Downstream behavior tests model the required human checkpoint by accepting
+ * every reviewer finding before allowing the PM step to run. Tests that
+ * exercise the checkpoint itself call runReviewOnlyPlanningRaw directly. */
+async function runReviewOnlyPlanning(
+  options: ReviewOnlyPlanningOptions,
+): Promise<ReviewOnlyPlanningResult> {
+  let result = await runReviewOnlyPlanningRaw(options);
+  const forcedAcceptModuleIds = options.resume?.forcedAcceptModuleIds ?? [];
+  while (result.status === "paused" && result.paused_checkpoint === "after_review") {
+    const pausedAtRound = result.paused_at_round;
+    const pausedRound = result.rounds.find((round) => round.round === pausedAtRound);
+    if (!pausedRound) throw new Error("paused reviewer pass is missing its round evidence");
+    result = await runReviewOnlyPlanningRaw({
+      ...options,
+      resume: {
+        kind: "human",
+        fromRound: pausedAtRound,
+        checkpoint: "after_review",
+        plan: result.plan,
+        rounds: result.rounds,
+        usage: result.usage,
+        acceptedFindingIndices: pausedRound.findings.map((_, index) => index),
+        forcedAcceptModuleIds,
+      },
+    });
+  }
+  return result;
 }
 
 function envelope(
@@ -802,40 +832,43 @@ describe("review-only conversational planning", () => {
     ]);
   });
 
-  it("gated_each_step pauses at after_review before the PM ever runs", async () => {
-    const seed = envelope();
-    const pm = new FakeAdapter("anthropic");
-    const reviewer = new FakeAdapter("openai");
-    reviewer.enqueue({
-      findings: [
-        {
-          severity: "must_fix",
-          module_id: "contracts",
-          finding: "Clarify the objective.",
-          recommendation: "Use the reviewed objective.",
-        },
-      ],
-    });
+  it.each(["automatic", "gated_each_step"] as const)(
+    "%s pauses at after_review before the PM ever runs",
+    async (qcMode) => {
+      const seed = envelope();
+      const pm = new FakeAdapter("anthropic");
+      const reviewer = new FakeAdapter("openai");
+      reviewer.enqueue({
+        findings: [
+          {
+            severity: "must_fix",
+            module_id: "contracts",
+            finding: "Clarify the objective.",
+            recommendation: "Use the reviewed objective.",
+          },
+        ],
+      });
 
-    const result = await runReviewOnlyPlanning({
-      pm,
-      reviewer,
-      projectId: "project-review-only",
-      initiatedByUserId: "user-review-only",
-      seedPlan: seed,
-      frozenContext: {},
-      telemetryGroupId: "review-only-gated-step",
-      maxRounds: 3,
-      qcMode: "gated_each_step",
-    });
+      const result = await runReviewOnlyPlanningRaw({
+        pm,
+        reviewer,
+        projectId: "project-review-only",
+        initiatedByUserId: "user-review-only",
+        seedPlan: seed,
+        frozenContext: {},
+        telemetryGroupId: `review-only-human-finding-review-${qcMode}`,
+        maxRounds: 3,
+        qcMode,
+      });
 
-    assertPaused(result);
-    expect(result.paused_checkpoint).toBe("after_review");
-    expect(result.paused_at_round).toBe(1);
-    expect(result.plan).toEqual(seed);
-    expect(result.rounds).toHaveLength(1);
-    expect(pm.requests).toHaveLength(0);
-  });
+      assertPaused(result);
+      expect(result.paused_checkpoint).toBe("after_review");
+      expect(result.paused_at_round).toBe(1);
+      expect(result.plan).toEqual(seed);
+      expect(result.rounds).toHaveLength(1);
+      expect(pm.requests).toHaveLength(0);
+    },
+  );
 
   it("zero must-fix findings converge without pausing even in gated_each_step", async () => {
     const seed = envelope();

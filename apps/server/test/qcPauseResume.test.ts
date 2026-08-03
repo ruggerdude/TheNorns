@@ -26,7 +26,10 @@ import { PostgresConversationRepository } from "../src/conversations/repository.
 import { ConversationService } from "../src/conversations/service.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
-import { runReviewOnlyPlanning } from "../src/planning/reviewOnlySession.js";
+import {
+  type ReviewOnlyDurableCheckpoint,
+  runReviewOnlyPlanning,
+} from "../src/planning/reviewOnlySession.js";
 import { PlanningRunWorker } from "../src/planning/runWorker.js";
 
 function plan(objective: string, moduleDescription: string): V2WorkPlanContractT {
@@ -346,6 +349,17 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
     return row;
   }
 
+  async function acceptPausedFindings(sent: Awaited<ReturnType<typeof sendToQc>>) {
+    const findingReview = await reviewRow(sent.reviewId);
+    expect(findingReview.paused_checkpoint).toBe("after_review");
+    return workflow.resumeReview(owner.id, sent.scope, sent.reviewId, {
+      exit: "continue",
+      findingDecisions: Object.fromEntries(
+        findingReview.findings.map((finding) => [finding.id, "accept" as const]),
+      ),
+    });
+  }
+
   /** Rounds the reviewer/PM through a real, non-hollow accepted revision —
    *  Gate C does not fire (the finding's target module genuinely changed) —
    *  so the pause comes from Gate B ("after_revision", qc_mode
@@ -372,6 +386,9 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
       { provider: "anthropic", model: "claude-sonnet-5", reasoningEffort: undefined },
       { provider: "openai", model: "gpt-5.6-sol", reasoningEffort: "low" },
     ]);
+
+    await acceptPausedFindings(sent);
+    await worker.runNow(sent.planningRunId);
 
     const review = await reviewRow(sent.reviewId);
     expect(review.status).toBe("awaiting_human");
@@ -410,6 +427,10 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
     scriptGatedRoundPause("resume");
     await worker.runNow(sent.planningRunId);
     expect((await reviewRow(sent.reviewId)).status).toBe("awaiting_human");
+
+    await acceptPausedFindings(sent);
+    await worker.runNow(sent.planningRunId);
+    expect((await reviewRow(sent.reviewId)).paused_checkpoint).toBe("after_revision");
 
     // Round 2, scripted on reviewerV1 only — if resume ever re-derived the
     // reviewer it would either hit resolveModels' throw guard or try to pull
@@ -456,26 +477,41 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
     // measure resume's dispatches relative to that baseline.
     const baseline = dispatchCount;
 
+    const findingReview = await reviewRow(sent.reviewId);
+    const findingDecisions = Object.fromEntries(
+      findingReview.findings.map((finding) => [finding.id, "accept" as const]),
+    );
+
     const first = await workflow.resumeReview(owner.id, sent.scope, sent.reviewId, {
       exit: "continue",
       idempotencyKey: "resume-key-1",
+      findingDecisions,
     });
     expect(dispatchCount).toBe(baseline + 1);
     const replay = await workflow.resumeReview(owner.id, sent.scope, sent.reviewId, {
       exit: "continue",
       idempotencyKey: "resume-key-1",
+      findingDecisions,
     });
     expect(dispatchCount).toBe(baseline + 1); // no second dispatch on replay
     expect(replay).toEqual(first);
 
-    // A resume with a different key against an already-resumed (no longer
-    // awaiting_human, once claimed) review is rejected, not silently replayed.
+    // The first resume runs the PM and reaches the configured round gate.
+    await worker.runNow(sent.planningRunId);
+    expect((await reviewRow(sent.reviewId)).paused_checkpoint).toBe("after_revision");
+
+    // Resume that second gate and converge. A later different key against the
+    // terminal review is rejected, not silently replayed.
     reviewerV1.enqueue({ findings: [] });
+    await workflow.resumeReview(owner.id, sent.scope, sent.reviewId, {
+      exit: "continue",
+      idempotencyKey: "resume-key-2",
+    });
     await worker.runNow(sent.planningRunId);
     await expect(
       workflow.resumeReview(owner.id, sent.scope, sent.reviewId, {
         exit: "continue",
-        idempotencyKey: "resume-key-2",
+        idempotencyKey: "resume-key-3",
       }),
     ).rejects.toMatchObject({ code: "invalid_plan_state" });
   });
@@ -509,6 +545,10 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
 
     await worker.runNow(sent.planningRunId);
     expect((await reviewRow(sent.reviewId)).status).toBe("awaiting_human");
+
+    await acceptPausedFindings(sent);
+    await worker.runNow(sent.planningRunId);
+    expect((await reviewRow(sent.reviewId)).paused_checkpoint).toBe("after_revision");
 
     reviewerV1.enqueue({ findings: [] });
     await workflow.resumeReview(owner.id, sent.scope, sent.reviewId, { exit: "continue" });
@@ -635,6 +675,12 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
     });
     await worker.runNow(sent.planningRunId);
 
+    const findingReview = await reviewRow(sent.reviewId);
+    expect(findingReview.paused_checkpoint).toBe("after_review");
+    expect(pm.requests).toHaveLength(0);
+    await acceptPausedFindings(sent);
+    await worker.runNow(sent.planningRunId);
+
     expect(reviewerV1.requests).toHaveLength(1);
     expect(pm.requests).toHaveLength(1);
     const recovered = await reviewRow(sent.reviewId);
@@ -673,6 +719,32 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
       ),
     });
 
+    const recordAndCrashAfterRevision = async (checkpoint: ReviewOnlyDurableCheckpoint) => {
+      await workflow.recordReviewOnlyCheckpoint({
+        reviewId: sent.reviewId,
+        planningRunId: sent.planningRunId,
+        checkpoint,
+        leaseToken,
+      });
+      if (checkpoint.completed_step === "revision") {
+        throw new Error("simulated process death after revision checkpoint");
+      }
+    };
+    const findingReview = await runReviewOnlyPlanning({
+      pm,
+      reviewer: reviewerV1,
+      projectId,
+      initiatedByUserId: owner.id,
+      seedPlan: seed.seedPlan,
+      frozenContext: seed.frozenContext,
+      telemetryGroupId: seed.usageRequestGroupId,
+      maxRounds: 2,
+      qcMode: "automatic",
+      executionAttempt: 1,
+      onCheckpoint: recordAndCrashAfterRevision,
+    });
+    if (findingReview.status !== "paused") throw new Error("expected finding review pause");
+
     await expect(
       runReviewOnlyPlanning({
         pm,
@@ -685,17 +757,17 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
         maxRounds: 2,
         qcMode: "automatic",
         executionAttempt: 1,
-        onCheckpoint: async (checkpoint) => {
-          await workflow.recordReviewOnlyCheckpoint({
-            reviewId: sent.reviewId,
-            planningRunId: sent.planningRunId,
-            checkpoint,
-            leaseToken,
-          });
-          if (checkpoint.completed_step === "revision") {
-            throw new Error("simulated process death after revision checkpoint");
-          }
+        resume: {
+          kind: "human",
+          fromRound: findingReview.paused_at_round,
+          checkpoint: "after_review",
+          plan: findingReview.plan,
+          rounds: findingReview.rounds,
+          usage: findingReview.usage,
+          acceptedFindingIndices: [0],
+          forcedAcceptModuleIds: [],
         },
+        onCheckpoint: recordAndCrashAfterRevision,
       }),
     ).rejects.toThrow("simulated process death");
 

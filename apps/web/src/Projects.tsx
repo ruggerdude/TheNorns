@@ -97,23 +97,23 @@ export type QcModeT = V2QcModeT;
 export const QC_MODE_OPTIONS: ReadonlyArray<{ value: QcModeT; label: string; help: string }> = [
   {
     value: "automatic",
-    label: "Automatic",
-    help: "QC runs to completion as a record; only an unresolved must-fix disagreement pauses it.",
+    label: "Automatic after finding review",
+    help: "Pauses for your finding decisions before the PM revises, then continues automatically.",
   },
   {
     value: "gated_when_contested",
     label: "Gated when contested (recommended)",
-    help: "Pauses after each reviewer pass so you can redirect before the plan is revised.",
+    help: "Pauses for your finding decisions and for unresolved must-fix disagreements.",
   },
   {
     value: "gated_each_round",
     label: "Gated each round",
-    help: "Pauses after each revision so you can inspect what changed before the next round.",
+    help: "Also pauses after each revision so you can inspect changes before the next round.",
   },
   {
     value: "gated_each_step",
     label: "Gated each step",
-    help: "Pauses after every reviewer pass and every revision — the most cautious cadence.",
+    help: "Pauses for finding decisions and after every revision — the most cautious cadence.",
   },
 ];
 

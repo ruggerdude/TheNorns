@@ -155,8 +155,9 @@ export interface ReviewOnlyPlanningOptions {
   telemetryGroupId: string;
   maxRounds: number;
   signal?: AbortSignal;
-  /** Which checkpoints stop the loop. Gate C (adjudication) always stops
-   * regardless of this setting. Defaults to "automatic" (no cadence gates). */
+  /** Which checkpoints stop the loop after the required human review of each
+   * reviewer pass. Gate C (adjudication) always stops regardless of this
+   * setting. Defaults to "automatic" for the remaining cadence gates. */
   qcMode?: QcMode;
   /** Suppresses Gate C stops for declared rebuttals only. Hollow-acceptance
    * stops always fire. Defaults to false. */
@@ -1304,16 +1305,14 @@ export async function runReviewOnlyPlanning(
             usage,
           };
         }
-        if (qcMode === "gated_each_step" || qcMode === "gated_when_contested") {
-          return {
-            status: "paused",
-            paused_checkpoint: "after_review",
-            paused_at_round: round,
-            plan: reviewedPlan,
-            rounds: [...rounds],
-            usage,
-          };
-        }
+        return {
+          status: "paused",
+          paused_checkpoint: "after_review",
+          paused_at_round: round,
+          plan: reviewedPlan,
+          rounds: [...rounds],
+          usage,
+        };
       }
     } else {
       reviewedPlan = plan;
@@ -1388,16 +1387,18 @@ export async function runReviewOnlyPlanning(
           usage,
         };
       }
-      if (qcMode === "gated_each_step" || qcMode === "gated_when_contested") {
-        return {
-          status: "paused",
-          paused_checkpoint: "after_review",
-          paused_at_round: round,
-          plan: reviewedPlan,
-          rounds: [...rounds],
-          usage,
-        };
-      }
+      // Findings never go directly from the independent reviewer to the PM.
+      // Every reviewer pass parks here so the human can accept or reject each
+      // finding before any revision prompt is created. Cadence modes only
+      // control checkpoints after this required finding review.
+      return {
+        status: "paused",
+        paused_checkpoint: "after_review",
+        paused_at_round: round,
+        plan: reviewedPlan,
+        rounds: [...rounds],
+        usage,
+      };
     }
 
     const acceptedFindingIndices = (

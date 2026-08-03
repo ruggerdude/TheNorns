@@ -6,7 +6,11 @@
 // trigger are exercised for real.
 import { PGlite } from "@electric-sql/pglite";
 import { FakeAdapter, type LlmAdapter, type ProviderName } from "@norns/adapters";
-import { V2WorkPlanContract, type V2WorkPlanContractT } from "@norns/contracts";
+import {
+  type V2ConversationPlanReviewT,
+  V2WorkPlanContract,
+  type V2WorkPlanContractT,
+} from "@norns/contracts";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ConversationPlanWorkflowService } from "../src/conversations/planWorkflow.js";
 import { PostgresConversationRepository } from "../src/conversations/repository.js";
@@ -257,11 +261,12 @@ describe.sequential("QC adjudication (QCP-3A)", () => {
         rationale: string;
         adjudication: { ruling: string; decided_by_user_id: string } | null;
       }>;
+      round_exchanges: V2ConversationPlanReviewT["round_exchanges"];
       chat_messages: unknown[];
     }>(
       `SELECT review.status, review.paused_checkpoint, review.paused_at_round,
               run.round AS rounds_completed, run.max_rounds AS max_rounds,
-              review.findings, review.dispositions, review.chat_messages
+              review.findings, review.dispositions, review.round_exchanges, review.chat_messages
          FROM conversation_plan_reviews review
          JOIN planning_runs run ON run.id = review.planning_run_id
         WHERE review.id = $1`,
@@ -280,6 +285,35 @@ describe.sequential("QC adjudication (QCP-3A)", () => {
     return rows.rows[0]?.status;
   }
 
+  /** Drive one finding-bearing round through the mandatory human finding
+   * review, accepting every finding so the PM response can exercise Gate C.
+   * Dispatch accounting is reset afterward because these tests measure the
+   * adjudication action, not the prerequisite finding-review resume. */
+  async function runRoundThroughFindingReview(sent: Awaited<ReturnType<typeof sendToQc>>) {
+    await worker.runNow(sent.planningRunId);
+    const findingReview = await reviewRow(sent.reviewId);
+    expect(findingReview.paused_checkpoint).toBe("after_review");
+    const priorFindingCount = findingReview.round_exchanges
+      .filter((exchange) => exchange.round < Number(findingReview.paused_at_round))
+      .reduce((total, exchange) => total + exchange.reviewer.findings.length, 0);
+    const currentExchange = findingReview.round_exchanges.find(
+      (exchange) => exchange.round === Number(findingReview.paused_at_round),
+    );
+    if (!currentExchange) throw new Error("expected paused round exchange");
+    const currentFindings = findingReview.findings.slice(
+      priorFindingCount,
+      priorFindingCount + currentExchange.reviewer.findings.length,
+    );
+    await workflow.resumeReview(owner.id, sent.scope, sent.reviewId, {
+      exit: "continue",
+      findingDecisions: Object.fromEntries(
+        currentFindings.map((finding) => [finding.id, "accept" as const]),
+      ),
+    });
+    await worker.runNow(sent.planningRunId);
+    dispatchCount = 0;
+  }
+
   it("a question at a live gate is answered in place and does not advance the run", async () => {
     const sent = await sendToQc("question");
     reviewerV1.enqueue({ findings: [rebuttableMustFix] });
@@ -287,7 +321,7 @@ describe.sequential("QC adjudication (QCP-3A)", () => {
       responses: [{ finding_index: 0, disposition: "rebut", rationale: "The finding is wrong." }],
       plan: sent.envelope,
     });
-    await worker.runNow(sent.planningRunId);
+    await runRoundThroughFindingReview(sent);
     const parked = await reviewRow(sent.reviewId);
     expect(parked.status).toBe("awaiting_human");
     expect(parked.paused_checkpoint).toBe("adjudication");
@@ -319,7 +353,7 @@ describe.sequential("QC adjudication (QCP-3A)", () => {
       responses: [{ finding_index: 0, disposition: "rebut", rationale: "The finding is wrong." }],
       plan: sent.envelope,
     });
-    await worker.runNow(sent.planningRunId);
+    await runRoundThroughFindingReview(sent);
     const parked = await reviewRow(sent.reviewId);
     expect(parked.paused_checkpoint).toBe("adjudication");
     const findingId = parked.findings[0]?.id;
@@ -347,7 +381,7 @@ describe.sequential("QC adjudication (QCP-3A)", () => {
       responses: [{ finding_index: 0, disposition: "rebut", rationale: "Still disagree." }],
       plan: sent.envelope, // unchanged — would ordinarily be hollow acceptance too
     });
-    await worker.runNow(sent.planningRunId);
+    await runRoundThroughFindingReview(sent);
 
     const afterRound2 = await reviewRow(sent.reviewId);
     // Never re-adjudicated: the module was excluded from Gate C entirely, so
@@ -376,7 +410,7 @@ describe.sequential("QC adjudication (QCP-3A)", () => {
       responses: [{ finding_index: 0, disposition: "rebut", rationale: "The finding is wrong." }],
       plan: sent.envelope,
     });
-    await worker.runNow(sent.planningRunId);
+    await runRoundThroughFindingReview(sent);
     const parked = await reviewRow(sent.reviewId);
     const findingId = parked.findings[0]?.id;
     if (!findingId) throw new Error("expected a pending finding");
@@ -401,7 +435,7 @@ describe.sequential("QC adjudication (QCP-3A)", () => {
       responses: [{ finding_index: 0, disposition: "rebut", rationale: "The finding is wrong." }],
       plan: sent.envelope,
     });
-    await worker.runNow(sent.planningRunId);
+    await runRoundThroughFindingReview(sent);
     const parked = await reviewRow(sent.reviewId);
     const findingId = parked.findings[0]?.id;
     if (!findingId) throw new Error("expected a pending finding");
@@ -430,7 +464,7 @@ describe.sequential("QC adjudication (QCP-3A)", () => {
       responses: [{ finding_index: 0, disposition: "rebut", rationale: "The finding is wrong." }],
       plan: sent.envelope,
     });
-    await worker.runNow(sent.planningRunId);
+    await runRoundThroughFindingReview(sent);
     const parked = await reviewRow(sent.reviewId);
     expect(parked.rounds_completed).toBe(1);
     expect(parked.max_rounds).toBe(1);
@@ -470,7 +504,7 @@ describe.sequential("QC adjudication (QCP-3A)", () => {
         "Deliver the durable workflow, now with the objective clarified.",
       ),
     });
-    await worker.runNow(sent.planningRunId);
+    await runRoundThroughFindingReview(sent);
     const parked = await reviewRow(sent.reviewId);
     expect(parked.status).toBe("awaiting_human");
     expect(parked.rounds_completed).toBe(1);
@@ -508,7 +542,7 @@ describe.sequential("QC adjudication (QCP-3A)", () => {
         "Deliver the durable workflow, now with the objective clarified.",
       ),
     });
-    await worker.runNow(sent.planningRunId);
+    await runRoundThroughFindingReview(sent);
     expect((await reviewRow(sent.reviewId)).status).toBe("awaiting_human");
 
     reviewerV1.enqueue({ findings: [] });
