@@ -117,6 +117,10 @@ describe("AI SDK UI protocol conversation stream", () => {
           project_id: projectId,
           title,
         }),
+        archiveWorkItem: async (_user: unknown, _projectId: string, workItemId: string) => ({
+          archived_work_item_id: workItemId,
+          archived_conversation_count: 1,
+        }),
         switchConversationModel: async (
           _user: unknown,
           projectId: string,
@@ -288,6 +292,18 @@ describe("AI SDK UI protocol conversation stream", () => {
         project_id: "project-route",
         title: "Renamed from the title bar",
       },
+    });
+  });
+
+  it("archives a chat through the explicit delete endpoint", async () => {
+    const response = await app.inject({
+      method: "DELETE",
+      url: "/api/v2/projects/project-route/work-items/work-route",
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      archived_work_item_id: "work-route",
+      archived_conversation_count: 1,
     });
   });
 

@@ -1940,6 +1940,17 @@ export const V2QcPlanChange = z.discriminatedUnion("op", [
     .strict(),
   z
     .object({
+      op: z.literal("patch_module"),
+      ...qcFindingAttribution,
+      module_id: moduleSlug,
+      patch: PlanModule.omit({ id: true })
+        .partial()
+        .strict()
+        .refine((value) => Object.keys(value).length > 0, "module patch cannot be empty"),
+    })
+    .strict(),
+  z
+    .object({
       op: z.literal("remove_module"),
       ...qcFindingAttribution,
       module_id: moduleSlug,
@@ -2340,6 +2351,9 @@ export const V2PlanningLiveProgress = z
     attempt: z.number().int().positive(),
     provider: z.enum(["anthropic", "openai"]).nullable(),
     model: V2NonEmptyString.nullable(),
+    completed_items: nonNegativeInteger.default(0),
+    total_items: nonNegativeInteger.default(0),
+    activity: V2NonEmptyString.default("Working on the current QC step"),
     started_at: V2IsoDateTime,
     checkpoint_at: V2IsoDateTime,
   })

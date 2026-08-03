@@ -363,6 +363,20 @@ export function registerConversationRoutes(
     }
   });
 
+  app.delete(`${workBase}/:workItemId`, async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const { projectId, workItemId } = request.params as {
+      projectId: string;
+      workItemId: string;
+    };
+    try {
+      return reply.send(await options.conversations.archiveWorkItem(user, projectId, workItemId));
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
+
   app.patch(`${workBase}/:workItemId/organization`, async (request, reply) => {
     const user = await options.requireUser(request, reply);
     if (!user) return;

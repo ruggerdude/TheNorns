@@ -8,6 +8,7 @@ import {
 import {
   FindingResponse,
   type FindingResponseT,
+  PlanModule,
   type ReviewFindingT,
   ReviewFindings,
   type UsageEventT,
@@ -34,8 +35,11 @@ const ReviewOnlyRevision = z
   .strict();
 
 const REVIEWER_MAX_OUTPUT_TOKENS = 5_000;
-const TARGETED_REVISION_MAX_OUTPUT_TOKENS = 4_000;
-const TARGETED_REVISION_REPAIR_MAX_OUTPUT_TOKENS = 3_000;
+// Production-sized plans can legitimately need more than 4k output tokens even
+// with targeted changes. The patch operation below keeps the common case small;
+// this ceiling prevents a valid larger response from being cut off mid-JSON.
+const TARGETED_REVISION_MAX_OUTPUT_TOKENS = 8_000;
+const TARGETED_REVISION_REPAIR_MAX_OUTPUT_TOKENS = 6_000;
 const QC_APPROVED_KNOWLEDGE_ITEM_LIMIT = 24;
 const QC_APPROVED_KNOWLEDGE_CHARACTER_LIMIT = 24_000;
 
@@ -126,6 +130,9 @@ export interface ReviewOnlyProgressEvent {
   attempt: number;
   provider: "anthropic" | "openai";
   model: string;
+  completedItems: number;
+  totalItems: number;
+  activity: string;
 }
 
 export interface ReviewOnlyDurableCheckpoint {
@@ -336,9 +343,9 @@ function targetedRevisionPrompt(
     "The independent reviewer returned the findings below.",
     list,
     `Return JSON { base_plan_content_hash: "${canonicalSha256(plan)}", responses: [{ finding_index, disposition: accept|rebut, rationale }], changes: [...] }.`,
-    "Do not return the complete plan. Use only these operations: set_objective, set_assumptions, set_risks, set_out_of_scope, add_module, replace_module, remove_module, add_staffing, replace_staffing, remove_staffing, set_verification_requirements, set_open_decisions, set_estimated_budget.",
+    "Do not return the complete plan. Use only these operations: set_objective, set_assumptions, set_risks, set_out_of_scope, add_module, patch_module, replace_module, remove_module, add_staffing, replace_staffing, remove_staffing, set_verification_requirements, set_open_decisions, set_estimated_budget.",
     "Every change requires finding_indices and may reference only findings you disposition as accept. Every must_fix requires an accept or rebut disposition. Rebutted findings must not have attributed changes.",
-    "Use exact current module IDs. Module add/remove and staffing add/remove are separate explicit operations. replace_module requires module.id === module_id; replace_staffing requires staffing.module_id === module_id.",
+    "Use exact current module IDs. Prefer patch_module with only the changed fields; use replace_module only when most of a module must change. Module add/remove and staffing add/remove are separate explicit operations. replace_module requires module.id === module_id; replace_staffing requires staffing.module_id === module_id.",
     SCOPE_DISCIPLINE,
     "The server rejects a revision that adds more modules than the findings you disposition accept at must_fix or should_fix severity.",
     "The server applies these bounded operations, validates the complete strict Work Plan Contract, and writes the materialized plan to the durable Markdown artifact.",
@@ -359,6 +366,7 @@ function targetedChangeTarget(change: V2QcPlanChangeT): string {
     case "add_module":
       return `module:${change.module.id}`;
     case "replace_module":
+    case "patch_module":
     case "remove_module":
       return `module:${change.module_id}`;
     case "add_staffing":
@@ -375,6 +383,7 @@ function targetedChangeModuleId(change: V2QcPlanChangeT): string | null {
     case "add_module":
       return change.module.id;
     case "replace_module":
+    case "patch_module":
     case "remove_module":
     case "replace_staffing":
     case "remove_staffing":
@@ -506,6 +515,19 @@ export function applyTargetedQcRevision(
           targetedRevisionError(`module ${change.module_id} does not exist`);
         }
         plan.plan.modules[index] = change.module;
+        break;
+      }
+      case "patch_module": {
+        const index = plan.plan.modules.findIndex((module) => module.id === change.module_id);
+        const existing = plan.plan.modules[index];
+        if (!baseModuleIds.has(change.module_id) || index < 0 || !existing) {
+          targetedRevisionError(`module ${change.module_id} does not exist`);
+        }
+        plan.plan.modules[index] = PlanModule.parse({
+          ...existing,
+          ...change.patch,
+          id: change.module_id,
+        });
         break;
       }
       case "remove_module": {
@@ -764,6 +786,8 @@ async function completeStructuredWithRepair<T>(
     maxAttempts?: number;
     repairInstruction?: string;
     repairMaxTokens?: number;
+    totalItems?: number;
+    activity?: string;
     /** Targeted change envelopes can be repaired from their prior response;
      * legacy full envelopes still need the complete original plan prompt. */
     previousResponseOnlyRepair?: boolean;
@@ -780,6 +804,12 @@ async function completeStructuredWithRepair<T>(
       attempt: attempt + 1,
       provider: adapter.provider,
       model: adapter.model,
+      completedItems: 0,
+      totalItems: chat.totalItems ?? 0,
+      activity:
+        attempt === 0
+          ? (chat.activity ?? "Working on the current QC step")
+          : "Repairing the structured QC response",
     });
     await chat.onEvent?.({
       request_id: requestId,
@@ -812,6 +842,9 @@ async function completeStructuredWithRepair<T>(
         attempt: attempt + 1,
         provider: adapter.provider,
         model: adapter.model,
+        completedItems: chat.totalItems ?? 0,
+        totalItems: chat.totalItems ?? 0,
+        activity: "Validating the completed QC response",
       });
       await chat.onEvent?.({
         request_id: requestId,
@@ -1047,6 +1080,8 @@ export async function runReviewOnlyPlanning(
           round,
           ...(options.onChatEvent ? { onEvent: options.onChatEvent } : {}),
           ...(options.onStage ? { onStage: options.onStage } : {}),
+          totalItems: reviewedPlan.plan.modules.length,
+          activity: `Checking ${reviewedPlan.plan.modules.length} plan module${reviewedPlan.plan.modules.length === 1 ? "" : "s"} against the QC requirements`,
           markdown: (value) => reviewerMarkdown(round, value.findings),
         },
       );
@@ -1075,6 +1110,9 @@ export async function runReviewOnlyPlanning(
         attempt: review.progress_attempt,
         provider: options.reviewer.provider,
         model: options.reviewer.model,
+        completedItems: findings.length,
+        totalItems: findings.length,
+        activity: "Saving the reviewer findings",
       });
       await options.onProgress?.(rounds);
       if (findings.length === 0) {
@@ -1138,6 +1176,8 @@ export async function runReviewOnlyPlanning(
           round,
           ...(options.onChatEvent ? { onEvent: options.onChatEvent } : {}),
           ...(options.onStage ? { onStage: options.onStage } : {}),
+          totalItems: revisionFindings.length,
+          activity: `Applying ${revisionFindings.length} accepted QC finding${revisionFindings.length === 1 ? "" : "s"} to the plan`,
           markdown: (value) =>
             revisionMarkdown(round, {
               responses: value.responses,
@@ -1178,6 +1218,8 @@ export async function runReviewOnlyPlanning(
             round,
             ...(options.onChatEvent ? { onEvent: options.onChatEvent } : {}),
             ...(options.onStage ? { onStage: options.onStage } : {}),
+            totalItems: revisionFindings.length,
+            activity: `Applying ${revisionFindings.length} accepted QC finding${revisionFindings.length === 1 ? "" : "s"} to the plan`,
             markdown: (value) => {
               const materialized = applyTargetedQcRevision(reviewedPlan, value, revisionFindings);
               return targetedRevisionMarkdown(round, value, materialized);
@@ -1281,6 +1323,9 @@ export async function runReviewOnlyPlanning(
       attempt: revisionProgressAttempt,
       provider: options.pm.provider,
       model: options.pm.model,
+      completedItems: revisionFindings.length,
+      totalItems: revisionFindings.length,
+      activity: "Saving the revised plan",
     });
     await options.onProgress?.(rounds);
 

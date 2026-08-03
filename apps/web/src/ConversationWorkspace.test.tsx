@@ -2059,6 +2059,7 @@ describe("conversation workspace", () => {
         dispositions: [],
         review_mode: skipsQc ? "waived" : "qc",
         reviewer_model: skipsQc ? "qc-waived-by-human" : "gpt-5.6-terra",
+        max_rounds: skipsQc ? 3 : 2,
         started_at: skipsQc ? now : null,
         completed_at: skipsQc ? now : null,
       });
@@ -2291,9 +2292,9 @@ describe("conversation workspace", () => {
           expect(screen.queryByRole("combobox", { name: "QC agent" })).not.toBeInTheDocument();
           await user.click(screen.getByRole("button", { name: "Create plan & start" }));
         } else {
-          await user.selectOptions(await screen.findByRole("combobox", { name: "QC agent" }), [
-            "gpt-5.6-terra",
-          ]);
+          const qcAgent = await screen.findByRole("combobox", { name: "QC agent" });
+          expect(qcAgent).toHaveValue("gpt-5.6-terra");
+          await user.selectOptions(qcAgent, ["gpt-5.6-terra"]);
           await user.selectOptions(screen.getByRole("combobox", { name: "QC rounds" }), ["2"]);
           await user.click(screen.getByRole("button", { name: "Create plan & send to QC" }));
         }
@@ -2311,6 +2312,7 @@ describe("conversation workspace", () => {
       } else {
         expect(await screen.findByTestId("qc-new-workspace")).toBeInTheDocument();
         expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
+        expect(await screen.findByText("QC checks planned: 2 · Agents: 1")).toBeInTheDocument();
       }
       expect(proposalBodies).toEqual([
         {
@@ -3802,10 +3804,12 @@ describe("conversation workspace", () => {
     );
     const user = userEvent.setup();
 
+    const selectedConversations: string[] = [];
     render(
       <ConversationWorkspace
         projectId={projectId}
         initialNewConversation
+        onConversationSelected={(selectedId) => selectedConversations.push(selectedId)}
         onUnauthorized={() => undefined}
       />,
     );
@@ -3830,6 +3834,7 @@ describe("conversation workspace", () => {
       parts: [{ type: "text", format: "markdown", text: firstMessage }],
     });
     expect(new Headers(submit?.init?.headers).get("content-type")).toBe("application/json");
+    expect(selectedConversations).toContain(conversationId);
   });
 
   it("starts a quick push in Development chat without empty planning or QC stages", async () => {
@@ -3951,6 +3956,57 @@ describe("conversation workspace", () => {
     expect(patchedBody).toEqual({ title: "Release readiness" });
   });
 
+  it("deletes a chat family from its sidebar context menu", async () => {
+    let archived = false;
+    const deleted: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items") && (!init?.method || init.method === "GET")) {
+          return archived ? Response.json({ work_items: [] }) : listResponse();
+        }
+        if (url.includes("/conversation-navigation?")) {
+          return Response.json({ folders: [], items: [], next_cursor: null });
+        }
+        if (url.endsWith(`/conversations/${conversationId}`)) return detailResponse();
+        if (url.endsWith(`/work-items/${workItemId}`) && init?.method === "DELETE") {
+          archived = true;
+          deleted.push(workItemId);
+          return Response.json({
+            archived_work_item_id: workItemId,
+            archived_conversation_count: 1,
+          });
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    await user.click(
+      await screen.findByRole("button", { name: "Actions for Conversation-first planning" }),
+    );
+    await user.click(screen.getByRole("menuitem", { name: "Delete chat" }));
+    expect(screen.getByText("Delete this chat? Its history will be archived.")).toBeInTheDocument();
+    await user.click(screen.getByRole("menuitem", { name: "Confirm delete" }));
+
+    await waitFor(() => expect(deleted).toEqual([workItemId]));
+    expect(
+      screen.queryByRole("button", { name: "Open work item Conversation-first planning" }),
+    ).not.toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Describe the project" }),
+    ).toBeInTheDocument();
+  });
+
   it("keeps chat-family navigation persistent, searchable, and collapsible", async () => {
     const execution = executionConversation();
     const secondWorkItem = {
@@ -4052,6 +4108,8 @@ describe("conversation workspace", () => {
     });
     expect(workItemButton.querySelector(".conversation-sidebar-item-icon")).toBeInTheDocument();
     expect(workItemButton.querySelector(".conversation-family-title")?.tagName).toBe("SPAN");
+    expect(workItemButton.querySelector(".conversation-list-status")).toBeNull();
+    expect(workItemButton.querySelector("small")).toBeNull();
 
     await user.type(screen.getByRole("searchbox", { name: "Search work" }), "second");
     expect(

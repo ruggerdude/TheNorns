@@ -154,6 +154,16 @@ export function deleteConversationFolder(
   );
 }
 
+export function archivePlanningWorkItem(
+  projectId: string,
+  workItemId: string,
+): Promise<{ archived_work_item_id: string; archived_conversation_count: number }> {
+  return requestJson(
+    `/api/v2/projects/${encodeURIComponent(projectId)}/work-items/${encodeURIComponent(workItemId)}`,
+    { method: "DELETE" },
+  );
+}
+
 export async function updateWorkItemOrganization(
   projectId: string,
   workItemId: string,
@@ -220,6 +230,27 @@ export async function cancelProjectRun(
       },
     ),
   );
+}
+
+export async function cancelAllProjectRuns(
+  projectId: string,
+  input: ProjectRunCancellationRequestT,
+): Promise<{
+  cancellations: ProjectRunCancellationProjectionT[];
+  failed_run_ids: string[];
+}> {
+  const body = ProjectRunCancellationRequest.parse(input);
+  const result = await requestJson<{
+    cancellations: unknown[];
+    failed_run_ids: string[];
+  }>(`/api/projects/${encodeURIComponent(projectId)}/runs/cancel-all`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return {
+    cancellations: result.cancellations.map((item) => ProjectRunCancellationProjection.parse(item)),
+    failed_run_ids: result.failed_run_ids,
+  };
 }
 
 export function createConversationMessageBranch(

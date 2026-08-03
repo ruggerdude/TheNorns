@@ -24,7 +24,10 @@ const ConversationParams = z
 
 export type ProjectCancellationRouteService = Pick<
   DeviceRunCancellationService,
-  "requestProjectStop" | "getProjectCancellation" | "getConversationExecution"
+  | "requestProjectStop"
+  | "requestAllProjectStops"
+  | "getProjectCancellation"
+  | "getConversationExecution"
 >;
 
 export interface ProjectCancellationRouteOptions {
@@ -75,6 +78,39 @@ export async function registerProjectCancellationRoutes(
         requested_at: now().toISOString(),
       });
       return noStore(reply).send(ProjectRunCancellationProjection.parse(projection));
+    } catch (error) {
+      if (error instanceof ProjectRunCancellationError) {
+        return cancellationError(reply, error);
+      }
+      return noStore(reply).code(503).send({ error: "project_cancellation_unavailable" });
+    }
+  });
+
+  app.post("/api/projects/:projectId/runs/cancel-all", async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const params = z
+      .object({ projectId: z.string().trim().min(1).max(512) })
+      .strict()
+      .safeParse(request.params);
+    const body = ProjectRunCancellationRequest.safeParse(request.body);
+    if (!params.success || !body.success) {
+      return noStore(reply).code(400).send({ error: "bad_request" });
+    }
+    try {
+      const result = await options.service.requestAllProjectStops({
+        actor_user_id: user.id,
+        project_id: params.data.projectId,
+        reason: body.data.reason,
+        idempotency_key: body.data.idempotency_key,
+        requested_at: now().toISOString(),
+      });
+      return noStore(reply).send({
+        cancellations: result.cancellations.map((projection) =>
+          ProjectRunCancellationProjection.parse(projection),
+        ),
+        failed_run_ids: result.failed_run_ids,
+      });
     } catch (error) {
       if (error instanceof ProjectRunCancellationError) {
         return cancellationError(reply, error);

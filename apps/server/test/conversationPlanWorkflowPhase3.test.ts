@@ -2769,6 +2769,9 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
         attempt: 1,
         provider: "openai",
         model: "gpt-5.6-sol",
+        completedItems: 0,
+        totalItems: seed.seedPlan.plan.modules.length,
+        activity: "Checking plan modules against the QC requirements",
       },
     });
     const active = await workflow.detail(

@@ -446,6 +446,50 @@ export class ConversationService {
     });
   }
 
+  archiveWorkItem(
+    actor: ConversationActor,
+    projectId: string,
+    workItemId: string,
+  ): Promise<{ archived_work_item_id: string; archived_conversation_count: number }> {
+    return this.store.transaction(async (repository) => {
+      await repository.assertProjectAccess(projectId, actor.id);
+      const workItem = await repository.findWorkItem(projectId, workItemId);
+      if (!workItem) {
+        throw new ConversationPersistenceError(
+          "work_item_not_found",
+          `unknown work item "${workItemId}" in project "${projectId}"`,
+        );
+      }
+      if (["in_qc", "executing", "blocked"].includes(workItem.status)) {
+        throw new ConversationPersistenceError(
+          "work_item_active",
+          "Stop QC and all agent work before deleting this chat.",
+        );
+      }
+      const conversations = await repository.listConversations(projectId, workItemId);
+      for (const conversation of conversations) {
+        if (
+          conversation.status === "active" &&
+          ((await repository.hasActiveTurnAttempt(conversation.id)) ||
+            (await repository.hasActivePlanProposal(conversation.id)))
+        ) {
+          throw new ConversationPersistenceError(
+            "work_item_active",
+            "Wait for or stop the active response before deleting this chat.",
+          );
+        }
+      }
+      const archivedConversationCount = await repository.archiveWorkItemConversations(
+        projectId,
+        workItemId,
+      );
+      return {
+        archived_work_item_id: workItemId,
+        archived_conversation_count: archivedConversationCount,
+      };
+    });
+  }
+
   switchConversationModel(
     actor: ConversationActor,
     projectId: string,
@@ -515,15 +559,20 @@ export class ConversationService {
         repository.listConversations(projectId),
       ]);
       const byWorkItem = new Map<string, V2WorkConversationT[]>();
+      const workItemsWithConversationHistory = new Set<string>();
       for (const conversation of conversations) {
+        workItemsWithConversationHistory.add(conversation.work_item_id);
+        if (conversation.status === "archived") continue;
         const listed = byWorkItem.get(conversation.work_item_id) ?? [];
         listed.push(conversation);
         byWorkItem.set(conversation.work_item_id, listed);
       }
-      return items.map((work_item) => ({
-        work_item,
-        conversations: byWorkItem.get(work_item.id) ?? [],
-      }));
+      return items.flatMap((work_item) => {
+        const listed = byWorkItem.get(work_item.id) ?? [];
+        return listed.length > 0 || !workItemsWithConversationHistory.has(work_item.id)
+          ? [{ work_item, conversations: listed }]
+          : [];
+      });
     });
   }
 

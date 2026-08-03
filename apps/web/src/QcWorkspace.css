@@ -120,24 +120,87 @@
   background: var(--qc-blue-soft);
 }
 
-.qc-new-working {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.9rem;
-  padding: 1.1rem 1.2rem;
+.qc-progress-popout {
+  position: sticky;
+  z-index: 3;
+  top: 1rem;
+  display: grid;
+  width: min(29rem, 100%);
+  justify-self: end;
+  gap: 0.75rem;
+  padding: 1rem 1.1rem;
   border: 1px solid color-mix(in srgb, var(--qc-blue) 25%, var(--line));
   border-radius: 12px;
-  background: var(--qc-blue-soft);
+  background: color-mix(in srgb, var(--surface) 94%, var(--qc-blue));
+  box-shadow: 0 16px 42px color-mix(in srgb, var(--ink) 12%, transparent);
 }
 
-.qc-new-working > div {
+.qc-progress-popout > header {
   display: grid;
-  gap: 0.2rem;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.7rem;
 }
 
-.qc-new-working p {
+.qc-progress-popout > header > div {
+  display: grid;
+  gap: 0.08rem;
+}
+
+.qc-progress-popout > header span,
+.qc-progress-popout small,
+.qc-progress-popout dt {
   color: var(--ink-muted);
+  font-size: 0.75rem;
+}
+
+.qc-progress-popout > header b {
+  color: var(--qc-blue);
+  font-variant-numeric: tabular-nums;
+}
+
+.qc-progress-popout progress {
+  width: 100%;
+  height: 0.55rem;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  accent-color: var(--qc-blue);
+}
+
+.qc-progress-popout progress::-webkit-progress-bar {
+  background: color-mix(in srgb, var(--qc-blue) 12%, var(--surface));
+}
+
+.qc-progress-popout progress::-webkit-progress-value {
+  border-radius: 999px;
+  background: var(--qc-blue);
+}
+
+.qc-progress-activity {
+  margin: 0;
+  color: var(--ink);
   font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.qc-progress-popout dl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem 1rem;
+  margin: 0;
+}
+
+.qc-progress-popout dl > div {
+  display: grid;
+  gap: 0.05rem;
+}
+
+.qc-progress-popout dd {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.8rem;
+  font-weight: 700;
 }
 
 .qc-new-working-meta {
@@ -431,24 +494,43 @@
   background: color-mix(in srgb, var(--danger) 6%, var(--surface));
 }
 
-.qc-new-record,
-.qc-new-stop {
+.qc-new-record {
   color: var(--ink-muted);
   font-size: 0.82rem;
 }
 
-.qc-new-record > summary,
-.qc-new-stop > summary {
+.qc-new-record > summary {
   width: fit-content;
   padding: 0.3rem 0;
   font-weight: 750;
   cursor: pointer;
 }
 
-.qc-new-record > div,
-.qc-new-stop[open] {
+.qc-new-record > div {
   display: grid;
   gap: 1rem;
+}
+
+.qc-new-stop {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.65rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.qc-new-stop > div {
+  display: grid;
+  min-width: 0;
+  margin-right: auto;
+  gap: 0.15rem;
+}
+
+.qc-new-stop p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 0.8rem;
 }
 
 .qc-new-record dl {
@@ -615,6 +697,21 @@
   .qc-new-decision-bar {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .qc-progress-popout {
+    position: static;
+    width: auto;
+    justify-self: stretch;
+  }
+
+  .qc-new-stop {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .qc-new-stop > div {
+    margin: 0 0 0.25rem;
   }
 }
 

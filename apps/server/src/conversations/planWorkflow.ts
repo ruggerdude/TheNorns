@@ -1001,6 +1001,9 @@ export class ConversationPlanWorkflowService {
         attempt: input.event.attempt,
         provider: input.event.provider,
         model: input.event.model,
+        completed_items: input.event.completedItems,
+        total_items: input.event.totalItems,
+        activity: input.event.activity,
         started_at: sameOperation && previous ? previous.started_at : now,
         checkpoint_at: now,
       });

@@ -196,6 +196,20 @@ describe("V2 conversation contracts", () => {
     expect(
       V2QcTargetedRevision.safeParse({
         base_plan_content_hash: hash,
+        responses: [{ finding_index: 0, disposition: "accept", rationale: "Clarified it." }],
+        changes: [
+          {
+            op: "patch_module",
+            finding_indices: [0],
+            module_id: "contracts",
+            patch: { description: "Clarified contract boundaries." },
+          },
+        ],
+      }).success,
+    ).toBe(true);
+    expect(
+      V2QcTargetedRevision.safeParse({
+        base_plan_content_hash: hash,
         responses: [],
         changes: [{ op: "replace_path", finding_indices: [0], path: "/plan/objective" }],
       }).success,

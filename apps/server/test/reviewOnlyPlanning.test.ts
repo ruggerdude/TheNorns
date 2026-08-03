@@ -931,10 +931,10 @@ describe("review-only conversational planning", () => {
       ],
       changes: [
         {
-          op: "replace_module" as const,
+          op: "patch_module" as const,
           finding_indices: [0],
           module_id: "contracts",
-          module: { ...current, description: "Deliver a bounded targeted revision workflow." },
+          patch: { description: "Deliver a bounded targeted revision workflow." },
         },
       ],
     };
@@ -1258,7 +1258,7 @@ describe("review-only conversational planning", () => {
     expect(result.status).toBe("cap_reached");
     expect(result.final_plan.staffing[0]?.model).toBe("gpt-5.6-terra");
     expect(pm.requests[0]?.schemaName).toBe("targeted_plan_revision");
-    expect(pm.requests[0]?.maxTokens).toBe(4_000);
+    expect(pm.requests[0]?.maxTokens).toBe(8_000);
     expect(pm.requests[0]?.prompt).toContain("Do not return the complete plan");
     const pmArtifact = chat.find(
       (event) => event.channel === "pm" && event.speaker === "pm" && event.artifact_valid,
@@ -1321,7 +1321,7 @@ describe("review-only conversational planning", () => {
 
     assertTerminal(result);
     expect(result.final_plan.plan.modules[0]?.description).toContain("targeted repair");
-    expect(pm.requests[0]?.maxTokens).toBe(3_000);
+    expect(pm.requests[0]?.maxTokens).toBe(6_000);
     expect(pm.requests[0]?.prompt).toContain("Do not return the complete plan");
     expect(pm.requests[0]?.prompt).toContain("Do not return the complete plan;");
     expect(pm.requests[0]?.prompt).not.toContain("preserve the full plan");
@@ -1382,7 +1382,7 @@ describe("review-only conversational planning", () => {
 
     expect(error).toMatchObject({ kind: "invalid_response" });
     expect(completion).toHaveBeenCalledTimes(1);
-    expect(completion.mock.calls[0]?.[0].maxTokens).toBe(4_000);
+    expect(completion.mock.calls[0]?.[0].maxTokens).toBe(8_000);
     expect(chat.filter((event) => event.kind === "repair_reminder")).toHaveLength(0);
     expect(chat.find((event) => event.channel === "pm" && event.speaker === "pm")).toMatchObject({
       error_code: "output_truncated",

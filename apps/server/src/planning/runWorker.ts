@@ -751,6 +751,9 @@ export class PlanningRunWorker {
           attempt: 1,
           provider: reviewer.provider,
           model: reviewer.model,
+          completedItems: 0,
+          totalItems: seed.seedPlan.plan.modules.length,
+          activity: "Preparing the plan for independent quality review",
         },
       });
       await this.options.markReviewOnlyStarted(seed.reviewId, claim.lease_token);

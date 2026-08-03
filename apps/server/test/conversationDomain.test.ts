@@ -331,6 +331,39 @@ describe.sequential("conversation-first durable domain", () => {
     );
   });
 
+  it("archives a deleted chat family and removes it from conversation lists", async () => {
+    const item = await service.createWorkItem(owner, {
+      project_id: "conversation-project",
+      title: "Disposable chat",
+      objective: "Verify recoverable chat deletion.",
+    });
+    const disposable = await service.createConversation(owner, {
+      project_id: "conversation-project",
+      work_item_id: item.id,
+      kind: "planning",
+      provider: "openai",
+      model: "gpt-5.6-terra",
+    });
+
+    await expect(
+      service.archiveWorkItem(outsider, "conversation-project", item.id),
+    ).rejects.toMatchObject({ code: "forbidden" });
+    await expect(service.archiveWorkItem(owner, "conversation-project", item.id)).resolves.toEqual({
+      archived_work_item_id: item.id,
+      archived_conversation_count: 1,
+    });
+    await expect(service.listWorkItems(owner, "conversation-project")).resolves.not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ work_item: expect.objectContaining({ id: item.id }) }),
+      ]),
+    );
+    await expect(
+      pg.query<{ status: string }>("SELECT status FROM work_conversations WHERE id=$1", [
+        disposable.id,
+      ]),
+    ).resolves.toMatchObject({ rows: [{ status: "archived" }] });
+  });
+
   it("assigns stable row-locked order and makes user submission idempotent", async () => {
     const parts = [{ type: "text" as const, format: "markdown" as const, text: "Plan this." }];
     const requestFingerprint = canonicalSha256({ parts });

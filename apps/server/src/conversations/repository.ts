@@ -30,6 +30,7 @@ export type ConversationPersistenceErrorCode =
   | "project_not_found"
   | "forbidden"
   | "work_item_not_found"
+  | "work_item_active"
   | "conversation_folder_not_found"
   | "conversation_folder_name_conflict"
   | "conversation_folder_order_invalid"
@@ -483,6 +484,7 @@ export interface ConversationRepository {
     workItemId: string,
     title: string,
   ): Promise<V2WorkItemT | null>;
+  archiveWorkItemConversations(projectId: string, workItemId: string): Promise<number>;
   lockWorkItem(projectId: string, workItemId: string): Promise<V2WorkItemT | null>;
   insertConversation(input: InsertConversation): Promise<V2WorkConversationT>;
   findConversation(projectId: string, conversationId: string): Promise<V2WorkConversationT | null>;
@@ -775,6 +777,19 @@ class SqlConversationRepository implements ConversationRepository {
              ON message.project_id=item.project_id
             AND message.work_item_id=item.id
           WHERE item.project_id=$1
+            AND NOT (
+              EXISTS (
+                SELECT 1 FROM work_conversations existing
+                 WHERE existing.project_id=item.project_id
+                   AND existing.work_item_id=item.id
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM work_conversations visible
+                 WHERE visible.project_id=item.project_id
+                   AND visible.work_item_id=item.id
+                   AND visible.status <> 'archived'
+              )
+            )
           GROUP BY item.id, item.project_id, item.title, item.status, item.created_at
        ),
        conversation_activity AS (
@@ -799,6 +814,7 @@ class SqlConversationRepository implements ConversationRepository {
             AND message.work_item_id=conversation.work_item_id
             AND message.conversation_id=conversation.id
           WHERE conversation.project_id=$1
+            AND conversation.status <> 'archived'
           GROUP BY conversation.id,
                    conversation.work_item_id,
                    conversation.kind,
@@ -935,6 +951,17 @@ class SqlConversationRepository implements ConversationRepository {
       [projectId, workItemId, title],
     );
     return result.rows[0] ? workItem(result.rows[0]) : null;
+  }
+
+  async archiveWorkItemConversations(projectId: string, workItemId: string): Promise<number> {
+    const result = await this.sql.query(
+      `UPDATE work_conversations
+          SET status='archived', archived_at=NOW(), updated_at=NOW()
+        WHERE project_id=$1 AND work_item_id=$2 AND status <> 'archived'
+        RETURNING id`,
+      [projectId, workItemId],
+    );
+    return result.rows.length;
   }
 
   async lockWorkItem(projectId: string, workItemId: string): Promise<V2WorkItemT | null> {

@@ -53,6 +53,7 @@ import type {
   V2WorkPlanVersionT,
 } from "@norns/contracts";
 import {
+  DEFAULT_PM_MODEL,
   PM_MODEL_OPTIONS,
   V2ConversationMockupVersion,
   V2CreateExecutionActionProposalInput,
@@ -95,6 +96,8 @@ import {
   type SubmitConversationMessageBody,
   type WorkItemConversationGroup,
   adjudicateConversationPlanReview,
+  archivePlanningWorkItem,
+  cancelAllProjectRuns,
   cancelConversationPlanReview,
   confirmConversationAction,
   continueConversationPlanReviewChat,
@@ -284,23 +287,6 @@ function conversationKindLabel(kind: V2WorkConversationT["kind"]): string {
   if (kind === "planning") return "Plan with PM";
   if (kind === "execution_pm") return "Development chat";
   return "Task";
-}
-
-function workStageLabel(status: WorkItemConversationGroup["work_item"]["status"]): string {
-  if (status === "in_qc" || status === "awaiting_approval") return "QC";
-  if (["executing", "blocked"].includes(status)) return "Development";
-  if (status === "completed") return "Completed";
-  if (status === "cancelled") return "Cancelled";
-  return "Planning";
-}
-
-function qcSidebarLabel(review: V2ConversationPlanReviewT): string {
-  if (review.status === "awaiting_human") return "QC · decision needed";
-  if (["queued", "running"].includes(review.status)) return "QC · active";
-  if (review.status === "converged") return "QC · ready to approve";
-  if (review.status === "cap_reached") return "QC · review limit reached";
-  if (review.status === "failed") return "QC · recovery needed";
-  return "QC · stopped";
 }
 
 function displayConversationTitle(title: string): string {
@@ -609,6 +595,7 @@ type ConversationActionContextValue = {
   reviewBusyId: string | null;
   reviewErrors: Map<string, ReviewActionError>;
   cancelReview: (review: V2ConversationPlanReviewT, reason: string) => Promise<void>;
+  stopAllWork: (review: V2ConversationPlanReviewT) => Promise<void>;
   continueReviewChat: (
     review: V2ConversationPlanReviewT,
     channel: "reviewer" | "pm",
@@ -1923,6 +1910,7 @@ function ConversationQcActivity({
       }
       onContinueWithoutQc={context.continueWithoutQc}
       onCancel={context.cancelReview}
+      onStopAll={context.stopAllWork}
       onConfirmAction={context.confirm}
     />
   );
@@ -2914,6 +2902,10 @@ function isPlanAdoptionIntent(value: string): boolean {
   ].includes(normalized);
 }
 
+function conversationDraftStorageKey(conversationId: string): string {
+  return `norns:conversation-composer-draft:${conversationId}`;
+}
+
 function PlanHandoffDialog({
   busy,
   pmProvider,
@@ -2929,7 +2921,7 @@ function PlanHandoffDialog({
   const [rounds, setRounds] = useState(3);
   const reviewerProvider = pmProvider === "anthropic" ? "openai" : "anthropic";
   const reviewerOptions = PM_MODEL_OPTIONS[reviewerProvider];
-  const [reviewerModel, setReviewerModel] = useState<string>(reviewerOptions[0].id);
+  const [reviewerModel, setReviewerModel] = useState<string>(DEFAULT_PM_MODEL[reviewerProvider]);
   const [executionModels, setExecutionModels] = useState<ExecutionModelCapability[] | null>(null);
   const [executionModel, setExecutionModel] = useState("");
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
@@ -3100,6 +3092,7 @@ function PlanHandoffDialog({
 }
 
 function ConversationComposer({
+  conversationId,
   isExecution,
   isPlanning,
   pmProvider,
@@ -3109,6 +3102,7 @@ function ConversationComposer({
   prefillText,
   onPrefillConsumed,
 }: {
+  conversationId: string;
   isExecution: boolean;
   isPlanning: boolean;
   pmProvider: PmProviderT;
@@ -3121,9 +3115,30 @@ function ConversationComposer({
   const composer = useComposerRuntime();
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  const [draftStorageReady, setDraftStorageReady] = useState(false);
   const responseRunning = useThread((thread) => thread.isRunning);
+  const draftText = useComposer((state) => state.text);
   const hasDraft = useComposer((state) => state.text.trim().length > 0);
   const hasAttachments = useComposer((state) => state.attachments.length > 0);
+  useEffect(() => {
+    try {
+      const stored = window.sessionStorage.getItem(conversationDraftStorageKey(conversationId));
+      if (stored && !composer.getState().text) composer.setText(stored);
+    } catch {
+      // The mounted composer still owns the draft when storage is unavailable.
+    }
+    setDraftStorageReady(true);
+  }, [composer, conversationId]);
+  useEffect(() => {
+    if (!draftStorageReady) return;
+    try {
+      const key = conversationDraftStorageKey(conversationId);
+      if (draftText) window.sessionStorage.setItem(key, draftText);
+      else window.sessionStorage.removeItem(key);
+    } catch {
+      // The mounted composer still owns the draft when storage is unavailable.
+    }
+  }, [conversationId, draftStorageReady, draftText]);
   useEffect(() => {
     if (!prefillText) return;
     composer.setText(prefillText);
@@ -3331,6 +3346,7 @@ function ConversationThread({
     executionTargetLabel: string | null,
     toolControl?: ReactNode,
     primaryAction?: ReactNode,
+    planSummary?: string | null,
   ) => ReactNode;
   detail: ConversationDetail;
   initialMessage?: string | null;
@@ -3538,7 +3554,7 @@ function ConversationThread({
     },
     onFinish: ({ isAbort }) => {
       if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
-      refreshTimer.current = window.setTimeout(onRefresh, isAbort ? 0 : 120);
+      refreshTimer.current = window.setTimeout(onRefreshSoft, isAbort ? 0 : 120);
     },
   });
 
@@ -4020,6 +4036,67 @@ function ConversationThread({
     [detail.conversation.id, detail.work_item.id, detail.work_item.project_id, runReviewAction],
   );
 
+  const stopAllWork = useCallback(
+    async (review: V2ConversationPlanReviewT): Promise<void> => {
+      if (reviewBusyId !== null) return;
+      setReviewBusyId(review.id);
+      setReviewErrors((current) => {
+        const next = new Map(current);
+        next.delete(review.id);
+        return next;
+      });
+      const key = durableRequestKey("stop-all-work", review.id, reviewRecoveryKeys.current);
+      try {
+        const [qcResult, runsResult] = await Promise.allSettled([
+          cancelConversationPlanReview(
+            detail.work_item.project_id,
+            detail.work_item.id,
+            detail.conversation.id,
+            review.id,
+            "Stopped with all plan work by the user.",
+          ),
+          cancelAllProjectRuns(detail.work_item.project_id, {
+            reason: "Stopped with the QC plan by the user.",
+            idempotency_key: key,
+          }),
+        ]);
+        const failure = [qcResult, runsResult].find(
+          (result): result is PromiseRejectedResult => result.status === "rejected",
+        );
+        if (failure) throw failure.reason;
+        if (runsResult.status === "fulfilled" && runsResult.value.failed_run_ids.length > 0) {
+          throw new Error(
+            `QC stopped, but ${runsResult.value.failed_run_ids.length} agent run${runsResult.value.failed_run_ids.length === 1 ? "" : "s"} could not be stopped.`,
+          );
+        }
+        clearDurableRequestKey("stop-all-work", review.id, reviewRecoveryKeys.current);
+        onRefresh();
+      } catch (caught) {
+        if (caught instanceof UnauthorizedError) {
+          onUnauthorized();
+          return;
+        }
+        setReviewErrors((current) =>
+          new Map(current).set(review.id, {
+            message: caught instanceof Error ? caught.message : String(caught),
+          }),
+        );
+        onRefreshSoft();
+      } finally {
+        setReviewBusyId(null);
+      }
+    },
+    [
+      detail.conversation.id,
+      detail.work_item.id,
+      detail.work_item.project_id,
+      onRefresh,
+      onRefreshSoft,
+      onUnauthorized,
+      reviewBusyId,
+    ],
+  );
+
   const continueReviewChat = useCallback(
     (
       review: V2ConversationPlanReviewT,
@@ -4477,6 +4554,7 @@ function ConversationThread({
       reviewBusyId,
       reviewErrors,
       cancelReview,
+      stopAllWork,
       continueReviewChat,
       continueWithoutQc,
       resumeReview,
@@ -4510,6 +4588,7 @@ function ConversationThread({
     reviewBusyId,
     reviewErrors,
     cancelReview,
+    stopAllWork,
     continueReviewChat,
     continueWithoutQc,
     resumeReview,
@@ -4569,6 +4648,23 @@ function ConversationThread({
       ).map((option) => [option.id, option]),
     ).values(),
   );
+  const latestReview = [...detail.plan_reviews].sort(
+    (left, right) =>
+      Date.parse(right.created_at) - Date.parse(left.created_at) ||
+      right.attempt_number - left.attempt_number,
+  )[0];
+  const pendingQcPreference = [...actionContext.actions.values()]
+    .filter((action) => action.action_type === "send_plan_to_qc")
+    .map(
+      (action) =>
+        (action.payload.parameters.review as { mode?: string; rounds?: number } | undefined) ??
+        null,
+    )
+    .find((review) => review?.mode === "qc");
+  const plannedQcChecks = latestReview?.max_rounds ?? pendingQcPreference?.rounds ?? 0;
+  const planHeaderSummary = latestPlan
+    ? `QC checks planned: ${plannedQcChecks} · Agents: ${taskOptions.length}`
+    : null;
   const artifactOptions = Array.from(
     new Set([
       ...(detail.handoff?.package.artifact_ids ?? []),
@@ -4707,6 +4803,7 @@ function ConversationThread({
                     Development chat
                   </Button>
                 ) : null,
+                planHeaderSummary,
               )}
             </div>
             {detail.branch_lineage ? (
@@ -4926,7 +5023,7 @@ function ConversationThread({
                 <ThreadPrimitive.Root className="conversation-thread-root">
                   <ThreadPrimitive.Viewport
                     className="conversation-thread-viewport"
-                    turnAnchor="top"
+                    turnAnchor="bottom"
                     scrollToBottomOnThreadSwitch
                   >
                     <AuiIf condition={(state) => state.thread.messages.length === 0}>
@@ -4972,6 +5069,7 @@ function ConversationThread({
                         </output>
                       ) : (
                         <ConversationComposer
+                          conversationId={detail.conversation.id}
                           isExecution={isExecution}
                           isPlanning={isPlanning}
                           pmProvider={
@@ -5266,6 +5364,7 @@ export function ConversationWorkspace({
   } | null>(null);
   const [folderBusy, setFolderBusy] = useState(false);
   const [deleteFolderId, setDeleteFolderId] = useState<string | null>(null);
+  const [deleteWorkItemId, setDeleteWorkItemId] = useState<string | null>(null);
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   const [lastResponseCopied, setLastResponseCopied] = useState(false);
   const [initialMessage, setInitialMessage] = useState<{
@@ -5281,6 +5380,7 @@ export function ConversationWorkspace({
     title: string;
     x: number;
     y: number;
+    confirmDelete?: boolean;
   } | null>(null);
   const [threadVersion, setThreadVersion] = useState(0);
   const initialSelectionHandled = useRef<string | null>(null);
@@ -5298,7 +5398,8 @@ export function ConversationWorkspace({
     const closeMenu = (event: MouseEvent) => {
       if (
         event.target instanceof Element &&
-        event.target.closest(".conversation-header-menu") !== null
+        (event.target.closest(".conversation-header-menu") !== null ||
+          event.target.closest(".conversation-context-menu") !== null)
       ) {
         return;
       }
@@ -5434,6 +5535,7 @@ export function ConversationWorkspace({
     setOrganizationBusyWorkItemId(null);
     setFolderEditor(null);
     setDeleteFolderId(null);
+    setDeleteWorkItemId(null);
     setHeaderMenuOpen(false);
     setLastResponseCopied(false);
     setInitialMessage(null);
@@ -5663,7 +5765,6 @@ export function ConversationWorkspace({
         model,
         workflow,
       });
-      await Promise.all([loadGroups(), loadNavigation()]);
       setNewWorkInitialBrief(null);
       setShowNew(false);
       setConversationListOpen(false);
@@ -5686,6 +5787,7 @@ export function ConversationWorkspace({
       });
       setThreadVersion((version) => version + 1);
       callbacks.current.onConversationSelected?.(created.conversation.id);
+      void Promise.all([loadGroups(), loadNavigation()]);
     } catch (caught) {
       handleError(caught);
     } finally {
@@ -5724,6 +5826,36 @@ export function ConversationWorkspace({
       handleError(caught);
     } finally {
       setRenameBusy(false);
+    }
+  };
+
+  const deleteWork = async (workItemId: string) => {
+    if (deleteWorkItemId) return;
+    setDeleteWorkItemId(workItemId);
+    setError(null);
+    try {
+      await archivePlanningWorkItem(projectId, workItemId);
+      setGroups(
+        (current) => current?.filter((group) => group.work_item.id !== workItemId) ?? current,
+      );
+      setNavigation((current) =>
+        current
+          ? { ...current, items: current.items.filter((item) => item.id !== workItemId) }
+          : current,
+      );
+      setConversationMenu(null);
+      if (selected?.workItemId === workItemId) {
+        setSelected(null);
+        setDetail(null);
+        setInitialMessage(null);
+        setShowNew(true);
+        callbacks.current.onNewConversation?.();
+      }
+      void Promise.all([loadGroups(), loadNavigation()]);
+    } catch (caught) {
+      handleError(caught);
+    } finally {
+      setDeleteWorkItemId(null);
     }
   };
 
@@ -6012,23 +6144,6 @@ export function ConversationWorkspace({
                 <span className="conversation-family-title" title={group.work_item.title}>
                   {displayTitle}
                 </span>
-                <span
-                  className={`conversation-list-status is-${primaryConversation?.status ?? "archived"}`}
-                  aria-hidden="true"
-                />
-                <small>
-                  {familyActive && detail?.plan_reviews.length
-                    ? qcSidebarLabel(
-                        [...detail.plan_reviews].sort(
-                          (left, right) =>
-                            Date.parse(right.created_at) - Date.parse(left.created_at) ||
-                            right.attempt_number - left.attempt_number,
-                        )[0] as V2ConversationPlanReviewT,
-                      )
-                    : primaryConversation
-                      ? `${workStageLabel(group.work_item.status)} · ${group.work_item.status.replaceAll("_", " ")}`
-                      : "No active stages"}
-                </small>
               </button>
               <button
                 type="button"
@@ -6067,11 +6182,6 @@ export function ConversationWorkspace({
                       <span className="conversation-list-item-title">
                         {conversationKindLabel(conversation.kind)}
                       </span>
-                      <span
-                        className={`conversation-list-status is-${conversation.status}`}
-                        aria-hidden="true"
-                      />
-                      <small>{conversation.status.replaceAll("_", " ")}</small>
                     </button>
                   );
                 })}
@@ -6103,6 +6213,7 @@ export function ConversationWorkspace({
     executionTargetLabel: string | null = null,
     toolControl?: ReactNode,
     primaryAction?: ReactNode,
+    planSummary?: string | null,
   ) => (
     <header className="conversation-header">
       <Button
@@ -6128,6 +6239,9 @@ export function ConversationWorkspace({
               ? displayConversationTitle(detail.work_item.title)
               : "Conversation"}
         </h2>
+        {planSummary ? (
+          <span className="conversation-header-plan-summary">{planSummary}</span>
+        ) : null}
       </div>
       {!showNew && detail ? (
         <div className="conversation-header-actions">
@@ -6537,6 +6651,49 @@ export function ConversationWorkspace({
                 ))}
               </>
             ) : null}
+            <div className="conversation-context-menu-danger">
+              {conversationMenu.confirmDelete ? (
+                <>
+                  <span>Delete this chat? Its history will be archived.</span>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="is-danger"
+                    disabled={deleteWorkItemId === conversationMenu.workItemId}
+                    onClick={() => void deleteWork(conversationMenu.workItemId)}
+                  >
+                    {deleteWorkItemId === conversationMenu.workItemId
+                      ? "Deleting…"
+                      : "Confirm delete"}
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    disabled={deleteWorkItemId === conversationMenu.workItemId}
+                    onClick={() =>
+                      setConversationMenu((current) =>
+                        current ? { ...current, confirmDelete: false } : current,
+                      )
+                    }
+                  >
+                    Cancel
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="is-danger"
+                  onClick={() =>
+                    setConversationMenu((current) =>
+                      current ? { ...current, confirmDelete: true } : current,
+                    )
+                  }
+                >
+                  Delete chat
+                </button>
+              )}
+            </div>
           </div>
         ) : null}
       </aside>

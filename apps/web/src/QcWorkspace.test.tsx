@@ -115,6 +115,7 @@ function renderWorkspace(current = review()) {
       onAdjudicate={vi.fn().mockResolvedValue(undefined)}
       onContinueWithoutQc={onContinueWithoutQc}
       onCancel={vi.fn().mockResolvedValue(undefined)}
+      onStopAll={vi.fn().mockResolvedValue(undefined)}
       onConfirmAction={vi.fn().mockResolvedValue(undefined)}
     />,
   );
@@ -235,6 +236,9 @@ describe("QcWorkspace", () => {
           attempt: 1,
           provider: "openai",
           model: "gpt",
+          completed_items: 2,
+          total_items: 5,
+          activity: "Checking 5 plan modules against the QC requirements",
           started_at: "2026-08-02T12:01:18.000Z",
           checkpoint_at: "2026-08-02T12:01:18.000Z",
         },
@@ -242,6 +246,8 @@ describe("QcWorkspace", () => {
     );
     expect(screen.getByText("4:12 on this step")).toBeVisible();
     expect(screen.getByText("gpt")).toBeVisible();
+    expect(screen.getByText("2 of 5 items")).toBeVisible();
+    expect(screen.getByRole("progressbar", { name: "Total QC progress" })).toBeVisible();
     vi.useRealTimers();
   });
 });

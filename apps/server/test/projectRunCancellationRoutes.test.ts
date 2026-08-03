@@ -422,6 +422,28 @@ describe.sequential("Phase 5 project-run cancellation routes", () => {
     disconnect?.();
   });
 
+  it("stops every active agent run in the project with one request", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/projects/project-1/runs/cancel-all",
+      headers: { "x-test-user": "project-owner" },
+      payload: { reason: "Stop all plan work", idempotency_key: "stop-all-1" },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      failed_run_ids: [],
+      cancellations: expect.arrayContaining([
+        expect.objectContaining({ run_id: "run-1" }),
+        expect.objectContaining({ run_id: "run-queued" }),
+      ]),
+    });
+    const cancelled = await database.query<{ run_id: string }>(
+      "SELECT run_id FROM device_run_cancellations ORDER BY run_id",
+    );
+    expect(cancelled.rows).toEqual([{ run_id: "run-1" }, { run_id: "run-queued" }]);
+  });
+
   it("records offline uncertainty and redelivers the durable request on reconnect", async () => {
     const response = await app.inject({
       method: "POST",

@@ -611,6 +611,65 @@ export class DeviceRunCancellationService {
     return projectCancellationProjection(input.project_id, record);
   }
 
+  async requestAllProjectStops(input: {
+    actor_user_id: string;
+    project_id: string;
+    reason: string;
+    idempotency_key: string;
+    requested_at: string;
+  }): Promise<{
+    cancellations: ProjectRunCancellationProjectionT[];
+    failed_run_ids: string[];
+  }> {
+    const runIds = await this.transactions.transaction(async (sql) => {
+      const access = await sql.query<{ id: string }>(
+        `SELECT actor.id
+           FROM users actor
+           JOIN projects project
+             ON project.owner_user_id=actor.id
+            AND project.id=$2
+            AND project.status='active'
+          WHERE actor.id=$1 AND actor.status='active'`,
+        [input.actor_user_id, input.project_id],
+      );
+      if (!access.rows[0]) throw new ProjectRunCancellationError("project_run_not_found");
+      const runs = await sql.query<{ id: string }>(
+        `SELECT run.id
+           FROM agent_runs run
+          WHERE run.project_id=$1
+            AND run.state IN ('created','dispatched','running','waiting_for_human','verifying')
+            AND NOT EXISTS (
+              SELECT 1 FROM device_run_cancellations cancellation
+               WHERE cancellation.run_id=run.id
+            )
+          ORDER BY run.created_at ASC, run.id ASC`,
+        [input.project_id],
+      );
+      return runs.rows.map((run) => run.id);
+    });
+
+    const cancellations: ProjectRunCancellationProjectionT[] = [];
+    const failedRunIds: string[] = [];
+    for (const runId of runIds) {
+      const runKey = createHash("sha256").update(`${input.idempotency_key}:${runId}`).digest("hex");
+      try {
+        cancellations.push(
+          await this.requestProjectStop({
+            actor_user_id: input.actor_user_id,
+            project_id: input.project_id,
+            run_id: runId,
+            reason: input.reason,
+            idempotency_key: `stop-all-${runKey}`,
+            requested_at: input.requested_at,
+          }),
+        );
+      } catch {
+        failedRunIds.push(runId);
+      }
+    }
+    return { cancellations, failed_run_ids: failedRunIds };
+  }
+
   getProjectCancellation(
     actorUserId: string,
     projectId: string,

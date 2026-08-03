@@ -35,6 +35,7 @@ export interface QcWorkspaceProps {
   ) => Promise<void>;
   onContinueWithoutQc: (review: V2ConversationPlanReviewT) => Promise<void>;
   onCancel: (review: V2ConversationPlanReviewT, reason: string) => Promise<void>;
+  onStopAll: (review: V2ConversationPlanReviewT) => Promise<void>;
   onConfirmAction: (action: V2ConversationActionT, qcMode?: QcModeT) => Promise<void>;
 }
 
@@ -102,6 +103,144 @@ function StageElapsed({ startedAt }: { startedAt: string }): React.ReactElement 
     <time className="qc-new-elapsed" dateTime={startedAt}>
       {label} on this step
     </time>
+  );
+}
+
+const STAGE_ESTIMATE_SECONDS: Record<
+  NonNullable<V2ConversationPlanReviewT["live_progress"]>["stage"],
+  number
+> = {
+  preparing: 10,
+  generating: 75,
+  reviewing: 75,
+  revising: 90,
+  repairing: 60,
+  validating: 15,
+  saving: 10,
+};
+
+function durationLabel(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return remainder === 0 ? `${minutes}m` : `${minutes}m ${remainder}s`;
+}
+
+function QcProgressPopout({
+  review,
+  accepted,
+}: {
+  review: V2ConversationPlanReviewT;
+  accepted: number;
+}): React.ReactElement | null {
+  const live = review.live_progress;
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  if (!live) {
+    const queuedAt = Date.parse(review.created_at);
+    const queuedSeconds = Number.isNaN(queuedAt)
+      ? 0
+      : Math.max(0, Math.floor((now - queuedAt) / 1_000));
+    return (
+      <aside
+        className="qc-progress-popout"
+        aria-label="Quality control progress"
+        aria-live="polite"
+      >
+        <header>
+          <span className="qc-new-pulse" aria-hidden="true" />
+          <div>
+            <strong>{ownerLabel(review)}</strong>
+            <span>
+              Round {currentRound(review)} of {review.max_rounds}
+            </span>
+          </div>
+          <b>1%</b>
+        </header>
+        <progress max="100" value="1" aria-label="Total QC progress" />
+        <p className="qc-progress-activity">Waiting for the independent reviewer to start.</p>
+        <dl>
+          <div>
+            <dt>Elapsed</dt>
+            <dd>{durationLabel(queuedSeconds)}</dd>
+          </div>
+          <div>
+            <dt>Estimated</dt>
+            <dd>Calculating after the reviewer starts</dd>
+          </div>
+        </dl>
+      </aside>
+    );
+  }
+
+  const stepStarted = Date.parse(live.started_at);
+  const reviewStarted = Date.parse(review.started_at ?? live.started_at);
+  const stepElapsed = Number.isNaN(stepStarted)
+    ? 0
+    : Math.max(0, Math.floor((now - stepStarted) / 1_000));
+  const totalElapsed = Number.isNaN(reviewStarted)
+    ? stepElapsed
+    : Math.max(0, Math.floor((now - reviewStarted) / 1_000));
+  const estimate = STAGE_ESTIMATE_SECONDS[live.stage];
+  const estimatedRemaining = Math.max(0, estimate - stepElapsed);
+  const itemProgress = live.total_items > 0 ? live.completed_items / live.total_items : 0;
+  const stepProgress = Math.max(itemProgress, Math.min(0.92, stepElapsed / estimate));
+  const round = live.round ?? currentRound(review);
+  const overallProgress = Math.min(
+    99,
+    Math.max(2, Math.round(((round - 1 + stepProgress) / review.max_rounds) * 100)),
+  );
+  const itemLabel =
+    live.total_items > 0
+      ? `${Math.min(live.completed_items, live.total_items)} of ${live.total_items} item${live.total_items === 1 ? "" : "s"}`
+      : live.stage === "revising" && accepted > 0
+        ? `0 of ${accepted} accepted finding${accepted === 1 ? "" : "s"}`
+        : null;
+
+  return (
+    <aside className="qc-progress-popout" aria-label="Quality control progress" aria-live="polite">
+      <header>
+        <span className="qc-new-pulse" aria-hidden="true" />
+        <div>
+          <strong>{ownerLabel(review)}</strong>
+          <span>
+            Round {round} of {review.max_rounds}
+          </span>
+        </div>
+        <b>{overallProgress}%</b>
+      </header>
+      <progress max="100" value={overallProgress} aria-label="Total QC progress" />
+      <p className="qc-progress-activity">{live.activity}</p>
+      <dl>
+        <div>
+          <dt>Elapsed</dt>
+          <dd>{durationLabel(totalElapsed)}</dd>
+        </div>
+        <div>
+          <dt>Estimated</dt>
+          <dd>
+            {estimatedRemaining > 0
+              ? `~${durationLabel(estimatedRemaining)} left in step`
+              : "Wrapping up this step"}
+          </dd>
+        </div>
+        {itemLabel ? (
+          <div>
+            <dt>Items</dt>
+            <dd>{itemLabel}</dd>
+          </div>
+        ) : null}
+      </dl>
+      <p className="qc-new-working-meta">
+        <StageElapsed startedAt={live.started_at} />
+        {live.model ? <span>{live.model}</span> : null}
+        {live.attempt > 1 ? <span>retry {live.attempt}</span> : null}
+      </p>
+      <small>Timing estimates adjust at each workflow checkpoint.</small>
+    </aside>
   );
 }
 
@@ -397,6 +536,7 @@ export function QcWorkspace({
   onAdjudicate,
   onContinueWithoutQc,
   onCancel,
+  onStopAll,
   onConfirmAction,
 }: QcWorkspaceProps): React.ReactElement {
   const findings = useMemo(() => visibleFindings(review), [review]);
@@ -465,26 +605,7 @@ export function QcWorkspace({
       </ol>
 
       {!terminal && review.status !== "awaiting_human" ? (
-        <section className="qc-new-working" aria-live="polite">
-          <span className="qc-new-pulse" aria-hidden="true" />
-          <div>
-            <strong>{ownerLabel(review)}</strong>
-            <p>
-              {review.live_progress?.stage === "revising" && accepted > 0
-                ? `Applying the ${accepted} finding${accepted === 1 ? "" : "s"} you accepted. You can leave this page and return later.`
-                : "No action is needed right now. This page will stop when your decision is required."}
-            </p>
-            {review.live_progress ? (
-              <p className="qc-new-working-meta">
-                <StageElapsed startedAt={review.live_progress.started_at} />
-                {review.live_progress.model ? <span>{review.live_progress.model}</span> : null}
-                {review.live_progress.attempt > 1 ? (
-                  <span>retry {review.live_progress.attempt}</span>
-                ) : null}
-              </p>
-            ) : null}
-          </div>
-        </section>
+        <QcProgressPopout review={review} accepted={accepted} />
       ) : null}
 
       {review.status === "awaiting_human" && review.paused_checkpoint === "after_review" ? (
@@ -692,17 +813,18 @@ export function QcWorkspace({
       </details>
 
       {!terminal ? (
-        <details className="qc-new-stop">
-          <summary>Stop this QC run</summary>
-          <p>Stopping preserves the review record and leaves the plan unchanged.</p>
-          <Button
-            variant="danger"
-            disabled={busy}
-            onClick={() => void onCancel(review, "Stopped by the user.")}
-          >
-            Stop QC
+        <section className="qc-new-stop" aria-label="Stop plan work">
+          <div>
+            <strong>Need to stop?</strong>
+            <p>Stop QC alone, or stop QC and every active agent run for this project.</p>
+          </div>
+          <Button variant="danger" disabled={busy} onClick={() => void onStopAll(review)}>
+            Stop QC and all agent work
           </Button>
-        </details>
+          <Button disabled={busy} onClick={() => void onCancel(review, "Stopped by the user.")}>
+            Stop QC only
+          </Button>
+        </section>
       ) : null}
     </main>
   );
