@@ -130,6 +130,42 @@ import "./ConversationWorkspace.css";
 
 type Ruling = "reviewer" | "pm" | "supplied_fact";
 
+function ChatIcon(): React.ReactElement {
+  return (
+    <svg
+      className="conversation-sidebar-item-icon"
+      viewBox="0 0 16 16"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M13.25 7.25a5.25 5.25 0 0 1-5.25 5.25 5.7 5.7 0 0 1-2.2-.44L2.75 13l.94-2.6A5.25 5.25 0 1 1 13.25 7.25Z"
+        stroke="currentColor"
+        strokeWidth="1.15"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function FolderIcon(): React.ReactElement {
+  return (
+    <svg
+      className="conversation-sidebar-item-icon"
+      viewBox="0 0 16 16"
+      fill="none"
+      aria-hidden="true"
+    >
+      <path
+        d="M1.75 4.5c0-.69.56-1.25 1.25-1.25h3l1.35 1.5H13c.69 0 1.25.56 1.25 1.25v5.25c0 .69-.56 1.25-1.25 1.25H3c-.69 0-1.25-.56-1.25-1.25V4.5Z"
+        stroke="currentColor"
+        strokeWidth="1.15"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
 type ArtifactData = {
   artifact_id: string;
   label: string;
@@ -5075,12 +5111,7 @@ function NewWorkForm({
   return (
     <section className="conversation-new-work" aria-labelledby="conversation-new-title">
       <div className="conversation-new-intro">
-        <div className="eyebrow">New work</div>
-        <h2 id="conversation-new-title">What are we working on?</h2>
-        <p className="muted">
-          Describe the outcome, constraints, and anything the team should preserve. You can plan a
-          larger change with the PM or go straight to development for a small push.
-        </p>
+        <h2 id="conversation-new-title">Describe the project</h2>
       </div>
       <dl className="conversation-new-context" aria-label="Project setup context">
         <div>
@@ -5169,11 +5200,7 @@ function NewWorkForm({
             disabled={busy || !message.trim() || model === null}
             data-testid="conversation-create"
           >
-            {busy
-              ? "Starting…"
-              : workflow === "phased"
-                ? "Start planning with PM →"
-                : "Start development chat →"}
+            {busy ? "Starting…" : workflow === "phased" ? "Start Planning" : "Start Development"}
           </Button>
         </div>
       </form>
@@ -5981,7 +6008,10 @@ export function ConversationWorkspace({
                   });
                 }}
               >
-                <strong title={group.work_item.title}>{displayTitle}</strong>
+                <ChatIcon />
+                <span className="conversation-family-title" title={group.work_item.title}>
+                  {displayTitle}
+                </span>
                 <span
                   className={`conversation-list-status is-${primaryConversation?.status ?? "archived"}`}
                   aria-hidden="true"
@@ -6033,7 +6063,10 @@ export function ConversationWorkspace({
                       key={conversation.id}
                       onClick={() => chooseConversation(group.work_item.id, conversation)}
                     >
-                      <strong>{conversationKindLabel(conversation.kind)}</strong>
+                      <ChatIcon />
+                      <span className="conversation-list-item-title">
+                        {conversationKindLabel(conversation.kind)}
+                      </span>
                       <span
                         className={`conversation-list-status is-${conversation.status}`}
                         aria-hidden="true"
@@ -6237,7 +6270,6 @@ export function ConversationWorkspace({
             aria-label="Start new work"
             onClick={startNewWork}
           >
-            <span aria-hidden="true">＋</span>
             New work
           </Button>
           <div className="conversation-search">
@@ -6356,6 +6388,7 @@ export function ConversationWorkspace({
                   return (
                     <div className="conversation-folder" key={folder.id}>
                       <div className="conversation-folder-row">
+                        <FolderIcon />
                         <strong>{folder.name}</strong>
                         <span>{families.length}</span>
                         <button
@@ -6436,7 +6469,7 @@ export function ConversationWorkspace({
             aria-label="Start new work"
             onClick={startNewWork}
           >
-            <span aria-hidden="true">＋</span>
+            <ChatIcon />
           </Button>
         ) : null}
         {conversationMenu ? (

@@ -3734,8 +3734,14 @@ describe("conversation workspace", () => {
     );
 
     expect(
-      await screen.findByRole("heading", { name: "What are we working on?" }),
+      await screen.findByRole("heading", { name: "Describe the project" }),
     ).toBeInTheDocument();
+    expect(screen.queryByText("New work", { selector: ".eyebrow" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        /Describe the outcome, constraints, and anything the team should preserve/,
+      ),
+    ).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Title (optional)")).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Describe the work" })).toHaveValue(
       "Improve the deployment workflow",
@@ -3744,7 +3750,7 @@ describe("conversation workspace", () => {
     expect(screen.getByText("/Users/example/release-dashboard")).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: /Phased work/i })).toBeChecked();
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Start planning with PM →" })).toBeEnabled(),
+      expect(screen.getByRole("button", { name: "Start Planning" })).toBeEnabled(),
     );
     expect(screen.queryByText("Please inspect the API.")).not.toBeInTheDocument();
   });
@@ -3879,7 +3885,7 @@ describe("conversation workspace", () => {
       screen.getByRole("textbox", { name: "Describe the work" }),
       "Fix the footer copy",
     );
-    await user.click(screen.getByRole("button", { name: "Start development chat →" }));
+    await user.click(screen.getByRole("button", { name: "Start Development" }));
 
     await waitFor(() =>
       expect(
@@ -4041,6 +4047,11 @@ describe("conversation workspace", () => {
         name: `Open Development chat conversation for ${workItem.title} (active)`,
       }),
     );
+    const workItemButton = screen.getByRole("button", {
+      name: "Open work item Conversation-first planning",
+    });
+    expect(workItemButton.querySelector(".conversation-sidebar-item-icon")).toBeInTheDocument();
+    expect(workItemButton.querySelector(".conversation-family-title")?.tagName).toBe("SPAN");
 
     await user.type(screen.getByRole("searchbox", { name: "Search work" }), "second");
     expect(
@@ -4156,7 +4167,10 @@ describe("conversation workspace", () => {
     await user.click(await screen.findByRole("button", { name: "Create folder" }));
     await user.type(screen.getByRole("textbox", { name: "Folder name" }), "Release");
     await user.click(screen.getByRole("button", { name: "Create" }));
-    expect(await screen.findByText("Release")).toBeInTheDocument();
+    const folderName = await screen.findByText("Release");
+    expect(folderName.closest(".conversation-folder-row")?.querySelector("svg")).toHaveClass(
+      "conversation-sidebar-item-icon",
+    );
 
     await user.click(
       screen.getByRole("button", { name: "Actions for Conversation-first planning" }),

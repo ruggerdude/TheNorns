@@ -138,6 +138,7 @@ interface RuntimeSchemaPosture {
   planning_live_progress_columns: boolean;
   qc_restart_checkpoint_columns: boolean;
   qc_revision_format_column: boolean;
+  qc_finding_decisions_column: boolean;
 }
 
 /**
@@ -402,7 +403,14 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
                WHERE table_schema='public'
                  AND table_name='conversation_plan_reviews'
                  AND column_name='revision_format'
-            ) AS qc_revision_format_column`,
+            ) AS qc_revision_format_column,
+            EXISTS (
+              SELECT 1
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND table_name='conversation_plan_reviews'
+                 AND column_name='finding_decisions'
+            ) AS qc_finding_decisions_column`,
   );
   const posture = result.rows[0];
   const missing = [
@@ -483,6 +491,9 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
     ...(!posture?.planning_live_progress_columns ? ["planning live_progress columns"] : []),
     ...(!posture?.qc_restart_checkpoint_columns ? ["QC restart checkpoint columns"] : []),
     ...(!posture?.qc_revision_format_column ? ["conversation_plan_reviews.revision_format"] : []),
+    ...(!posture?.qc_finding_decisions_column
+      ? ["conversation_plan_reviews.finding_decisions"]
+      : []),
   ];
   if (missing.length > 0) {
     throw new PostgresConnectionConfigurationError(

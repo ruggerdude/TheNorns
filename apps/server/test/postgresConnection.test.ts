@@ -148,6 +148,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             planning_live_progress_columns: true,
             qc_restart_checkpoint_columns: true,
             qc_revision_format_column: true,
+            qc_finding_decisions_column: true,
           },
         ],
       }),
@@ -267,7 +268,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "conversation_plan_reviews adjudication columns, " +
         "conversation_plan_reviews.last_human_message_at, " +
         "conversation_plan_reviews qc_mode provenance columns, planning live_progress columns, " +
-        "QC restart checkpoint columns, conversation_plan_reviews.revision_format. " +
+        "QC restart checkpoint columns, conversation_plan_reviews.revision_format, " +
+        "conversation_plan_reviews.finding_decisions. " +
         "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
     });
   });
@@ -342,7 +344,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
           "conversation_plan_reviews adjudication columns, " +
           "conversation_plan_reviews.last_human_message_at, " +
           "conversation_plan_reviews qc_mode provenance columns, planning live_progress columns, " +
-          "QC restart checkpoint columns, conversation_plan_reviews.revision_format. " +
+          "QC restart checkpoint columns, conversation_plan_reviews.revision_format, " +
+          "conversation_plan_reviews.finding_decisions. " +
           "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
       },
     );
@@ -421,7 +424,8 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "conversation_plan_reviews adjudication columns, " +
         "conversation_plan_reviews.last_human_message_at, " +
         "conversation_plan_reviews qc_mode provenance columns, planning live_progress columns, " +
-        "QC restart checkpoint columns, conversation_plan_reviews.revision_format. " +
+        "QC restart checkpoint columns, conversation_plan_reviews.revision_format, " +
+        "conversation_plan_reviews.finding_decisions. " +
         "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
     });
   });
@@ -457,6 +461,23 @@ describe("PostgreSQL runtime schema compatibility", () => {
 
     await expect(assertCurrentRuntimeSchema(missingRevisionFormat as never)).rejects.toThrow(
       /conversation_plan_reviews\.revision_format/,
+    );
+  });
+
+  it("fails closed when QC finding triage has not been migrated", async () => {
+    const missingFindingDecisions = {
+      query: async () => ({
+        rows: [
+          {
+            qc_revision_format_column: true,
+            qc_finding_decisions_column: false,
+          },
+        ],
+      }),
+    };
+
+    await expect(assertCurrentRuntimeSchema(missingFindingDecisions as never)).rejects.toThrow(
+      /conversation_plan_reviews\.finding_decisions/,
     );
   });
 });

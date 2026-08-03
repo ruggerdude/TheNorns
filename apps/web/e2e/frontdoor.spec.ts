@@ -545,10 +545,10 @@ async function expectNewWorkEntry(page: Page, initialBrief = "") {
   await expect(work).toBeVisible();
   await expect(work).toHaveAttribute("aria-current", "page");
   await expect(page.getByTestId("workspace-tab-work")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "What are we working on?" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Describe the project" })).toBeVisible();
   await expect(page.getByRole("textbox", { name: "Describe the work" })).toHaveValue(initialBrief);
   await expect(page.getByRole("radio", { name: /Phased work/ })).toBeChecked();
-  await expect(page.getByRole("button", { name: /Start planning with PM/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Start Planning" })).toBeVisible();
 }
 
 async function clickUntilVisible(trigger: Locator, result: Locator) {
@@ -791,7 +791,7 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   expect(portfolioControlBox?.width ?? 0).toBeGreaterThanOrEqual(214);
   expect(usageButtonBox?.width).toBe(portfolioControlBox?.width);
 
-  await expect(page.getByRole("heading", { name: "What are we working on?" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Describe the project" })).toBeVisible();
   await workspaceNavigation.getByRole("button", { name: "Overview", exact: true }).click();
   const workTab = workspaceNavigation.getByRole("button", { name: /work$/i });
   await workTab.click();
@@ -927,7 +927,7 @@ test("A project with focused work still opens on Overview from Portfolio", async
   await selectExistingGitHubRepository(page);
   await page.getByRole("button", { name: /adopt project/i }).click();
 
-  await expect(page.getByRole("heading", { name: "What are we working on?" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Describe the project" })).toBeVisible();
 
   const portfolioNavigation = page
     .locator(".workspace-nav-start")
@@ -960,7 +960,7 @@ test("Mobile workspace opens navigation as a drawer and keeps chat usable", asyn
   await menu.click();
   const navigation = page.getByRole("navigation", { name: "Workspace sections" });
   await expect(navigation).toBeInViewport();
-  await expect(page.getByRole("heading", { name: "What are we working on?" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Describe the project" })).toBeVisible();
   await navigation.getByRole("button", { name: "Overview", exact: true }).click();
   await menu.click();
   await navigation.getByRole("button", { name: "Work", exact: true }).click();
