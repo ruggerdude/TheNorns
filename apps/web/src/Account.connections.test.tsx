@@ -466,7 +466,7 @@ describe("workspace connections settings", () => {
     expect(screen.getByText("API configured")).toBeInTheDocument();
   });
 
-  it("gives exact local subscription setup and verification directions", async () => {
+  it("keeps local subscription guidance brief and points to the Local Agent", async () => {
     mock = accountMock();
     mock.get("/api/auth/sessions", { body: { sessions: [] } });
     mock.get("/api/integrations/github/status", {
@@ -515,29 +515,12 @@ describe("workspace connections settings", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Manage providers" }));
 
-    expect(
-      await screen.findByText("Connect local Claude and Codex subscriptions"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText("Server API connections")).toBeInTheDocument();
     expect(screen.getByText("codex login", { selector: "code" })).toBeInTheDocument();
-    expect(screen.getByText("codex login status", { selector: "code" })).toBeInTheDocument();
-    expect(screen.getByText("Logged in using ChatGPT", { selector: "code" })).toBeInTheDocument();
     expect(screen.getByText("claude auth login", { selector: "code" })).toBeInTheDocument();
-    expect(screen.getByText("claude auth status --json", { selector: "code" })).toBeInTheDocument();
-    expect(screen.getByText("authMethod", { selector: "code" })).toBeInTheDocument();
+    expect(screen.getByText(/Local Agent → Diagnostics/i)).toBeInTheDocument();
     expect(
-      screen.getByText(
-        (_content, element) =>
-          element?.matches(".subscription-next-step p") === true &&
-          /choose Subscription as the execution credential/i.test(element.textContent ?? ""),
-      ),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/server API status below will not change/i)).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /official Codex sign-in guide/i })).toHaveAttribute(
-      "href",
-      "https://learn.chatgpt.com/docs/auth#sign-in-with-chatgpt",
-    );
-    expect(
-      screen.getByRole("link", { name: /official Claude Code sign-in guide/i }),
-    ).toHaveAttribute("href", "https://code.claude.com/docs/en/authentication");
+      screen.queryByText("Connect local Claude and Codex subscriptions"),
+    ).not.toBeInTheDocument();
   });
 });

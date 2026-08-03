@@ -124,51 +124,6 @@
   padding: var(--space-4) 0 0 3.5rem;
 }
 
-.settings-content .subscription-setup {
-  gap: var(--space-4);
-  padding: var(--space-4);
-  border: 1px solid color-mix(in srgb, var(--brand-600) 24%, var(--line));
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--brand-600) 5%, var(--surface));
-}
-
-.settings-content .subscription-setup p {
-  margin: var(--space-2) 0 0;
-}
-
-.settings-content .subscription-provider-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-3);
-}
-
-.settings-content .subscription-provider-instructions {
-  display: grid;
-  align-content: start;
-  gap: var(--space-3);
-  min-width: 0;
-  padding: var(--space-4);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-  background: var(--surface);
-}
-
-.settings-content .subscription-provider-instructions a {
-  color: var(--brand-600);
-  font-size: var(--text-sm);
-  font-weight: 600;
-}
-
-.settings-content .subscription-provider-instructions code {
-  overflow-wrap: anywhere;
-}
-
-.settings-content .subscription-next-step {
-  padding-top: var(--space-3);
-  border-top: 1px solid var(--line);
-}
-
-.settings-content .subscription-next-step p,
 .settings-content .provider-api-status-heading p {
   color: var(--ink-muted);
   font-size: var(--text-sm);
@@ -488,10 +443,6 @@
 
   .settings-content .connection-details {
     padding-left: 0;
-  }
-
-  .settings-content .subscription-provider-grid {
-    grid-template-columns: 1fr;
   }
 
   .settings-content .connection-card-controls .btn,
