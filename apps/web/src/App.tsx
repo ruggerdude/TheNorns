@@ -48,7 +48,19 @@ import {
   buildRelationalGraphReadModel,
 } from "./relationalGraphReadModel";
 import { ThemeToggle, useTheme } from "./theme";
-import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
+import {
+  Alert,
+  Badge,
+  Brand,
+  Button,
+  Field,
+  Input,
+  NavigationRailToggle,
+  Select,
+  Spinner,
+  TextArea,
+  useNavigationRail,
+} from "./ui";
 import { type UpdatePreferences, resolveUpdatePreferences } from "./workspacePreferences";
 
 const GraphCanvas = lazy(() =>
@@ -497,6 +509,7 @@ function ProjectGraph({
     initialWorkRoute || initialConversationId ? "work" : "overview",
   );
   const [mobileWorkspaceNavOpen, setMobileWorkspaceNavOpen] = useState(false);
+  const { navigationRailCollapsed, toggleNavigationRail } = useNavigationRail();
   const previousInitialWorkRoute = useRef(initialWorkRoute);
   const suppressRouteExitReset = useRef(false);
   const [lastWorkspaceUpdateAt, setLastWorkspaceUpdateAt] = useState<Date | null>(null);
@@ -1215,7 +1228,7 @@ function ProjectGraph({
   // dashboard entry and fires no dashboard fetch.
 
   return (
-    <div className="workspace-shell">
+    <div className={`workspace-shell${navigationRailCollapsed ? " navigation-collapsed" : ""}`}>
       {/* The shared rail names the active project explicitly; project
           switching stays in Portfolio instead of duplicating browser tabs. */}
       <header className="topbar">
@@ -1233,6 +1246,7 @@ function ProjectGraph({
             <strong title={project.name}>{project.name}</strong>
           </div>
         </div>
+        <NavigationRailToggle collapsed={navigationRailCollapsed} onToggle={toggleNavigationRail} />
         <Button
           className="btn-small workspace-mobile-menu"
           aria-controls="workspace-navigation"
@@ -2046,8 +2060,14 @@ function GlobalPageShell({
   onSignOut: () => void;
   children: ReactNode;
 }): React.ReactElement {
+  const { navigationRailCollapsed, toggleNavigationRail } = useNavigationRail();
+
   return (
-    <div className="app-shell global-page-shell">
+    <div
+      className={`app-shell global-page-shell${
+        navigationRailCollapsed ? " navigation-collapsed" : ""
+      }`}
+    >
       <header className="topbar">
         <div className="topbar-main">
           <Brand onHome={onOpenPortfolio} />
@@ -2059,6 +2079,7 @@ function GlobalPageShell({
             onUnauthorized={onSignOut}
           />
         </div>
+        <NavigationRailToggle collapsed={navigationRailCollapsed} onToggle={toggleNavigationRail} />
         <AuthenticatedHeaderActions
           user={user}
           activeView={page === "device-authorization" ? null : page}

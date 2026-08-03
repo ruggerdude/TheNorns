@@ -7,6 +7,62 @@ import type {
   TextareaHTMLAttributes,
 } from "react";
 import { BraidMark } from "./BraidMark";
+
+const NAVIGATION_RAIL_STORAGE_KEY = "norns_navigation_rail_collapsed";
+
+function storedNavigationRailState(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(NAVIGATION_RAIL_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+/** Keeps the desktop navigation rail preference consistent between screens. */
+export function useNavigationRail(): {
+  navigationRailCollapsed: boolean;
+  toggleNavigationRail: () => void;
+} {
+  const [navigationRailCollapsed, setNavigationRailCollapsed] = useState(storedNavigationRailState);
+
+  const toggleNavigationRail = () => {
+    setNavigationRailCollapsed((collapsed) => {
+      const next = !collapsed;
+      try {
+        window.localStorage.setItem(NAVIGATION_RAIL_STORAGE_KEY, next ? "1" : "0");
+      } catch {
+        /* The preference is best-effort when browser storage is unavailable. */
+      }
+      return next;
+    });
+  };
+
+  return { navigationRailCollapsed, toggleNavigationRail };
+}
+
+export function NavigationRailToggle({
+  collapsed,
+  onToggle,
+}: {
+  collapsed: boolean;
+  onToggle: () => void;
+}): React.ReactElement {
+  const label = collapsed ? "Expand sidebar" : "Collapse sidebar";
+  return (
+    <button
+      type="button"
+      className="navigation-rail-toggle"
+      aria-label={label}
+      aria-expanded={!collapsed}
+      title={label}
+      onClick={onToggle}
+    >
+      <span aria-hidden="true">{collapsed ? "›" : "‹"}</span>
+    </button>
+  );
+}
+
 export function Button({
   variant = "default",
   className = "",

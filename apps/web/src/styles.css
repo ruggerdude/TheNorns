@@ -7429,3 +7429,195 @@ h4 {
     gap: 0.5rem;
   }
 }
+
+/* ============================================================
+   BLUE COLLAPSIBLE NAVIGATION
+   The left rail is the brand-colored anchor for the application. Its
+   foreground tokens are inverted locally so every nested control remains
+   legible in both site themes without changing the content-area palette.
+   ============================================================ */
+.navigation-rail-toggle {
+  display: none;
+}
+
+.workspace-header {
+  border-color: color-mix(in srgb, var(--brand-900) 82%, white);
+  color: #fff;
+  background: var(--brand-900);
+  box-shadow: none;
+}
+
+.workspace-header h1 {
+  color: #fff;
+}
+
+.core-portfolio-status-header {
+  color: #fff;
+  background: var(--brand-900);
+}
+
+.core-portfolio-status-header :is(h2, p, .core-refresh-status) {
+  color: #fff;
+}
+
+@media (min-width: 901px) {
+  .app-shell,
+  .workspace-shell {
+    transition: padding-left 160ms ease;
+  }
+
+  .app-shell > .topbar,
+  .workspace-shell > .topbar,
+  .full-page-view > .full-page-header {
+    --ink: #fff;
+    --ink-muted: rgba(255, 255, 255, 0.74);
+    --surface: var(--brand-900);
+    --surface-2: color-mix(in srgb, var(--brand-900) 86%, white);
+    --line: rgba(255, 255, 255, 0.2);
+    --line-strong: rgba(255, 255, 255, 0.38);
+    --brand-ink: #fff;
+    --brand-wash: rgba(255, 255, 255, 0.14);
+    --brand-wash-subtle: rgba(255, 255, 255, 0.08);
+    --accent: #fff;
+    --accent2: #fff;
+    color: #fff;
+    background: var(--brand-900);
+    border-right-color: rgba(255, 255, 255, 0.2);
+    transition: width 160ms ease, padding 160ms ease;
+  }
+
+  .app-shell > .topbar .brand,
+  .workspace-shell > .topbar .brand,
+  .full-page-view > .full-page-header .brand {
+    padding-right: 2.6rem;
+  }
+
+  .app-shell > .topbar .portfolio-new-project,
+  .workspace-shell > .topbar .portfolio-new-project {
+    border-color: #fff;
+    color: var(--brand-900);
+    background: #fff;
+  }
+
+  .app-shell > .topbar .portfolio-new-project:hover,
+  .workspace-shell > .topbar .portfolio-new-project:hover {
+    color: var(--brand-900);
+    background: rgba(255, 255, 255, 0.88);
+  }
+
+  .workspace-shell > .topbar .workspace-tabs button.on,
+  .app-shell > .topbar .header-actions > .btn.is-active {
+    border-color: rgba(255, 255, 255, 0.4);
+    color: #fff;
+    background: rgba(255, 255, 255, 0.16);
+  }
+
+  .navigation-rail-toggle {
+    position: absolute;
+    top: 1rem;
+    right: 0.7rem;
+    z-index: 2;
+    display: grid;
+    width: 36px;
+    min-width: 36px;
+    height: 36px;
+    min-height: 36px;
+    padding: 0;
+    place-items: center;
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: var(--radius-sm);
+    color: #fff;
+    background: rgba(255, 255, 255, 0.1);
+    font-size: 1.55rem;
+    line-height: 1;
+  }
+
+  .navigation-rail-toggle:hover {
+    border-color: rgba(255, 255, 255, 0.58);
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  .app-shell.navigation-collapsed,
+  .workspace-shell.navigation-collapsed {
+    padding-left: 72px;
+  }
+
+  .navigation-collapsed > .topbar {
+    width: 72px;
+    padding: 0;
+  }
+
+  .navigation-collapsed > .topbar > :not(.navigation-rail-toggle) {
+    display: none;
+  }
+
+  .navigation-collapsed > .topbar > .navigation-rail-toggle {
+    top: 1rem;
+    right: 50%;
+    transform: translateX(50%);
+  }
+
+  .app-shell > .project-dashboard,
+  .workspace-shell > .workspace-page,
+  .global-page-content :is(.settings-page, .admin-page, .usage-page) {
+    width: 100%;
+    max-width: none;
+    margin-inline: 0;
+    padding-right: 1rem;
+    padding-left: 1rem;
+  }
+
+  .workspace-shell > .workspace-page {
+    padding-top: 1rem;
+  }
+
+  .workspace-shell > .workspace-page-work {
+    padding: 0.5rem;
+  }
+
+  .workspace-tab-panel > .debates-page {
+    width: 100%;
+    max-width: none;
+    margin-inline: 0;
+  }
+}
+
+@media (min-width: 901px) and (max-height: 760px) {
+  .navigation-rail-toggle,
+  .navigation-collapsed > .topbar > .navigation-rail-toggle {
+    top: 0.65rem;
+  }
+}
+
+@media (max-width: 900px) {
+  .global-mobile-navigation,
+  .workspace-shell > .topbar > .workspace-tabs {
+    --ink: #fff;
+    --ink-muted: rgba(255, 255, 255, 0.74);
+    --surface: var(--brand-900);
+    --surface-2: color-mix(in srgb, var(--brand-900) 86%, white);
+    --line: rgba(255, 255, 255, 0.2);
+    --line-strong: rgba(255, 255, 255, 0.38);
+    --brand-ink: #fff;
+    --accent: #fff;
+    --accent2: #fff;
+    color: #fff;
+    background: var(--brand-900);
+  }
+
+  .global-mobile-navigation .portfolio-new-project,
+  .workspace-shell > .topbar > .workspace-tabs .portfolio-new-project {
+    border-color: #fff;
+    color: var(--brand-900);
+    background: #fff;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-shell,
+  .workspace-shell,
+  .app-shell > .topbar,
+  .workspace-shell > .topbar {
+    transition: none;
+  }
+}

@@ -94,6 +94,13 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
       /Coordinator|Reviewer/i,
     );
 
+    const workspaceShell = document.querySelector(".workspace-shell");
+    if (!(workspaceShell instanceof HTMLElement)) throw new Error("Workspace shell not found");
+    await userEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+    expect(workspaceShell).toHaveClass("navigation-collapsed");
+    await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
+    expect(workspaceShell).not.toHaveClass("navigation-collapsed");
+
     // Overview is the default tab, and it's the one already marked "on".
     expect(await screen.findByRole("button", { name: "Overview" })).toHaveClass("on");
     expect(screen.getByRole("button", { name: "Usage" })).toBeInTheDocument();

@@ -32,7 +32,19 @@ import {
   describeBlocker,
   parseGitHubRepoRef,
 } from "./projectSourceRequest";
-import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
+import {
+  Alert,
+  Badge,
+  Brand,
+  Button,
+  Field,
+  Input,
+  NavigationRailToggle,
+  Select,
+  Spinner,
+  TextArea,
+  useNavigationRail,
+} from "./ui";
 import { useSingleFlightPolling } from "./useSingleFlightPolling";
 import {
   UPDATE_DETAIL_OPTIONS,
@@ -524,6 +536,7 @@ export function Projects({
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dialog, setDialog] = useState(newProjectRequested);
+  const { navigationRailCollapsed, toggleNavigationRail } = useNavigationRail();
   // DESIGN P1 bug fix: the New Project view is a full page swapped in-place,
   // so the document keeps whatever scroll offset the dashboard had (and the
   // objective textarea's old autoFocus used to yank it further down). Land at
@@ -1629,7 +1642,11 @@ export function Projects({
     sourceReady &&
     localCloneReady;
   return (
-    <div className={`app-shell${dialog ? " project-setup-view" : ""}`}>
+    <div
+      className={`app-shell${dialog ? " project-setup-view" : ""}${
+        navigationRailCollapsed ? " navigation-collapsed" : ""
+      }`}
+    >
       <header className="topbar">
         <div className="topbar-main">
           <Brand onHome={openPortfolio} />
@@ -1641,6 +1658,7 @@ export function Projects({
             onUnauthorized={onUnauthorized}
           />
         </div>
+        <NavigationRailToggle collapsed={navigationRailCollapsed} onToggle={toggleNavigationRail} />
         {user && onOpenUsage ? (
           <AuthenticatedHeaderActions
             user={user}
