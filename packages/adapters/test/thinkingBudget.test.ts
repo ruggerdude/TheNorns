@@ -82,7 +82,7 @@ describe("anthropic structured output token budget", () => {
     expect(body).not.toHaveProperty("thinking");
   });
 
-  it("omits the disable on models that reject it (thinking is always on)", async () => {
+  it("uses schema-prompt fallback on models that reject native structured mode", async () => {
     const adapter = adapterFor("claude-fable-5");
     const body = await sentBody(() =>
       adapter.completeStructured(
@@ -93,5 +93,12 @@ describe("anthropic structured output token budget", () => {
     );
 
     expect(body).not.toHaveProperty("thinking");
+    expect(body).not.toHaveProperty("output_config");
+    expect(body.messages).toEqual([
+      expect.objectContaining({
+        role: "user",
+        content: expect.stringContaining('JSON Schema named "plan_revision"'),
+      }),
+    ]);
   });
 });

@@ -68,6 +68,9 @@ export interface ConversationContextAssembly {
   context_hash: string;
   system: string;
   messages: ConversationMessage[];
+  /** Every live attachment referenced by the assembled visible messages. */
+  referenced_attachment_ids: string[];
+  /** Attachments on the triggering message, used by ordinary chat turns. */
   attachment_ids: string[];
   triggering_message_index: number;
 }
@@ -378,6 +381,7 @@ export class ConversationContextAssembler {
               ? quickExecutionPmSystem(systemSections.join("\n\n"))
               : conversationalPmSystem(systemSections.join("\n\n")),
         messages,
+        referenced_attachment_ids: [...new Set(attachmentIds)],
         attachment_ids: [...new Set(currentAttachmentIds)],
         triggering_message_index: triggeringMessageIndex,
       };

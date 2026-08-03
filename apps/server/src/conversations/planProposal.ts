@@ -1,4 +1,11 @@
-import { AdapterError, type LlmAdapter, type ProviderName } from "@norns/adapters";
+import {
+  AdapterError,
+  type CompletionRequest,
+  type ConversationMessage,
+  type ImagePart,
+  type LlmAdapter,
+  type ProviderName,
+} from "@norns/adapters";
 import {
   V2ConversationAction,
   V2CreateConversationPlanProposalInput,
@@ -110,6 +117,7 @@ export interface ConversationPlanProposalOptions {
   newId?: (prefix: string) => string;
   now?: () => Date;
   createAdapter(provider: ProviderName, model: string): LlmAdapter;
+  resolveImages?: (projectId: string, attachmentIds: readonly string[]) => Promise<ImagePart[]>;
 }
 
 function provider(value: string): ProviderName {
@@ -162,6 +170,29 @@ function failure(error: unknown): {
     message: "plan proposal generation failed",
     sanitized: {},
   };
+}
+
+function visibleConversationContent(content: ConversationMessage["content"]): string {
+  if (typeof content === "string") return content;
+  return content
+    .map((part) =>
+      part.type === "text" ? part.text : `[Image included with the planning context: ${part.mime}]`,
+    )
+    .join("\n");
+}
+
+/**
+ * Structured completions accept one provider-neutral prompt rather than a
+ * conversation history. Preserve the assembled user/PM turns explicitly so
+ * the proposal sees the brief, clarifications, and extracted file contents.
+ */
+export function renderPlanProposalConversation(messages: readonly ConversationMessage[]): string {
+  return messages
+    .map((message, index) => {
+      const label = message.role === "user" ? "Human" : "PM";
+      return `### ${label} message ${index + 1}\n${visibleConversationContent(message.content)}`;
+    })
+    .join("\n\n");
 }
 
 export class ConversationPlanProposalService {
@@ -398,6 +429,10 @@ export class ConversationPlanProposalService {
         provider(scope.conversation.provider),
         scope.conversation.model,
       );
+      const images =
+        adapter.provider !== "deepseek" && this.options.resolveImages
+          ? await this.options.resolveImages(projectId, assembled.referenced_attachment_ids)
+          : [];
       // Streaming changes nothing about the request, the result, or any of the
       // durability below: it only feeds the caller partial text while the same
       // structured call is in flight.
@@ -415,7 +450,7 @@ export class ConversationPlanProposalService {
         announcedTokens = tokens;
         onProgress?.({ stage: "generating", modules, output_tokens_estimate: tokens });
       };
-      const structuredRequest = {
+      const structuredRequest: CompletionRequest = {
         system: `${PLAN_PROPOSAL_SYSTEM}\n\n${assembled.system}`,
         prompt: [
           "Propose the complete Work Plan Contract envelope now.",
@@ -423,6 +458,9 @@ export class ConversationPlanProposalService {
           input.handoff
             ? `The human selected ${input.handoff.execution_agent.provider}:${input.handoff.execution_agent.model} as the execution agent. Use that exact provider and model for every module staffing choice.`
             : null,
+          "<visible_project_conversation>",
+          renderPlanProposalConversation(assembled.messages),
+          "</visible_project_conversation>",
           "Return the strict structured result only.",
         ]
           .filter((line): line is string => line !== null)
@@ -432,6 +470,7 @@ export class ConversationPlanProposalService {
         telemetryRequestId: usageRequestId,
         telemetryRetryGroupId: attemptId,
         telemetryRetryAttempt: 0,
+        ...(images.length > 0 ? { images } : {}),
       };
       const generated =
         onProgress && adapter.streamStructured

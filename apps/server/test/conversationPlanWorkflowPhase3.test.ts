@@ -197,6 +197,12 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
         newId,
         now: () => new Date("2026-07-27T16:00:00.000Z"),
         createAdapter: () => proposalAdapter,
+        resolveImages: async (_projectId, attachmentIds) =>
+          attachmentIds.map((attachmentId) => ({
+            type: "image" as const,
+            mime: "image/png" as const,
+            base64: Buffer.from(attachmentId).toString("base64"),
+          })),
       },
     );
     changes = new ConversationPlanChangeProposalService(transactions, workflow, newId);
@@ -235,7 +241,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     const artifactId = withArtifact ? `artifact-${label}` : null;
     const artifactHash = "c".repeat(64);
     const attachmentId = withAttachment ? `attachment-${label}` : null;
-    const attachmentHash = "d".repeat(64);
+    const attachmentHash = canonicalSha256(`attachment:${label}`);
     if (artifactId) {
       await pg.query(
         `INSERT INTO artifacts (
@@ -600,6 +606,32 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     expect(new Set(detail.action_effects.map((effect) => effect.action_id))).toEqual(
       new Set([first.action.id]),
     );
+  });
+
+  it("sends the project brief and referenced images to the structured PM proposal", async () => {
+    const scope = await workspace("proposal-context", false, true);
+    const adapter = proposalAdapter as FakeAdapter;
+    adapter.enqueue(plan("Use the supplied brief and interface reference"));
+
+    await proposals.propose(owner.id, projectId, scope.workItemId, scope.conversationId, {
+      idempotency_key: "proposal-context",
+    });
+
+    expect(adapter.requests).toHaveLength(1);
+    const request = adapter.requests[0];
+    expect(request?.prompt).toContain(
+      "BRAINSTORM-proposal-context: compare several abandoned approaches before planning.",
+    );
+    expect(request?.prompt).toContain(
+      `[Attachment: approved-interface.png (image/png), id=${scope.attachmentId}]`,
+    );
+    expect(request?.images).toEqual([
+      {
+        type: "image",
+        mime: "image/png",
+        base64: Buffer.from(scope.attachmentId ?? "").toString("base64"),
+      },
+    ]);
   });
 
   it("extracts the agreed plan and durably binds the selected handoff", async () => {

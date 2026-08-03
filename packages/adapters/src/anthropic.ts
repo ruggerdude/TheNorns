@@ -16,6 +16,7 @@ import {
   type StructuredResult,
   boundedImageParts,
   kindForStatus,
+  prepareStructuredOutputPrompt,
   structuredOutputJsonSchema,
 } from "./types.js";
 
@@ -80,10 +81,17 @@ export class AnthropicAdapter implements LlmAdapter {
     schemaName: string,
   ): Promise<StructuredResult<T>> {
     const startedAt = Date.now();
-    const nativeStructuredOutput = !request.structuredOutputPrepared;
+    // Fable/Mythos keep thinking enabled and reject Anthropic's native
+    // output_config schema mode. Give those models the same validated schema
+    // prompt used by provider adapters without native structured output.
+    const nativeStructuredOutput =
+      !request.structuredOutputPrepared && !THINKING_ALWAYS_ON.test(this.model);
     const structuredRequest: CompletionRequest = {
       ...request,
-      prompt: request.prompt,
+      prompt:
+        nativeStructuredOutput || request.structuredOutputPrepared
+          ? request.prompt
+          : prepareStructuredOutputPrompt(request.prompt, schema, schemaName),
     };
     const response = await this.call(
       structuredRequest,
@@ -104,10 +112,14 @@ export class AnthropicAdapter implements LlmAdapter {
     onDelta: (delta: string) => void,
   ): Promise<StructuredResult<T>> {
     const startedAt = Date.now();
-    const nativeStructuredOutput = !request.structuredOutputPrepared;
+    const nativeStructuredOutput =
+      !request.structuredOutputPrepared && !THINKING_ALWAYS_ON.test(this.model);
     const structuredRequest: CompletionRequest = {
       ...request,
-      prompt: request.prompt,
+      prompt:
+        nativeStructuredOutput || request.structuredOutputPrepared
+          ? request.prompt
+          : prepareStructuredOutputPrompt(request.prompt, schema, schemaName),
     };
     let response: Anthropic.Message;
     try {

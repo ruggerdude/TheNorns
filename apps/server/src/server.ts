@@ -6821,6 +6821,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           {
             now,
             createAdapter: (provider, model) => buildPlanningAdapter(provider, model),
+            ...(attachmentService
+              ? {
+                  resolveImages: (projectId: string, attachmentIds: readonly string[]) =>
+                    attachmentService.imagePartsFor(projectId, attachmentIds),
+                }
+              : {}),
           },
         );
         const planChanges = new ConversationPlanChangeProposalService(
