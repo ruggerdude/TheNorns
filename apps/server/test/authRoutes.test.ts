@@ -134,7 +134,7 @@ describe("GET /api/integrations/ai/status", () => {
           id: "deepseek",
           name: "DeepSeek",
           configured: false,
-          model: "deepseek-v4-flash",
+          model: "deepseek-v4-pro",
           credential_modes: ["api"],
           required_environment: ["DEEPSEEK_API_KEY"],
         },

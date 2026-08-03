@@ -53,8 +53,8 @@ describe("resolvePlanningParticipants", () => {
     },
   );
 
-  it("defaults an unconfigured deployment profile to balanced and rejects invalid values", () => {
-    expect(planningModelProfileFromEnvironment({})).toBe("balanced");
+  it("defaults an unconfigured deployment profile to quality and rejects invalid values", () => {
+    expect(planningModelProfileFromEnvironment({})).toBe("quality");
     expect(planningModelProfileFromEnvironment({ NORNS_PLANNING_MODEL_PROFILE: " fast " })).toBe(
       "fast",
     );

@@ -93,9 +93,9 @@ export const PM_MODEL_OPTIONS = {
 } as const satisfies Record<PmProviderT, readonly PmModelOption[]>;
 
 export const DEFAULT_PM_MODEL = {
-  anthropic: "claude-sonnet-5",
-  openai: "gpt-5.6-terra",
-  deepseek: "deepseek-v4-flash",
+  anthropic: "claude-fable-5",
+  openai: "gpt-5.6-sol",
+  deepseek: "deepseek-v4-pro",
 } as const satisfies Record<PmProviderT, PmModelT>;
 
 /** Deployment fallback for planning participants that have no exact project

@@ -30,7 +30,6 @@ import {
   type ProjectOnboardingScenario,
   buildOnboardingFields,
   describeBlocker,
-  describeSetup,
   parseGitHubRepoRef,
 } from "./projectSourceRequest";
 import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
@@ -1572,28 +1571,6 @@ export function Projects({
     (name.trim().length > 0 || startingPoint === "existing") &&
     sourceReady &&
     localCloneReady;
-  // The confirmation step's one honest passage about where the human's code
-  // actually lives (GitHub Actions, not their computer) — null repository
-  // name means "not resolved yet", which describeSetup renders as a prompt.
-  const confirmationRepositoryFullName = isLocalSource
-    ? null
-    : scenario === "existing_repo"
-      ? (selectedRepository?.full_name ?? null)
-      : selectedConnection && name.trim()
-        ? `${selectedConnection.owner_login}/${derivedIdentity.repositorySlug}`
-        : null;
-  const confirmationText = isLocalSource
-    ? localSelection
-      ? `Norns will not create a folder or initialize Git. It will work only inside the already-initialized, approved local Git repository ${localSelection.repository.repository_display_name}; its filesystem path stays on this computer.`
-      : "Select an already-initialized local Git repository approved in Connections. Norns will not create a folder or initialize Git."
-    : computerExecution && confirmationRepositoryFullName && cloneDestination
-      ? `Norns will create ${confirmationRepositoryFullName} on GitHub, then clone it into ${cloneDestination.label} on ${selectedComputer?.name ?? "the selected computer"}. Folder paths stay on that computer.`
-      : describeSetup(
-          confirmationRepositoryFullName,
-          startingPoint === "new" ? executionLocation : "github_actions",
-          selectedComputer?.name,
-        );
-
   return (
     <div className={`app-shell${dialog ? " project-setup-view" : ""}`}>
       <header className="topbar">
@@ -2149,6 +2126,44 @@ export function Projects({
                       </div>
                     </fieldset>
 
+                    {startingPoint === "new" && !isLocalSource ? (
+                      <div className="github-repository-row">
+                        <Field label="Repository name">
+                          <Input
+                            data-testid="github-new-repository-name"
+                            value={repositoryName}
+                            onChange={(event) => setRepositoryName(event.target.value)}
+                            placeholder={deriveProjectIdentity("", name).repositorySlug}
+                          />
+                        </Field>
+                        <Field label="Visibility">
+                          <Select
+                            data-testid="github-repository-visibility"
+                            value={repositoryPrivate ? "private" : "public"}
+                            onChange={(event) =>
+                              setRepositoryPrivate(event.target.value === "private")
+                            }
+                          >
+                            <option value="private">Private (default)</option>
+                            <option value="public">Public</option>
+                          </Select>
+                        </Field>
+                        {name.trim() ? (
+                          <div
+                            className="github-repository-summary"
+                            data-testid="derived-project-summary"
+                          >
+                            <span className="github-repository-summary-label">Repository</span>
+                            <strong>{derivedIdentity.projectName}</strong>
+                            <span>
+                              {`${selectedConnection?.owner_login ?? "GitHub"}/${derivedIdentity.repositorySlug}`}{" "}
+                              · {repositoryPrivate ? "Private" : "Public"}
+                            </span>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : null}
+
                     {isLocalSource ? (
                       <div className="repository-picker local-folder-picker">
                         {localSourcesError ? (
@@ -2289,10 +2304,6 @@ export function Projects({
                                   ))}
                                 </Select>
                               </Field>
-                            ) : selectedConnection ? (
-                              <p className="field-help" data-testid="automatic-github-destination">
-                                Repository destination: {selectedConnection.owner_login}
-                              </p>
                             ) : null}
                             {scenario === "new_repo" ? null : (
                               <>
@@ -2354,47 +2365,6 @@ export function Projects({
                         )}
                       </div>
                     )}
-
-                    {startingPoint === "new" && !isLocalSource ? (
-                      <div className="two-col-fields github-repository-fields">
-                        <Field label="Repository name">
-                          <Input
-                            data-testid="github-new-repository-name"
-                            value={repositoryName}
-                            onChange={(event) => setRepositoryName(event.target.value)}
-                            placeholder={deriveProjectIdentity("", name).repositorySlug}
-                          />
-                        </Field>
-                        <Field label="Visibility">
-                          <Select
-                            data-testid="github-repository-visibility"
-                            value={repositoryPrivate ? "private" : "public"}
-                            onChange={(event) =>
-                              setRepositoryPrivate(event.target.value === "private")
-                            }
-                          >
-                            <option value="private">Private (default)</option>
-                            <option value="public">Public</option>
-                          </Select>
-                        </Field>
-                      </div>
-                    ) : null}
-                    {startingPoint === "new" && name.trim() ? (
-                      <div
-                        className="github-repository-summary"
-                        data-testid="derived-project-summary"
-                      >
-                        <span className="github-repository-summary-label">Repository</span>
-                        <strong>{derivedIdentity.projectName}</strong>
-                        <span>
-                          {isLocalSource
-                            ? (localSelection?.repository.repository_display_name ??
-                              "Choose a repository")
-                            : `${selectedConnection?.owner_login ?? "GitHub"}/${derivedIdentity.repositorySlug}`}{" "}
-                          · {repositoryPrivate ? "Private" : "Public"}
-                        </span>
-                      </div>
-                    ) : null}
                   </section>
 
                   <section className="setup-section" aria-labelledby="project-section">
@@ -2581,7 +2551,7 @@ export function Projects({
                         </div>
                       </header>
                       <div className="two-col-fields">
-                        <Field label="Coordinator model">
+                        <Field label="Project Manager">
                           <Select
                             data-testid="pm-model"
                             value={pmModel}
@@ -2619,7 +2589,7 @@ export function Projects({
                           </Select>
                         </Field>
                         {pmProvider === "openai" ? (
-                          <Field label="Coordinator Codex effort">
+                          <Field label="Project Manager Codex effort">
                             <Select
                               data-testid="pm-effort"
                               value={pmEffort}
@@ -2635,6 +2605,8 @@ export function Projects({
                             </Select>
                           </Field>
                         ) : null}
+                      </div>
+                      <div className="qc-review-controls">
                         <Field label="Reviews">
                           <div className="rounds-stepper" data-testid="rounds-stepper">
                             <Button
@@ -2657,52 +2629,44 @@ export function Projects({
                               +
                             </Button>
                           </div>
-                          <span className="muted">
-                            {roundsCount === 1
-                              ? "Routine · one reviewer/PM cycle"
-                              : roundsCount === 2
-                                ? "High-risk · includes an independent recheck"
-                                : roundsCount === 0
-                                  ? "QC is off"
-                                  : `${roundsCount} review cycles`}
-                          </span>
                         </Field>
+                        <label className="qc-review-toggle">
+                          <input
+                            type="checkbox"
+                            data-testid="allow-unadjudicated-rebuttals"
+                            checked={allowUnadjudicatedRebuttals}
+                            disabled={roundsCount === 0}
+                            onChange={(event) =>
+                              setAllowUnadjudicatedRebuttals(event.target.checked)
+                            }
+                          />
+                          <strong>Allow rebuttals</strong>
+                        </label>
+                        <label className="qc-review-toggle">
+                          <input
+                            type="checkbox"
+                            data-testid="skip-reviews"
+                            checked={roundsCount === 0}
+                            onChange={(event) => setRoundsCount(event.target.checked ? 0 : 1)}
+                          />
+                          <strong>Skip reviews</strong>
+                        </label>
                       </div>
-                      {roundsCount > 0 ? (
-                        <div className="qc-review-mode">
-                          <Field label="Pause mode">
-                            <Select
-                              data-testid="qc-mode"
-                              value={qcMode}
-                              onChange={(event) => setQcMode(event.target.value as QcModeT)}
-                            >
-                              {QC_MODE_OPTIONS.map((option) => (
-                                <option key={option.value} value={option.value}>
-                                  {option.label}
-                                </option>
-                              ))}
-                            </Select>
-                          </Field>
-                          <label className="qc-rebuttals-toggle">
-                            <input
-                              type="checkbox"
-                              data-testid="allow-unadjudicated-rebuttals"
-                              checked={allowUnadjudicatedRebuttals}
-                              onChange={(event) =>
-                                setAllowUnadjudicatedRebuttals(event.target.checked)
-                              }
-                            />
-                            <span>
-                              <strong>Allow rebuttals</strong>
-                            </span>
-                          </label>
-                        </div>
-                      ) : (
-                        <p className="setup-section-note" data-testid="review-off-note">
-                          Reviews are off.
-                        </p>
-                      )}
-                      <div className="two-col-fields qc-update-preferences">
+                      <div className="qc-preferences-row">
+                        <Field label="Pause mode">
+                          <Select
+                            data-testid="qc-mode"
+                            value={qcMode}
+                            disabled={roundsCount === 0}
+                            onChange={(event) => setQcMode(event.target.value as QcModeT)}
+                          >
+                            {QC_MODE_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </Select>
+                        </Field>
                         <Field label="Update timing">
                           <Select
                             data-testid="project-update-timing"
@@ -2747,9 +2711,6 @@ export function Projects({
                   {submissionError ? (
                     <Alert testId="onboarding-submit-error">{submissionError}</Alert>
                   ) : null}
-                  <p className="setup-confirmation" data-testid="setup-confirmation">
-                    {confirmationText}
-                  </p>
                   {creationStatus ? (
                     <output
                       className="project-creation-status"
@@ -2771,7 +2732,6 @@ export function Projects({
                           ? "Create project →"
                           : "Adopt project →"}
                     </Button>
-                    <span>Setup continues here until the project is ready to open.</span>
                   </div>
                 </div>
               )}

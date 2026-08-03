@@ -123,7 +123,7 @@ describe("new project: name-first creation, planning in the conversation", () =>
       }),
     ).toHaveLength(4);
 
-    expect(screen.getByTestId("automatic-github-destination")).toHaveTextContent("octocat");
+    expect(screen.queryByText(/repository destination/i)).not.toBeInTheDocument();
     expect(screen.queryByTestId("github-connection")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /create project/i })).toBeDisabled();
 
@@ -218,18 +218,20 @@ describe("new project: name-first creation, planning in the conversation", () =>
     await user.type(screen.getByTestId("project-name"), "Ravel Search");
     expect(screen.getByRole("heading", { name: "QC options" })).toBeInTheDocument();
     expect(screen.queryByText("Cross-provider review is on.")).not.toBeInTheDocument();
-    const fewer = screen.getByRole("button", { name: /fewer rounds/i });
-    await user.click(fewer);
-    await user.click(fewer);
-    await user.click(fewer);
+    expect(screen.queryByText(/routine/i)).not.toBeInTheDocument();
+    const skipReviews = screen.getByTestId("skip-reviews");
+    await user.click(skipReviews);
     expect(screen.getByTestId("rounds-stepper")).toHaveTextContent("0");
-    expect(fewer).toBeDisabled();
-    expect(screen.getByTestId("review-off-note")).toHaveTextContent("Reviews are off");
-    expect(screen.queryByTestId("qc-mode")).not.toBeInTheDocument();
+    expect(skipReviews).toBeChecked();
+    expect(screen.getByTestId("qc-mode")).toBeDisabled();
+    expect(screen.getByTestId("allow-unadjudicated-rebuttals")).toBeDisabled();
 
-    await user.click(screen.getByRole("button", { name: /more rounds/i }));
-    expect(screen.getByTestId("qc-mode")).toBeInTheDocument();
+    await user.click(skipReviews);
+    expect(screen.getByTestId("rounds-stepper")).toHaveTextContent("1");
+    expect(screen.getByTestId("qc-mode")).toBeEnabled();
     expect(screen.queryByText("Cross-provider review is on.")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("setup-confirmation")).not.toBeInTheDocument();
+    expect(screen.queryByText(/setup continues here/i)).not.toBeInTheDocument();
   });
 
   it("sets progress update timing and content with the project QC options", async () => {

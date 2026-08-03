@@ -46,7 +46,7 @@ describe("ProjectStore", () => {
 
     expect(a.status).toBe("draft");
     expect(a.pm_provider).toBe("anthropic");
-    expect(a.pm_model).toBe("claude-sonnet-5");
+    expect(a.pm_model).toBe("claude-fable-5");
     expect(a.reviewer_provider).toBe("openai");
     expect(a.plan_objective).toBeNull();
 
@@ -199,7 +199,7 @@ describe("ProjectStore", () => {
     const restoredList = restored.list().sort((a, b) => a.name.localeCompare(b.name));
     expect(restoredList.map((p) => p.name)).toEqual(["Draft only", "Planned"]);
     expect(restored.summary(draft.id).status).toBe("draft");
-    expect(restored.summary(draft.id).pm_model).toBe("gpt-5.6-terra");
+    expect(restored.summary(draft.id).pm_model).toBe("gpt-5.6-sol");
     expect(() => restored.session(draft.id)).toThrow();
 
     const restoredSession = restored.session(planned.id);

@@ -613,9 +613,8 @@ test("New work can create a GitHub repository and folder on an enrolled computer
   await page.getByRole("button", { name: /^this computer/i }).click();
   await expect(page.getByTestId("project-computer")).toHaveValue("device-e2e");
   await page.getByRole("button", { name: "Choose folder" }).click();
-  await expect(page.getByTestId("setup-confirmation")).toContainText(
-    "clone it into Projects on Front Door Mac",
-  );
+  await expect(page.locator(".folder-destination")).toContainText("Projects");
+  await expect(page.getByTestId("setup-confirmation")).toHaveCount(0);
   await page.getByRole("button", { name: /create project/i }).click();
 
   await expectNewWorkEntry(page);
@@ -693,7 +692,7 @@ test("New project creates from a name and lands in the workspace", async ({ page
   expect(shellPadding.right).toBeGreaterThanOrEqual(24);
   expect(shellPadding.background).not.toBe("rgba(0, 0, 0, 0)");
 
-  await expect(page.getByTestId("automatic-github-destination")).toContainText("octocat");
+  await expect(page.getByText(/repository destination/i)).toHaveCount(0);
   await page.getByTestId("project-name").fill("Deployment workflow dashboard for release managers");
   await expect(page.getByTestId("derived-project-summary")).toContainText(
     "Deployment workflow dashboard for release managers",
@@ -725,7 +724,7 @@ test("Authorized-only GitHub setup finishes installation before creating a new p
   await page.waitForURL("/");
 
   await page.getByRole("button", { name: /new project/i }).click();
-  await expect(page.getByTestId("automatic-github-destination")).toContainText("octocat");
+  await expect(page.getByText(/repository destination/i)).toHaveCount(0);
   await page.getByTestId("project-name").fill("Verified setup journey");
   await page.getByRole("button", { name: /create project/i }).click();
 

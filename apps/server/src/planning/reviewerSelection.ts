@@ -14,7 +14,7 @@ export { defaultReviewerProviderFor };
 
 // ---------------------------------------------------------------------------
 // PHASE TAB P1 legacy defaults remain exported for compatibility. New durable
-// planning composition supplies a validated profile (balanced by default),
+// planning composition supplies a validated profile (quality by default),
 // while exact project selections, persisted reviewer settings, and the legacy
 // exact-model environment variables continue to win. Cross-provider review
 // enforcement is unchanged (runPlanning() refuses same-provider pairs).
@@ -22,7 +22,7 @@ export { defaultReviewerProviderFor };
 export const PLANNING_RUN_DEFAULT_PM_MODEL = "claude-fable-5";
 export const PLANNING_RUN_DEFAULT_REVIEWER_MODEL = "gpt-5.6-sol";
 export const PLANNING_MODEL_PROFILE_ENV = "NORNS_PLANNING_MODEL_PROFILE";
-export const DEFAULT_PLANNING_MODEL_PROFILE: PlanningModelProfileT = "balanced";
+export const DEFAULT_PLANNING_MODEL_PROFILE: PlanningModelProfileT = "quality";
 
 const PLANNING_PROFILE_MODELS = {
   quality: {

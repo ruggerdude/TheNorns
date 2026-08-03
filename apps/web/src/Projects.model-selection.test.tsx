@@ -118,13 +118,13 @@ describe("project manager model selection", () => {
     );
   }
 
-  it("offers current Anthropic, OpenAI, and DeepSeek models and defaults to Sonnet", async () => {
+  it("offers current Anthropic, OpenAI, and DeepSeek models and defaults to Fable", async () => {
     const select = await openCreateDialog();
 
     expect(within(select).getByRole("option", { name: "Claude Fable 5" })).toBeInTheDocument();
     expect(within(select).getByRole("option", { name: "GPT-5.6 Sol" })).toBeInTheDocument();
     expect(within(select).getByRole("option", { name: "DeepSeek V4 Pro" })).toBeInTheDocument();
-    expect(select).toHaveValue("claude-sonnet-5");
+    expect(select).toHaveValue("claude-fable-5");
   });
 
   it("submits Fable with Anthropic as PM and previews OpenAI review compactly", async () => {
@@ -132,7 +132,7 @@ describe("project manager model selection", () => {
     await userEvent.selectOptions(select, "claude-fable-5");
 
     expect(screen.getByTestId("reviewer-model")).toHaveDisplayValue(
-      "Automatic (cross-provider) · GPT-5.6 Terra",
+      "Automatic (cross-provider) · GPT-5.6 Sol",
     );
     expect(await submit("Fable project")).toMatchObject({
       body: {
@@ -149,7 +149,7 @@ describe("project manager model selection", () => {
     await userEvent.selectOptions(screen.getByTestId("pm-effort"), "xhigh");
 
     expect(screen.getByTestId("reviewer-model")).toHaveDisplayValue(
-      "Automatic (cross-provider) · Claude Sonnet 5",
+      "Automatic (cross-provider) · Claude Fable 5",
     );
     expect(await submit("Sol project")).toMatchObject({
       body: {
@@ -171,7 +171,7 @@ describe("project manager model selection", () => {
 
     expect(screen.queryByTestId("pm-effort")).not.toBeInTheDocument();
     expect(screen.getByTestId("reviewer-model")).toHaveDisplayValue(
-      "Automatic (cross-provider) · Claude Sonnet 5",
+      "Automatic (cross-provider) · Claude Fable 5",
     );
     expect(await submit("DeepSeek project")).toMatchObject({
       body: {

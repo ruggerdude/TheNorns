@@ -19,11 +19,11 @@ describe("PM model catalog", () => {
     }
   });
 
-  it("uses balanced defaults for each provider", () => {
+  it("uses the highest-capability default for each provider", () => {
     expect(DEFAULT_PM_MODEL).toEqual({
-      anthropic: "claude-sonnet-5",
-      openai: "gpt-5.6-terra",
-      deepseek: "deepseek-v4-flash",
+      anthropic: "claude-fable-5",
+      openai: "gpt-5.6-sol",
+      deepseek: "deepseek-v4-pro",
     });
   });
 });

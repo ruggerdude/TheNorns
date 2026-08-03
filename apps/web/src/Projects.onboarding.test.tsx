@@ -345,9 +345,8 @@ describe("O1: GitHub and local Git repository onboarding", () => {
     await user.type(screen.getByTestId("project-name"), "Fresh application");
     await user.click(screen.getByRole("button", { name: /choose folder/i }));
 
-    expect(await screen.findByTestId("setup-confirmation")).toHaveTextContent(
-      /clone it into projects on david's mac/i,
-    );
+    expect((await screen.findByText("Project folder")).parentElement).toHaveTextContent("Projects");
+    expect(screen.queryByTestId("setup-confirmation")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /create project/i }));
 
     await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
@@ -586,25 +585,19 @@ describe("O1: GitHub and local Git repository onboarding", () => {
     expect(screen.getByRole("button", { name: /open connections/i })).toBeInTheDocument();
   });
 
-  it("shows the plain-language confirmation before the submit button, honest about GitHub Actions and never claiming to touch the user's machine", async () => {
+  it("does not show the removed final setup confirmation", async () => {
     const user = userEvent.setup();
     renderWizard();
     await user.click(await screen.findByRole("button", { name: /new project/i }));
 
-    expect(await screen.findByTestId("setup-confirmation")).toHaveTextContent(
-      /choose or create a github repository/i,
-    );
+    expect(screen.queryByTestId("setup-confirmation")).not.toBeInTheDocument();
 
     await user.type(screen.getByTestId("project-name"), "Fresh application");
-    expect(await screen.findByTestId("setup-confirmation")).toHaveTextContent(
-      "Work happens in a GitHub Actions job inside octocat/fresh-application. Changes arrive as commits and pull requests in that repository — to get the files on your own machine, clone or pull as usual.",
-    );
+    expect(screen.queryByTestId("setup-confirmation")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /^existing/i }));
     await user.click(await screen.findByRole("button", { name: /octocat\/existing-app/i }));
-    expect(await screen.findByTestId("setup-confirmation")).toHaveTextContent(
-      /github actions job inside octocat\/existing-app/i,
-    );
+    expect(screen.queryByTestId("setup-confirmation")).not.toBeInTheDocument();
   });
 
   it("requires only a project name for New and a repository selection for Existing", async () => {

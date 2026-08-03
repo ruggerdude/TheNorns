@@ -2341,7 +2341,7 @@ describe("conversation workspace", () => {
           await user.click(screen.getByRole("button", { name: "Create plan & start" }));
         } else {
           const qcAgent = await screen.findByRole("combobox", { name: "QC agent" });
-          expect(qcAgent).toHaveValue("gpt-5.6-terra");
+          expect(qcAgent).toHaveValue("gpt-5.6-sol");
           await user.selectOptions(qcAgent, ["gpt-5.6-terra"]);
           await user.selectOptions(screen.getByRole("combobox", { name: "QC rounds" }), ["2"]);
           await user.click(screen.getByRole("button", { name: "Create plan & send to QC" }));

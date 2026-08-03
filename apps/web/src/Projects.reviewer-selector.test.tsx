@@ -217,9 +217,7 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
 
     await user.click(await screen.findByRole("button", { name: /new project/i }));
     await user.type(screen.getByTestId("project-name"), "Zephyr zero rounds");
-    // Routine default is 1; one click turns review off.
-    const fewer = screen.getByRole("button", { name: /fewer rounds/i });
-    await user.click(fewer);
+    await user.click(screen.getByTestId("skip-reviews"));
     expect(screen.getByTestId("rounds-stepper")).toHaveTextContent("0");
     await user.type(await screen.findByTestId("github-new-repository-name"), "zephyr-zero-rounds");
     await user.click(screen.getByRole("button", { name: /create project/i }));
