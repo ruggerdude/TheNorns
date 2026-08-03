@@ -113,6 +113,15 @@ class BlockingReviewer extends FakeAdapter {
       );
     });
   }
+
+  override streamStructured<T>(
+    request: CompletionRequest,
+    schema: z.ZodType<T>,
+    schemaName: string,
+    _onDelta: (delta: string) => void,
+  ): Promise<StructuredResult<T>> {
+    return this.completeStructured(request, schema, schemaName);
+  }
 }
 
 describe.sequential("QC pause and resume (QCP-1B)", () => {

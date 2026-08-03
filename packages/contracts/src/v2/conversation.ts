@@ -2354,6 +2354,10 @@ export const V2PlanningLiveProgress = z
     completed_items: nonNegativeInteger.default(0),
     total_items: nonNegativeInteger.default(0),
     activity: V2NonEmptyString.default("Working on the current QC step"),
+    /** Bounded provider output that is safe to show as the visible live
+     * response. This is the model's emitted structured answer, not hidden
+     * chain-of-thought. */
+    output_preview: z.string().max(6_000).nullable().optional(),
     started_at: V2IsoDateTime,
     checkpoint_at: V2IsoDateTime,
   })

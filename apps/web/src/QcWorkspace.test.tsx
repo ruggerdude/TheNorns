@@ -239,15 +239,36 @@ describe("QcWorkspace", () => {
           completed_items: 2,
           total_items: 5,
           activity: "Checking 5 plan modules against the QC requirements",
+          output_preview: '{"findings":[{"severity":"should_fix"',
           started_at: "2026-08-02T12:01:18.000Z",
           checkpoint_at: "2026-08-02T12:01:18.000Z",
         },
+        chat_messages: [
+          {
+            id: "message-1",
+            request_id: "request-1",
+            channel: "reviewer",
+            round: 1,
+            attempt: 1,
+            speaker: "workflow",
+            kind: "instruction",
+            content: "Review the saved plan against the QC requirements.",
+            error_code: null,
+            created_at: "2026-08-02T12:01:18.000Z",
+          },
+        ],
       }),
     );
     expect(screen.getByText("4:12 on this step")).toBeVisible();
     expect(screen.getByText("gpt")).toBeVisible();
     expect(screen.getByText("2 of 5 items")).toBeVisible();
     expect(screen.getByRole("progressbar", { name: "Total QC progress" })).toBeVisible();
+    expect(screen.getByText(/taking longer than usual/i)).toBeVisible();
+    fireEvent.click(screen.getByRole("tab", { name: "Live dialogue" }));
+    expect(screen.getByText("Visible agent dialogue")).toBeVisible();
+    expect(screen.getByText("Response streaming now")).toBeVisible();
+    expect(screen.getByText(/"severity":"should_fix"/)).toBeVisible();
+    expect(screen.getByText(/View instructions sent to reviewer/)).toBeVisible();
     vi.useRealTimers();
   });
 });

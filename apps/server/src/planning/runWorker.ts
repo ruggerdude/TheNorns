@@ -810,6 +810,13 @@ export class PlanningRunWorker {
                   event,
                   leaseToken: claim.lease_token,
                 }),
+              onOutput: (event: ReviewOnlyProgressEvent) =>
+                this.options.recordReviewOnlyStage?.({
+                  reviewId: seed.reviewId,
+                  planningRunId: claim.id,
+                  event,
+                  leaseToken: claim.lease_token,
+                }),
             }
           : {}),
       });

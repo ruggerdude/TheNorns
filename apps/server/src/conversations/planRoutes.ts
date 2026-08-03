@@ -10,7 +10,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ConversationHumanSteeringService } from "./humanSteering.js";
 import type { ConversationPlanChangeProposalService } from "./planChangeProposal.js";
-import type { ConversationPlanProposalService } from "./planProposal.js";
+import type { ConversationPlanProposalService, PlanProposalProgress } from "./planProposal.js";
 import {
   ConversationPlanWorkflowError,
   type ConversationPlanWorkflowService,
@@ -206,6 +206,19 @@ export function registerConversationPlanRoutes(
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
         writer.write({ type: "start", messageId });
+        let latestProgress: PlanProposalProgress = {
+          stage: "generating",
+          modules: [],
+          output_tokens_estimate: 0,
+        };
+        // Reasoning models can spend several minutes before emitting their
+        // first visible output token. Repeat the latest transient snapshot so
+        // proxies keep the SSE request alive during that otherwise-silent
+        // period and the client retains an honest active state.
+        const heartbeat = setInterval(() => {
+          writer.write({ type: "data-plan-progress", data: latestProgress, transient: true });
+        }, 15_000);
+        heartbeat.unref?.();
         try {
           const response = await options.proposals.propose(
             user.id,
@@ -213,8 +226,10 @@ export function registerConversationPlanRoutes(
             workItemId,
             conversationId,
             input,
-            (progress) =>
-              writer.write({ type: "data-plan-progress", data: progress, transient: true }),
+            (progress) => {
+              latestProgress = progress;
+              writer.write({ type: "data-plan-progress", data: progress, transient: true });
+            },
           );
           writer.write({ type: "data-plan-proposal", data: response });
         } catch (error) {
@@ -229,6 +244,8 @@ export function registerConversationPlanRoutes(
           } else {
             throw error;
           }
+        } finally {
+          clearInterval(heartbeat);
         }
         writer.write({ type: "finish" });
       },

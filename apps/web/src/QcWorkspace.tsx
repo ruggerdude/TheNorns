@@ -126,6 +126,117 @@ function durationLabel(seconds: number): string {
   return remainder === 0 ? `${minutes}m` : `${minutes}m ${remainder}s`;
 }
 
+type QcProgressTab = "progress" | "dialogue";
+
+function QcProgressTabs({
+  active,
+  onChange,
+}: {
+  active: QcProgressTab;
+  onChange: (tab: QcProgressTab) => void;
+}): React.ReactElement {
+  return (
+    <div className="qc-progress-tabs" role="tablist" aria-label="Quality control details">
+      <button
+        id="qc-progress-tab"
+        type="button"
+        role="tab"
+        aria-selected={active === "progress"}
+        aria-controls="qc-progress-panel"
+        onClick={() => onChange("progress")}
+      >
+        Progress
+      </button>
+      <button
+        id="qc-dialogue-tab"
+        type="button"
+        role="tab"
+        aria-selected={active === "dialogue"}
+        aria-controls="qc-dialogue-panel"
+        onClick={() => onChange("dialogue")}
+      >
+        Live dialogue
+      </button>
+    </div>
+  );
+}
+
+function speakerLabel(
+  speaker: V2ConversationPlanReviewT["chat_messages"][number]["speaker"],
+): string {
+  if (speaker === "reviewer") return "Independent reviewer";
+  if (speaker === "pm") return "Planning manager";
+  if (speaker === "human") return "You";
+  return "QC workflow";
+}
+
+function QcLiveDialogue({ review }: { review: V2ConversationPlanReviewT }): React.ReactElement {
+  const messages = review.chat_messages.slice(-20);
+  const liveOutput = review.live_progress?.output_preview?.trim() ?? "";
+  return (
+    <section
+      id="qc-dialogue-panel"
+      className="qc-live-dialogue"
+      role="tabpanel"
+      aria-labelledby="qc-dialogue-tab"
+    >
+      <header>
+        <div>
+          <strong>Visible agent dialogue</strong>
+          <span>Updates automatically while QC is working</span>
+        </div>
+        {liveOutput ? <b>LIVE</b> : null}
+      </header>
+      {messages.length > 0 || liveOutput ? (
+        <ol>
+          {messages.map((message) => (
+            <li key={message.id} data-speaker={message.speaker}>
+              <header>
+                <strong>{speakerLabel(message.speaker)}</strong>
+                <span>
+                  Round {message.round} · {message.kind.replaceAll("_", " ")}
+                </span>
+              </header>
+              {message.speaker === "workflow" && message.kind !== "error" ? (
+                <details>
+                  <summary>View instructions sent to {message.channel}</summary>
+                  <pre>{message.content}</pre>
+                </details>
+              ) : (
+                <pre>{message.content}</pre>
+              )}
+            </li>
+          ))}
+          {liveOutput ? (
+            <li
+              className="is-live"
+              data-speaker={review.live_progress?.stage === "revising" ? "pm" : "reviewer"}
+            >
+              <header>
+                <strong>
+                  {review.live_progress?.stage === "revising"
+                    ? "Planning manager"
+                    : "Independent reviewer"}
+                </strong>
+                <span>Response streaming now</span>
+              </header>
+              <pre>{liveOutput}</pre>
+            </li>
+          ) : null}
+        </ol>
+      ) : (
+        <div className="qc-live-dialogue-empty">
+          <span className="qc-new-pulse" aria-hidden="true" />
+          <p>The request has been sent. Waiting for the first visible response.</p>
+        </div>
+      )}
+      <small>
+        This shows emitted responses and workflow messages, not private internal reasoning.
+      </small>
+    </section>
+  );
+}
+
 function QcProgressPopout({
   review,
   accepted,
@@ -134,6 +245,7 @@ function QcProgressPopout({
   accepted: number;
 }): React.ReactElement | null {
   const live = review.live_progress;
+  const [activeTab, setActiveTab] = useState<QcProgressTab>("progress");
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -150,28 +262,40 @@ function QcProgressPopout({
         aria-label="Quality control progress"
         aria-live="polite"
       >
-        <header>
-          <span className="qc-new-pulse" aria-hidden="true" />
-          <div>
-            <strong>{ownerLabel(review)}</strong>
-            <span>
-              Round {currentRound(review)} of {review.max_rounds}
-            </span>
-          </div>
-          <b>1%</b>
-        </header>
-        <progress max="100" value="1" aria-label="Total QC progress" />
-        <p className="qc-progress-activity">Waiting for the independent reviewer to start.</p>
-        <dl>
-          <div>
-            <dt>Elapsed</dt>
-            <dd>{durationLabel(queuedSeconds)}</dd>
-          </div>
-          <div>
-            <dt>Estimated</dt>
-            <dd>Calculating after the reviewer starts</dd>
-          </div>
-        </dl>
+        <QcProgressTabs active={activeTab} onChange={setActiveTab} />
+        {activeTab === "progress" ? (
+          <section
+            id="qc-progress-panel"
+            className="qc-progress-panel"
+            role="tabpanel"
+            aria-labelledby="qc-progress-tab"
+          >
+            <header>
+              <span className="qc-new-pulse" aria-hidden="true" />
+              <div>
+                <strong>{ownerLabel(review)}</strong>
+                <span>
+                  Round {currentRound(review)} of {review.max_rounds}
+                </span>
+              </div>
+              <b>1%</b>
+            </header>
+            <progress max="100" value="1" aria-label="Total QC progress" />
+            <p className="qc-progress-activity">Waiting for the independent reviewer to start.</p>
+            <dl>
+              <div>
+                <dt>Elapsed</dt>
+                <dd>{durationLabel(queuedSeconds)}</dd>
+              </div>
+              <div>
+                <dt>Estimated</dt>
+                <dd>Calculating after the reviewer starts</dd>
+              </div>
+            </dl>
+          </section>
+        ) : (
+          <QcLiveDialogue review={review} />
+        )}
       </aside>
     );
   }
@@ -186,6 +310,7 @@ function QcProgressPopout({
     : Math.max(0, Math.floor((now - reviewStarted) / 1_000));
   const estimate = STAGE_ESTIMATE_SECONDS[live.stage];
   const estimatedRemaining = Math.max(0, estimate - stepElapsed);
+  const takingLongerThanUsual = stepElapsed > estimate * 2;
   const itemProgress = live.total_items > 0 ? live.completed_items / live.total_items : 0;
   const stepProgress = Math.max(itemProgress, Math.min(0.92, stepElapsed / estimate));
   const round = live.round ?? currentRound(review);
@@ -202,44 +327,64 @@ function QcProgressPopout({
 
   return (
     <aside className="qc-progress-popout" aria-label="Quality control progress" aria-live="polite">
-      <header>
-        <span className="qc-new-pulse" aria-hidden="true" />
-        <div>
-          <strong>{ownerLabel(review)}</strong>
-          <span>
-            Round {round} of {review.max_rounds}
-          </span>
-        </div>
-        <b>{overallProgress}%</b>
-      </header>
-      <progress max="100" value={overallProgress} aria-label="Total QC progress" />
-      <p className="qc-progress-activity">{live.activity}</p>
-      <dl>
-        <div>
-          <dt>Elapsed</dt>
-          <dd>{durationLabel(totalElapsed)}</dd>
-        </div>
-        <div>
-          <dt>Estimated</dt>
-          <dd>
-            {estimatedRemaining > 0
-              ? `~${durationLabel(estimatedRemaining)} left in step`
-              : "Wrapping up this step"}
-          </dd>
-        </div>
-        {itemLabel ? (
-          <div>
-            <dt>Items</dt>
-            <dd>{itemLabel}</dd>
-          </div>
-        ) : null}
-      </dl>
-      <p className="qc-new-working-meta">
-        <StageElapsed startedAt={live.started_at} />
-        {live.model ? <span>{live.model}</span> : null}
-        {live.attempt > 1 ? <span>retry {live.attempt}</span> : null}
-      </p>
-      <small>Timing estimates adjust at each workflow checkpoint.</small>
+      <QcProgressTabs active={activeTab} onChange={setActiveTab} />
+      {activeTab === "progress" ? (
+        <section
+          id="qc-progress-panel"
+          className="qc-progress-panel"
+          role="tabpanel"
+          aria-labelledby="qc-progress-tab"
+        >
+          <header>
+            <span className="qc-new-pulse" aria-hidden="true" />
+            <div>
+              <strong>{ownerLabel(review)}</strong>
+              <span>
+                Round {round} of {review.max_rounds}
+              </span>
+            </div>
+            <b>{overallProgress}%</b>
+          </header>
+          <progress max="100" value={overallProgress} aria-label="Total QC progress" />
+          <p className="qc-progress-activity">{live.activity}</p>
+          {takingLongerThanUsual ? (
+            <p className="qc-progress-delay">
+              This step is taking longer than usual, but QC is still active. Open Live dialogue for
+              the latest visible output, or use the stop controls below.
+            </p>
+          ) : null}
+          <dl>
+            <div>
+              <dt>Elapsed</dt>
+              <dd>{durationLabel(totalElapsed)}</dd>
+            </div>
+            <div>
+              <dt>Estimated</dt>
+              <dd>
+                {estimatedRemaining > 0
+                  ? `~${durationLabel(estimatedRemaining)} left in step`
+                  : takingLongerThanUsual
+                    ? "Longer than usual"
+                    : "Wrapping up this step"}
+              </dd>
+            </div>
+            {itemLabel ? (
+              <div>
+                <dt>Items</dt>
+                <dd>{itemLabel}</dd>
+              </div>
+            ) : null}
+          </dl>
+          <p className="qc-new-working-meta">
+            <StageElapsed startedAt={live.started_at} />
+            {live.model ? <span>{live.model}</span> : null}
+            {live.attempt > 1 ? <span>retry {live.attempt}</span> : null}
+          </p>
+          <small>Timing estimates adjust at each workflow checkpoint.</small>
+        </section>
+      ) : (
+        <QcLiveDialogue review={review} />
+      )}
     </aside>
   );
 }

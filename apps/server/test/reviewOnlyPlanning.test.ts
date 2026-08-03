@@ -185,6 +185,37 @@ describe("review-only conversational planning", () => {
     expect(result.status).toBe("converged");
   });
 
+  it("streams bounded visible output updates while the reviewer is working", async () => {
+    const seed = envelope();
+    const pm = new FakeAdapter("anthropic");
+    const reviewer = new FakeAdapter("openai");
+    reviewer.enqueue({ findings: [] });
+    const output: ReviewOnlyProgressEvent[] = [];
+
+    const result = await runReviewOnlyPlanning({
+      pm,
+      reviewer,
+      projectId: "project-review-stream",
+      initiatedByUserId: "user-review-stream",
+      seedPlan: seed,
+      frozenContext: { binding_rules: [] },
+      telemetryGroupId: "review-only-stream",
+      maxRounds: 1,
+      onOutput: (event) => {
+        output.push(event);
+      },
+    });
+
+    assertTerminal(result);
+    expect(output.length).toBeGreaterThan(0);
+    expect(output.at(-1)).toMatchObject({
+      stage: "reviewing",
+      round: 1,
+      outputPreview: '{"findings":[]}',
+    });
+    expect(reviewer.requests).toHaveLength(1);
+  });
+
   it("records exact dispositions and returns the complete revised envelope at the cap", async () => {
     const seed = envelope();
     // The module content itself changes (not just the plan-level objective)

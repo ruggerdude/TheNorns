@@ -133,6 +133,7 @@ export interface ReviewOnlyProgressEvent {
   completedItems: number;
   totalItems: number;
   activity: string;
+  outputPreview?: string | null;
 }
 
 export interface ReviewOnlyDurableCheckpoint {
@@ -170,6 +171,9 @@ export interface ReviewOnlyPlanningOptions {
   onCheckpoint?: (checkpoint: ReviewOnlyDurableCheckpoint) => void | Promise<void>;
   onChatEvent?: (event: ReviewOnlyChatEvent) => void | Promise<void>;
   onStage?: (event: ReviewOnlyProgressEvent) => void | Promise<void>;
+  /** Enables the streamed structured-output path and publishes bounded,
+   * throttled snapshots of the provider's visible response. */
+  onOutput?: (event: ReviewOnlyProgressEvent) => void | Promise<void>;
   /** Durable claim number used only to keep repeated post-restart provider
    * requests distinct in telemetry and transcript evidence. */
   executionAttempt?: number;
@@ -782,6 +786,7 @@ async function completeStructuredWithRepair<T>(
     round: number;
     onEvent?: (event: ReviewOnlyChatEvent) => void | Promise<void>;
     onStage?: (event: ReviewOnlyProgressEvent) => void | Promise<void>;
+    onOutput?: (event: ReviewOnlyProgressEvent) => void | Promise<void>;
     markdown(value: T): string;
     maxAttempts?: number;
     repairInstruction?: string;
@@ -798,19 +803,24 @@ async function completeStructuredWithRepair<T>(
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const requestId =
       attempt === 0 ? telemetryRequestId : `${telemetryRequestId}:repair:${attempt}`;
-    await chat.onStage?.({
-      stage: attempt === 0 ? (chat.channel === "reviewer" ? "reviewing" : "revising") : "repairing",
+    const stage =
+      attempt === 0 ? (chat.channel === "reviewer" ? "reviewing" : "revising") : "repairing";
+    const activity =
+      attempt === 0
+        ? (chat.activity ?? "Working on the current QC step")
+        : "Repairing the structured QC response";
+    const progressEvent: ReviewOnlyProgressEvent = {
+      stage,
       round: chat.round,
       attempt: attempt + 1,
       provider: adapter.provider,
       model: adapter.model,
       completedItems: 0,
       totalItems: chat.totalItems ?? 0,
-      activity:
-        attempt === 0
-          ? (chat.activity ?? "Working on the current QC step")
-          : "Repairing the structured QC response",
-    });
+      activity,
+      outputPreview: null,
+    };
+    await chat.onStage?.(progressEvent);
     await chat.onEvent?.({
       request_id: requestId,
       channel: chat.channel,
@@ -822,20 +832,48 @@ async function completeStructuredWithRepair<T>(
       error_code: null,
     });
     try {
-      const result = await adapter.completeStructured(
-        {
-          ...request,
-          prompt,
-          ...(attempt > 0 && chat.repairMaxTokens !== undefined
-            ? { maxTokens: chat.repairMaxTokens }
-            : {}),
-          telemetryRequestId: requestId,
-          telemetryRetryGroupId: telemetryRequestId,
-          telemetryRetryAttempt: attempt,
-        },
-        schema,
-        schemaName,
-      );
+      const completionRequest: CompletionRequest = {
+        ...request,
+        prompt,
+        ...(attempt > 0 && chat.repairMaxTokens !== undefined
+          ? { maxTokens: chat.repairMaxTokens }
+          : {}),
+        telemetryRequestId: requestId,
+        telemetryRetryGroupId: telemetryRequestId,
+        telemetryRetryAttempt: attempt,
+      };
+      let result: StructuredResult<T>;
+      if (chat.onOutput && adapter.streamStructured) {
+        let streamed = "";
+        let publishedLength = 0;
+        let publishedAt = 0;
+        let outputWrites = Promise.resolve();
+        const publish = () => {
+          const preview = streamed.slice(0, 6_000);
+          if (preview.length === publishedLength) return;
+          publishedLength = preview.length;
+          publishedAt = Date.now();
+          outputWrites = outputWrites.then(async () => {
+            await chat.onOutput?.({ ...progressEvent, outputPreview: preview });
+          });
+        };
+        try {
+          result = await adapter.streamStructured(
+            completionRequest,
+            schema,
+            schemaName,
+            (delta) => {
+              streamed += delta;
+              if (publishedLength === 0 || Date.now() - publishedAt >= 1_000) publish();
+            },
+          );
+          publish();
+        } finally {
+          await outputWrites;
+        }
+      } else {
+        result = await adapter.completeStructured(completionRequest, schema, schemaName);
+      }
       await chat.onStage?.({
         stage: "validating",
         round: chat.round,
@@ -1080,6 +1118,7 @@ export async function runReviewOnlyPlanning(
           round,
           ...(options.onChatEvent ? { onEvent: options.onChatEvent } : {}),
           ...(options.onStage ? { onStage: options.onStage } : {}),
+          ...(options.onOutput ? { onOutput: options.onOutput } : {}),
           totalItems: reviewedPlan.plan.modules.length,
           activity: `Checking ${reviewedPlan.plan.modules.length} plan module${reviewedPlan.plan.modules.length === 1 ? "" : "s"} against the QC requirements`,
           markdown: (value) => reviewerMarkdown(round, value.findings),
@@ -1176,6 +1215,7 @@ export async function runReviewOnlyPlanning(
           round,
           ...(options.onChatEvent ? { onEvent: options.onChatEvent } : {}),
           ...(options.onStage ? { onStage: options.onStage } : {}),
+          ...(options.onOutput ? { onOutput: options.onOutput } : {}),
           totalItems: revisionFindings.length,
           activity: `Applying ${revisionFindings.length} accepted QC finding${revisionFindings.length === 1 ? "" : "s"} to the plan`,
           markdown: (value) =>
@@ -1218,6 +1258,7 @@ export async function runReviewOnlyPlanning(
             round,
             ...(options.onChatEvent ? { onEvent: options.onChatEvent } : {}),
             ...(options.onStage ? { onStage: options.onStage } : {}),
+            ...(options.onOutput ? { onOutput: options.onOutput } : {}),
             totalItems: revisionFindings.length,
             activity: `Applying ${revisionFindings.length} accepted QC finding${revisionFindings.length === 1 ? "" : "s"} to the plan`,
             markdown: (value) => {
