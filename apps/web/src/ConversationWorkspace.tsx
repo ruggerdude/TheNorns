@@ -3872,6 +3872,11 @@ function ConversationThread({
     onOpenConversation(targetId);
   }, [detail.action_effects, detail.conversation.id, detail.conversation.kind, onOpenConversation]);
 
+  const parkedReviewActionIds = new Set(
+    detail.plan_reviews
+      .filter((review) => review.status === "awaiting_human")
+      .map((review) => review.action_id),
+  );
   const awaitingBackgroundSettlement =
     detail.plan_reviews.some(
       (review) => review.status === "queued" || review.status === "running",
@@ -3880,8 +3885,10 @@ function ConversationThread({
       (record) =>
         record.effect.kind === "plan_approved" && record.effect.execution.status === "pending",
     ) ||
-    detail.actions.some((action) =>
-      ["confirmed", "recorded", "sent", "agent_acknowledged"].includes(action.status),
+    detail.actions.some(
+      (action) =>
+        !parkedReviewActionIds.has(action.id) &&
+        ["confirmed", "recorded", "sent", "agent_acknowledged"].includes(action.status),
     ) ||
     (detail.human_waits ?? []).some(
       ({ wait, continuation }) =>
@@ -3892,8 +3899,8 @@ function ConversationThread({
 
   useEffect(() => {
     if (!awaitingBackgroundSettlement) return;
-    const timer = window.setTimeout(onRefreshSoft, 2_500);
-    return () => window.clearTimeout(timer);
+    const timer = window.setInterval(onRefreshSoft, 2_500);
+    return () => window.clearInterval(timer);
   }, [awaitingBackgroundSettlement, onRefreshSoft]);
 
   const generatePlanProposal = useCallback(

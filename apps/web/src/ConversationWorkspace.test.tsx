@@ -3199,7 +3199,20 @@ describe("conversation workspace", () => {
       started_at: null,
       completed_at: null,
     });
-    const settled = planReview();
+    const running = planReview({
+      status: "running",
+      findings: [],
+      dispositions: [],
+      completed_at: null,
+    });
+    const awaitingDecision = planReview({
+      status: "awaiting_human",
+      paused_checkpoint: "after_review",
+      paused_at_round: 1,
+      dispositions: [],
+      completed_at: null,
+    });
+    const qcAction = planAction({ status: "agent_acknowledged" });
     const history = [
       message({
         id: "message-plan",
@@ -3216,7 +3229,8 @@ describe("conversation workspace", () => {
         detailCalls += 1;
         return detailResponse(history, null, null, {
           planVersions: [version],
-          reviews: [detailCalls === 1 ? queued : settled],
+          actions: [qcAction],
+          reviews: [detailCalls === 1 ? queued : detailCalls === 2 ? running : awaitingDecision],
         });
       }
       throw new Error(`Unexpected request: ${url}`);
@@ -3242,12 +3256,18 @@ describe("conversation workspace", () => {
       await vi.advanceTimersByTimeAsync(2_500);
     });
     expect(detailCalls).toBe(2);
+    expect(screen.getByText("Quality review is working")).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_500);
+    });
+    expect(detailCalls).toBe(3);
     expect(screen.getByText("Make cancellation verification explicit.")).toBeInTheDocument();
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5_000);
     });
-    expect(detailCalls).toBe(2);
+    expect(detailCalls).toBe(3);
   });
 
   it("offers retry after a failure that already produced a PM revision", async () => {
