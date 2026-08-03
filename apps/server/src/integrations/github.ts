@@ -211,7 +211,7 @@ const INSTALLATION_TOKEN_REFRESH_MARGIN_MS = 120_000;
 /**
  * Least-privilege scopes used by Norns. Each is the minimum GitHub will accept
  * for the operation it names; nothing here grants `administration` except the
- * explicitly human-confirmed repository-creation path (ADR-006 amendment).
+ * explicitly human-confirmed repository creation and deletion paths.
  */
 export const GITHUB_TOKEN_SCOPES = {
   /** Enumerate the installation's repositories. Installation-wide by API design. */
@@ -258,6 +258,15 @@ export const GITHUB_TOKEN_SCOPES = {
     permissions: { administration: "write" },
     no_cache: true,
   }),
+  /**
+   * Retry a deletion after GitHub says the persisted repository ID is gone.
+   * GitHub cannot mint a repository-scoped token for a deleted repository, so
+   * this fallback is installation-wide, one-use, and limited to administration.
+   */
+  retryDeletedRepository: {
+    permissions: { administration: "write" },
+    no_cache: true,
+  },
   /** Commit `.github/workflows/norns-agent.yml` into one repository. */
   writeWorkflowFile: (repositoryId: number) => ({
     repository_ids: [repositoryId],
@@ -396,6 +405,7 @@ export class GitHubIntegrationError extends Error {
  * tells the human to follow.
  */
 export const GITHUB_APP_PERMISSION_MISSING = "github_app_permission_missing";
+export const GITHUB_REPOSITORY_UNAVAILABLE = "github_repository_unavailable";
 
 function base64Url(value: string | Uint8Array): string {
   return Buffer.from(value).toString("base64url");
@@ -1154,10 +1164,24 @@ export class GitHubIntegrationService {
         409,
       );
     }
-    const token = await this.installationToken(
-      input.installationId,
-      GITHUB_TOKEN_SCOPES.deleteRepository(numericRepositoryId),
-    );
+    let token: string;
+    try {
+      token = await this.installationToken(
+        input.installationId,
+        GITHUB_TOKEN_SCOPES.deleteRepository(numericRepositoryId),
+      );
+    } catch (error) {
+      if (
+        !(error instanceof GitHubIntegrationError) ||
+        error.code !== GITHUB_REPOSITORY_UNAVAILABLE
+      ) {
+        throw error;
+      }
+      token = await this.installationToken(
+        input.installationId,
+        GITHUB_TOKEN_SCOPES.retryDeletedRepository,
+      );
+    }
     await this.github<Record<string, never>>(
       `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.name)}`,
       token,
@@ -1514,18 +1538,12 @@ export class GitHubIntegrationService {
    * `github<T>` request path used everywhere else in this class.
    *
    * That separation is deliberate and narrow: this is the ONE GitHub endpoint
-   * where a 422 has a single, well-known meaning — "the `permissions` this
-   * request asked for exceed what the App's CURRENT grant on this
-   * installation allows" (GitHub's docs: "the installation access token
-   * cannot be granted permissions that the app was not granted"). An App or
-   * installation created before a permission existed keeps its old grant
-   * until a human updates the App's permissions on GitHub AND accepts the
-   * pending update on the installation — no retry or narrower request fixes
-   * it. A 403 here means something unrelated (a suspended installation) and
-   * is left on the generic path below. Every other GitHub failure this module
-   * reports still collapses into one generic code (E10-3 / audit defect #3);
-   * this is a deliberately narrow exception, not the start of a broader
-   * refactor of that error path.
+   * where a 422 commonly means "the `permissions` this request asked for
+   * exceed what the App's CURRENT grant allows." GitHub also returns 422 when
+   * a requested repository ID has already been deleted or left the
+   * installation. Keep those cases distinct so users are not sent through an
+   * impossible permission-update loop. A 403 here means something unrelated
+   * (a suspended installation) and is left on the generic path below.
    */
   private async mintInstallationToken(
     installationId: string,
@@ -1555,6 +1573,17 @@ export class GitHubIntegrationService {
         continue;
       }
       if (response.status === 422) {
+        if (
+          payload.message?.includes(
+            "repository that does not exist or is not accessible to the parent installation",
+          )
+        ) {
+          throw new GitHubIntegrationError(
+            GITHUB_REPOSITORY_UNAVAILABLE,
+            "The linked GitHub repository no longer exists or is no longer accessible to this installation.",
+            409,
+          );
+        }
         const permissionList = Object.entries(requestedPermissions)
           .map(([name, level]) => `${name}: ${level}`)
           .join(", ");

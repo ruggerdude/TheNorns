@@ -3,6 +3,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   GITHUB_APP_PERMISSION_MISSING,
+  GITHUB_REPOSITORY_UNAVAILABLE,
   GITHUB_TOKEN_SCOPES,
   GitHubIntegrationService,
   githubIntegrationConfigFromEnvironment,
@@ -24,6 +25,7 @@ describe.sequential("workspace GitHub integration", () => {
   let transientAccessTokenFailures = 0;
   let rejectInstallationRefresh = false;
   let deleteRepositoryStatus = 204;
+  let rejectDeleteRepositoryScope = false;
 
   beforeAll(async () => {
     pg = new PGlite();
@@ -96,6 +98,23 @@ describe.sequential("workspace GitHub integration", () => {
           return json({ message: "No server is currently available to service your request" }, 503);
         }
         expect(init?.headers).toMatchObject({ Authorization: expect.stringMatching(/^Bearer /) });
+        const body = JSON.parse(String(init?.body)) as {
+          permissions?: Record<string, string>;
+          repository_ids?: number[];
+        };
+        if (
+          rejectDeleteRepositoryScope &&
+          body.permissions?.administration === "write" &&
+          body.repository_ids?.includes(9001)
+        ) {
+          return json(
+            {
+              message:
+                "There is at least one repository that does not exist or is not accessible to the parent installation.",
+            },
+            422,
+          );
+        }
         return json({ token: "installation-token", expires_at: "2026-07-17T04:00:00Z" });
       }
       if (url.startsWith("https://api.github.com/installation/repositories")) {
@@ -243,6 +262,36 @@ describe.sequential("workspace GitHub integration", () => {
       }),
     ).resolves.toBeUndefined();
     deleteRepositoryStatus = 204;
+  });
+
+  it("retries with a one-use installation token when the repository ID is already gone", async () => {
+    const mintCount = http.mock.calls.filter(([input]) =>
+      String(input).endsWith("/app/installations/42/access_tokens"),
+    ).length;
+    rejectDeleteRepositoryScope = true;
+    try {
+      await expect(
+        service.deleteRepository({
+          installationId: "42",
+          repositoryId: "9001",
+          owner: "octocat",
+          name: "hello-world",
+        }),
+      ).resolves.toBeUndefined();
+    } finally {
+      rejectDeleteRepositoryScope = false;
+    }
+    const mintCalls = http.mock.calls.filter(([input]) =>
+      String(input).endsWith("/app/installations/42/access_tokens"),
+    );
+    expect(mintCalls).toHaveLength(mintCount + 2);
+    expect(JSON.parse(String(mintCalls.at(-2)?.[1]?.body))).toEqual({
+      permissions: { administration: "write" },
+      repository_ids: [9001],
+    });
+    expect(JSON.parse(String(mintCalls.at(-1)?.[1]?.body))).toEqual({
+      permissions: { administration: "write" },
+    });
   });
 
   it("retries a transient GitHub outage while loading repositories", async () => {
@@ -508,6 +557,29 @@ describe("insufficient GitHub App permission at token mint (E14)", () => {
       await expect(
         service.installationToken("42", GITHUB_TOKEN_SCOPES.dispatchWorkflow(90210)),
       ).rejects.toMatchObject({ code: "github_api_error" });
+    } finally {
+      await pg.close();
+    }
+  });
+
+  it("does not misreport an unavailable repository as a missing permission", async () => {
+    const { pg, service } = await serviceWithMintResponse(() =>
+      json(
+        {
+          message:
+            "There is at least one repository that does not exist or is not accessible to the parent installation.",
+        },
+        422,
+      ),
+    );
+    try {
+      await expect(
+        service.installationToken("42", GITHUB_TOKEN_SCOPES.dispatchWorkflow(90210)),
+      ).rejects.toMatchObject({
+        code: GITHUB_REPOSITORY_UNAVAILABLE,
+        status: 409,
+        message: expect.stringMatching(/no longer exists/),
+      });
     } finally {
       await pg.close();
     }
