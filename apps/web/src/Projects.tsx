@@ -335,6 +335,11 @@ interface LocalAgentDownloads {
   macos: string | null;
 }
 
+interface ProjectDeletionOptions {
+  local_folder: { available: boolean; label: string | null };
+  github_repository: { available: boolean; label: string | null };
+}
+
 function localAgentDownloads(payload: unknown): LocalAgentDownloads | null {
   if (!payload || typeof payload !== "object" || !("downloads" in payload)) return null;
   const downloads = (payload as { downloads: unknown }).downloads;
@@ -654,14 +659,30 @@ export function Projects({
   const destroyArchivedProject = async (id: string, name: string) => {
     if (!window.confirm(`Permanently delete "${name}"? This cannot be undone.`)) return;
     setArchiveBusy(id);
+    setError(null);
     try {
-      await fetch(`/api/admin/projects/${encodeURIComponent(id)}/destroy`, {
-        method: "DELETE",
-        headers: authHeaders(),
+      const options = await request<ProjectDeletionOptions>(
+        `/api/v2/projects/${encodeURIComponent(id)}/deletion-options`,
+      );
+      const deleteLocalFolder =
+        options.local_folder.available &&
+        window.confirm(
+          `Also delete the local folder${options.local_folder.label ? ` "${options.local_folder.label}"` : ""}? The files in that folder will be permanently removed.`,
+        );
+      const deleteGitHubRepository =
+        options.github_repository.available &&
+        window.confirm(
+          `Also delete the GitHub repository${options.github_repository.label ? ` "${options.github_repository.label}"` : ""}? This cannot be undone.`,
+        );
+      await requestVerb(`/api/v2/projects/${encodeURIComponent(id)}/destroy`, "DELETE", {
+        delete_local_folder: deleteLocalFolder,
+        delete_github_repository: deleteGitHubRepository,
       });
       await refreshArchived();
     } catch (caught) {
-      if (caught instanceof UnauthorizedError) onUnauthorized();
+      caught instanceof UnauthorizedError
+        ? onUnauthorized()
+        : setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setArchiveBusy(null);
     }

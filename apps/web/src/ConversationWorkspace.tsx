@@ -2630,20 +2630,25 @@ function InitialConversationMessage({
   useEffect(() => {
     if (!chat || started.current) return;
     started.current = true;
-    onStarted();
-    void chat
-      .sendMessage({
-        parts: [
-          { type: "text", text },
-          ...attachments.map((attachment) => ({
-            type: "file" as const,
-            mediaType: attachment.mime,
-            filename: attachment.filename ?? "Attachment",
-            url: `/api/v2/projects/${projectId}/attachments/${encodeURIComponent(attachment.id)}`,
-          })),
-        ],
+    // Keep the handoff state until the PM request completes. Clearing it
+    // before the runtime has accepted the text and attachments can unmount
+    // this bridge and leave a newly-created work item blank.
+    const submission = chat.sendMessage({
+      parts: [
+        { type: "text", text },
+        ...attachments.map((attachment) => ({
+          type: "file" as const,
+          mediaType: attachment.mime,
+          filename: attachment.filename ?? "Attachment",
+          url: `/api/v2/projects/${projectId}/attachments/${encodeURIComponent(attachment.id)}`,
+        })),
+      ],
+    });
+    void submission
+      .then(() => {
+        onStarted();
+        onCompleted();
       })
-      .then(onCompleted)
       .catch(() => {
         // The runtime surfaces the request error in the conversation.
       });

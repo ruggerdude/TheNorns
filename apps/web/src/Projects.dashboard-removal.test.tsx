@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type ProjectSummary, Projects } from "./Projects";
@@ -124,5 +124,46 @@ describe("project dashboard entry", () => {
     expect(screen.getByRole("link", { name: "Enter Alpha" })).toBeVisible();
     expect(screen.getByRole("link", { name: "Enter Beta" })).toBeVisible();
     expect(mock.calls.some((call) => call.method === "DELETE")).toBe(false);
+  });
+
+  it("asks whether to remove the local folder when permanently deleting an archived project", async () => {
+    mock.get("/api/admin/projects/archived", {
+      body: [{ ...alpha, archived_at: "2026-08-01T12:00:00.000Z" }],
+    });
+    mock.get(`/api/v2/projects/${alpha.id}/deletion-options`, {
+      body: {
+        project_name: alpha.name,
+        local_folder: { available: true, label: "Alpha working copy" },
+        github_repository: { available: false, label: null },
+      },
+    });
+    mock.del(`/api/v2/projects/${alpha.id}/destroy`, { status: 204 });
+    const confirm = vi.spyOn(window, "confirm").mockReturnValueOnce(true).mockReturnValueOnce(true);
+    setup();
+    const user = userEvent.setup();
+
+    await user.click(screen.getByText("Archived projects"));
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
+
+    await waitFor(() =>
+      expect(
+        mock.calls.find(
+          (call) => call.method === "DELETE" && call.url === `/api/v2/projects/${alpha.id}/destroy`,
+        ),
+      ).toMatchObject({
+        body: {
+          delete_local_folder: true,
+          delete_github_repository: false,
+        },
+      }),
+    );
+    expect(confirm).toHaveBeenNthCalledWith(
+      1,
+      'Permanently delete "Alpha"? This cannot be undone.',
+    );
+    expect(confirm).toHaveBeenNthCalledWith(
+      2,
+      'Also delete the local folder "Alpha working copy"? The files in that folder will be permanently removed.',
+    );
   });
 });

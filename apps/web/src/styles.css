@@ -3679,6 +3679,8 @@ button:disabled {
 }
 .computer-project-picker {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.9fr);
+  align-items: stretch;
   gap: 0.8rem;
 }
 .computer-choice-list {
@@ -3740,6 +3742,9 @@ button:disabled {
   border: 1px dashed color-mix(in srgb, var(--accent) 34%, var(--line));
   border-radius: 12px;
   background: color-mix(in srgb, var(--accent) 4%, var(--surface));
+}
+.computer-project-picker > .alert {
+  grid-column: 1 / -1;
 }
 .folder-destination > div {
   min-width: 0;
@@ -3881,6 +3886,9 @@ button:disabled {
   .project-create-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+  .computer-project-picker {
+    grid-template-columns: 1fr;
   }
   .github-repository-summary {
     grid-template-columns: 1fr auto;
