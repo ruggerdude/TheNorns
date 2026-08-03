@@ -4,17 +4,59 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+
+env:
+  CI_CHECKPOINT_TAG: ci-last-success
+  CI_COMMIT_INTERVAL: 40
 
 permissions:
   contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 jobs:
+  commit_gate:
+    name: commit threshold
+    runs-on: ubuntu-latest
+    outputs:
+      run_full: ${{ steps.threshold.outputs.run_full }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check commits since the last successful CI run
+        id: threshold
+        shell: bash
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" != "push" ]]; then
+            echo "run_full=true" >> "$GITHUB_OUTPUT"
+            echo "Full CI requested by $GITHUB_EVENT_NAME."
+            exit 0
+          fi
+
+          checkpoint=$(git rev-parse --verify "refs/tags/${CI_CHECKPOINT_TAG}^{commit}" 2>/dev/null || true)
+          if [[ -z "$checkpoint" ]] || ! git merge-base --is-ancestor "$checkpoint" "$GITHUB_SHA"; then
+            echo "run_full=true" >> "$GITHUB_OUTPUT"
+            echo "No usable CI checkpoint found; running full CI."
+            exit 0
+          fi
+
+          commit_count=$(git rev-list --count --first-parent "${checkpoint}..${GITHUB_SHA}")
+          if (( commit_count >= CI_COMMIT_INTERVAL )); then
+            echo "run_full=true" >> "$GITHUB_OUTPUT"
+            echo "$commit_count commits have accumulated; running full CI."
+          else
+            echo "run_full=false" >> "$GITHUB_OUTPUT"
+            echo "$commit_count of $CI_COMMIT_INTERVAL commits have accumulated; skipping full CI."
+          fi
+
   quality:
     name: quality
+    needs: commit_gate
+    if: ${{ needs.commit_gate.outputs.run_full == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,6 +75,8 @@ jobs:
 
   non_server_unit:
     name: non-server unit tests
+    needs: commit_gate
+    if: ${{ needs.commit_gate.outputs.run_full == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +101,8 @@ jobs:
 
   server_unit:
     name: server tests (${{ matrix.shard }}/4)
+    needs: commit_gate
+    if: ${{ needs.commit_gate.outputs.run_full == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -94,6 +140,8 @@ jobs:
 
   e2e:
     name: e2e
+    needs: commit_gate
+    if: ${{ needs.commit_gate.outputs.run_full == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -112,8 +160,8 @@ jobs:
 
   ci:
     name: ci
-    if: ${{ always() }}
-    needs: [quality, non_server_unit, server_unit, e2e]
+    if: ${{ always() && needs.commit_gate.outputs.run_full == 'true' }}
+    needs: [commit_gate, quality, non_server_unit, server_unit, e2e]
     runs-on: ubuntu-latest
     steps:
       - name: Require every CI lane to pass
@@ -127,3 +175,22 @@ jobs:
           test "$NON_SERVER_UNIT_RESULT" = success
           test "$SERVER_UNIT_RESULT" = success
           test "$E2E_RESULT" = success
+
+  record_checkpoint:
+    name: record CI checkpoint
+    if: >-
+      needs.ci.result == 'success' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: ci
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Advance the successful CI checkpoint
+        run: |
+          git tag --force "$CI_CHECKPOINT_TAG" "$GITHUB_SHA"
+          git push --force origin "refs/tags/$CI_CHECKPOINT_TAG"
