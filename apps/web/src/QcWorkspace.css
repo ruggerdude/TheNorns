@@ -363,7 +363,7 @@
 .qc-new-decision,
 .qc-new-outcome {
   display: grid;
-  gap: 1.25rem;
+  gap: 0.9rem;
   padding: clamp(1.2rem, 3vw, 2rem);
   border: 1px solid color-mix(in srgb, var(--qc-blue) 35%, var(--line));
   border-radius: 16px;
@@ -396,11 +396,10 @@
 }
 
 .qc-new-choice {
-  display: grid;
-  min-height: 7.5rem;
-  align-content: space-between;
-  gap: 0.75rem;
-  padding: 1rem;
+  display: flex;
+  min-height: 3.25rem;
+  align-items: center;
+  padding: 0.7rem 0.9rem;
   border: 1px solid var(--line);
   border-radius: 10px;
   color: var(--ink);
@@ -437,11 +436,10 @@
   background: color-mix(in srgb, var(--danger) 7%, var(--surface));
 }
 
-.qc-new-choice span {
-  color: inherit;
-  font-size: 0.8rem;
-  line-height: 1.4;
-  opacity: 0.74;
+.qc-new-choice.is-danger.is-selected {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
 }
 
 .qc-new-individual {
@@ -495,9 +493,13 @@
 
 .qc-new-finding-main {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: start;
   gap: 0.7rem;
+}
+
+.qc-new-finding.is-selectable .qc-new-finding-main {
+  grid-template-columns: auto auto minmax(0, 1fr);
 }
 
 .qc-new-finding-main > input {
@@ -563,6 +565,49 @@
 
 .qc-new-finding details p strong {
   color: var(--ink);
+}
+
+.qc-new-finding-recommendation {
+  display: grid;
+  gap: 0.25rem;
+  margin-left: 3.45rem;
+}
+
+.qc-new-finding:not(.is-selectable) .qc-new-finding-recommendation {
+  margin-left: 4.6rem;
+}
+
+.qc-new-finding-recommendation > strong {
+  color: var(--ink-muted);
+  font-size: 0.74rem;
+}
+
+.qc-new-finding-recommendation > p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.qc-new-triage-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-bottom: 0.9rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.qc-new-stop-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.55rem;
+}
+
+.qc-new-selection-note {
+  margin: 0;
+  color: var(--danger);
+  font-size: 0.82rem;
 }
 
 .qc-new-decision-bar {
@@ -648,28 +693,6 @@
   gap: 1rem;
 }
 
-.qc-new-stop {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 0.65rem;
-  padding-top: 1rem;
-  border-top: 1px solid var(--line);
-}
-
-.qc-new-stop > div {
-  display: grid;
-  min-width: 0;
-  margin-right: auto;
-  gap: 0.15rem;
-}
-
-.qc-new-stop p {
-  margin: 0;
-  color: var(--ink-muted);
-  font-size: 0.8rem;
-}
-
 .qc-new-record dl {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -702,7 +725,6 @@
   overflow-y: auto;
 }
 
-.qc-new-transcript > summary,
 .qc-new-history > summary {
   width: fit-content;
   color: var(--ink);
@@ -749,34 +771,6 @@
   color: var(--ink);
 }
 
-.qc-new-transcript ol {
-  display: grid;
-  gap: 0.5rem;
-  margin: 0.75rem 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.qc-new-transcript li {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 0.15rem 0.55rem;
-  padding: 0.75rem;
-  border-left: 2px solid var(--line-strong);
-  background: var(--surface-2);
-}
-
-.qc-new-transcript li > span {
-  color: var(--ink-muted);
-}
-
-.qc-new-transcript li > p {
-  grid-column: 1 / -1;
-  margin: 0;
-  color: var(--ink);
-  white-space: pre-wrap;
-}
-
 @media (max-width: 48rem) {
   .qc-new-workspace {
     width: min(100% - 1.25rem, 72rem);
@@ -794,7 +788,7 @@
   }
 
   .qc-new-choice {
-    min-height: 5.5rem;
+    min-height: 3rem;
   }
 
   .qc-new-stage-rail strong {
@@ -805,21 +799,26 @@
     justify-content: center;
   }
 
-  .qc-new-finding-main {
+  .qc-new-finding.is-selectable .qc-new-finding-main {
     grid-template-columns: auto minmax(0, 1fr);
   }
 
-  .qc-new-severity {
+  .qc-new-finding.is-selectable .qc-new-severity {
     grid-column: 2;
     grid-row: 1;
     width: fit-content;
   }
 
-  .qc-new-finding-main > div {
+  .qc-new-finding.is-selectable .qc-new-finding-main > div {
     grid-column: 2;
   }
 
   .qc-new-finding details {
+    margin-left: 2rem;
+  }
+
+  .qc-new-finding-recommendation,
+  .qc-new-finding:not(.is-selectable) .qc-new-finding-recommendation {
     margin-left: 2rem;
   }
 
@@ -834,13 +833,10 @@
     justify-self: stretch;
   }
 
-  .qc-new-stop {
+  .qc-new-triage-actions,
+  .qc-new-stop-actions {
     align-items: stretch;
     flex-direction: column;
-  }
-
-  .qc-new-stop > div {
-    margin: 0 0 0.25rem;
   }
 }
 

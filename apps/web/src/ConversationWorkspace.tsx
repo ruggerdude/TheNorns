@@ -4096,6 +4096,7 @@ function ConversationThread({
       review: V2ConversationPlanReviewT,
       apiCall: () => Promise<T>,
       onSuccess?: (result: T) => void,
+      onStale?: () => void,
     ): Promise<void> => {
       if (reviewBusyId !== null) return;
       setReviewBusyId(review.id);
@@ -4122,6 +4123,21 @@ function ConversationThread({
       } catch (caught) {
         if (caught instanceof UnauthorizedError) {
           onUnauthorized();
+          return;
+        }
+        const staleReviewState =
+          caught instanceof ApiError &&
+          caught.code === "invalid_plan_state" &&
+          /not awaiting human (?:input|review)/i.test(caught.message);
+        if (staleReviewState) {
+          onStale?.();
+          setReviewErrors((current) => {
+            if (!current.has(review.id)) return current;
+            const next = new Map(current);
+            next.delete(review.id);
+            return next;
+          });
+          onRefresh();
           return;
         }
         const capBlocked = caught instanceof ApiError && caught.code === "round_cap_requires_raise";
@@ -4292,8 +4308,10 @@ function ConversationThread({
     (
       review: V2ConversationPlanReviewT,
       decisions: Record<string, "accept" | "reject">,
-    ): Promise<void> =>
-      runReviewAction(
+    ): Promise<void> => {
+      const clearTriageKey = () =>
+        clearDurableRequestKey("qc-triage", review.id, reviewRecoveryKeys.current);
+      return runReviewAction(
         review,
         () => {
           const key = durableRequestKey("qc-triage", review.id, reviewRecoveryKeys.current);
@@ -4309,8 +4327,10 @@ function ConversationThread({
             },
           );
         },
-        () => clearDurableRequestKey("qc-triage", review.id, reviewRecoveryKeys.current),
-      ),
+        clearTriageKey,
+        clearTriageKey,
+      );
+    },
     [detail.conversation.id, detail.work_item.id, detail.work_item.project_id, runReviewAction],
   );
 

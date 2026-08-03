@@ -6223,6 +6223,70 @@ describe("conversation workspace", () => {
     expect(screen.getByRole("button", { name: /Accept none/ })).toBeInTheDocument();
   });
 
+  it("refreshes a stale QC decision instead of showing the raw state race", async () => {
+    const awaitingDecision = planReview({
+      status: "awaiting_human",
+      qc_mode: "gated_when_contested",
+      paused_checkpoint: "after_review",
+      paused_at_round: 1,
+      rounds_completed: 1,
+      completed_at: null,
+      dispositions: [],
+    });
+    const running = planReview({
+      status: "running",
+      qc_mode: "gated_when_contested",
+      paused_checkpoint: null,
+      paused_at_round: null,
+      rounds_completed: 1,
+      completed_at: null,
+      dispositions: [],
+    });
+    let detailCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (
+          url.endsWith(`/conversations/${conversationId}`) &&
+          (!init?.method || init.method === "GET")
+        ) {
+          detailCalls += 1;
+          return detailResponse([], null, null, {
+            reviews: [detailCalls === 1 ? awaitingDecision : running],
+          });
+        }
+        if (
+          url.endsWith(`/plan-reviews/${awaitingDecision.id}/resume`) &&
+          init?.method === "POST"
+        ) {
+          return Response.json(
+            {
+              error: "invalid_plan_state",
+              message: `review "${awaitingDecision.id}" is not awaiting human input`,
+            },
+            { status: 409 },
+          );
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    await userEvent.click(await screen.findByRole("button", { name: "Send to PM" }));
+    await waitFor(() => expect(detailCalls).toBeGreaterThan(1));
+    expect(screen.queryByText(/not awaiting human input/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send to PM" })).not.toBeInTheDocument();
+  });
+
   it("never offers a qc_interim plan version as the default target for mockups", async () => {
     const human = planVersion();
     const interim = planVersion({

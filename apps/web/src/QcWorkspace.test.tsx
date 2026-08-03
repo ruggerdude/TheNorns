@@ -100,7 +100,7 @@ function review(overrides: Partial<V2ConversationPlanReviewT> = {}): V2Conversat
   });
 }
 
-function renderWorkspace(current = review()) {
+function renderWorkspace(current = review(), error?: string) {
   const onTriage = vi.fn().mockResolvedValue(undefined);
   const onContinueWithoutQc = vi.fn().mockResolvedValue(undefined);
   render(
@@ -110,6 +110,7 @@ function renderWorkspace(current = review()) {
       history={[]}
       actions={{}}
       busy={false}
+      error={error}
       onTriage={onTriage}
       onResume={vi.fn().mockResolvedValue(undefined)}
       onAdjudicate={vi.fn().mockResolvedValue(undefined)}
@@ -130,18 +131,38 @@ describe("QcWorkspace", () => {
     expect(
       screen.getByRole("heading", { name: "Which findings should the PM act on?" }),
     ).toBeVisible();
-    expect(screen.getByRole("button", { name: /Accept all 2/ })).toBeVisible();
-    expect(screen.getByRole("button", { name: /Choose individually/ })).toBeVisible();
-    expect(screen.getByRole("button", { name: /Accept none/ })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Accept all 2" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Choose individually" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Accept none" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Send to PM" })).toBeVisible();
+    expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
+    expect(screen.getByText("Choose and document a deployment target.")).toBeVisible();
+    expect(screen.queryByText("YOUR DECISION")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Nothing goes back to the planning manager/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Review record")).not.toBeInTheDocument();
+    expect(screen.queryByText("Need to stop?")).not.toBeInTheDocument();
     expect(screen.queryByText("Plan with PM")).not.toBeInTheDocument();
     expect(screen.queryByText(/No planning manager response/)).not.toBeInTheDocument();
   });
 
+  it("waits for Send to PM after accepting every finding", () => {
+    const { onTriage } = renderWorkspace();
+    fireEvent.click(screen.getByRole("button", { name: "Accept all 2" }));
+    expect(onTriage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Send to PM" }));
+    expect(onTriage).toHaveBeenCalledWith(review(), {
+      "finding-1": "accept",
+      "finding-2": "accept",
+    });
+  });
+
   it("sends only the selected findings to the planning manager", () => {
     const { onTriage } = renderWorkspace();
-    fireEvent.click(screen.getByRole("button", { name: /Choose individually/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose individually" }));
+    expect(screen.getByRole("button", { name: "Accept all 2" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Back" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("checkbox", { name: /Accuracy tolerance/ }));
-    const decision = screen.getByRole("button", { name: "Send 1 to PM" });
+    const decision = screen.getByRole("button", { name: "Send to PM" });
     fireEvent.click(decision);
     expect(onTriage).toHaveBeenCalledWith(review(), {
       "finding-1": "accept",
@@ -149,12 +170,65 @@ describe("QcWorkspace", () => {
     });
   });
 
-  it("requires confirmation before overriding every finding", () => {
+  it("waits for an explicit action before overriding every finding", () => {
     const { onContinueWithoutQc } = renderWorkspace();
-    fireEvent.click(screen.getByRole("button", { name: /Accept none/ }));
-    const alert = screen.getByRole("alert");
-    fireEvent.click(within(alert).getByRole("button", { name: "Reject all and keep plan" }));
+    fireEvent.click(screen.getByRole("button", { name: "Accept none" }));
+    expect(
+      within(screen.getByRole("alert")).getByText(/will not receive any findings/),
+    ).toBeVisible();
+    expect(onContinueWithoutQc).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Keep current plan" }));
     expect(onContinueWithoutQc).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not show a stale-review race as a user-facing error", () => {
+    renderWorkspace(review(), 'review "review-1" is not awaiting human input');
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps internal work-plan envelopes out of the review record", () => {
+    renderWorkspace(
+      review({
+        status: "converged",
+        paused_checkpoint: null,
+        paused_at_round: null,
+        rounds_completed: 1,
+        completed_at: now,
+        dispositions: [
+          {
+            finding_id: "finding-1",
+            finding_index: 0,
+            disposition: "accept",
+            rationale: "Deployment target added.",
+            adjudication: null,
+          },
+          {
+            finding_id: "finding-2",
+            finding_index: 1,
+            disposition: "accept",
+            rationale: "Tolerance documented.",
+            adjudication: null,
+          },
+        ],
+        chat_messages: [
+          {
+            id: "message-1",
+            request_id: "request-1",
+            channel: "reviewer",
+            round: 1,
+            attempt: 1,
+            speaker: "workflow",
+            kind: "instruction",
+            content: "WORK PLAN CONTRACT ENVELOPE internal structured context",
+            error_code: null,
+            created_at: now,
+          },
+        ],
+      }),
+    );
+    fireEvent.click(screen.getByText("Review record"));
+    expect(screen.queryByText(/WORK PLAN CONTRACT ENVELOPE/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Full reviewer/)).not.toBeInTheDocument();
   });
 
   it("triages only the findings from the paused reviewer round", () => {
@@ -211,12 +285,12 @@ describe("QcWorkspace", () => {
     });
     const { onTriage } = renderWorkspace(current);
 
-    fireEvent.click(screen.getByRole("button", { name: /Choose individually/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Choose individually" }));
     expect(
       screen.queryByRole("checkbox", { name: /Deployment target is undefined/ }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: /Accuracy tolerance is unclear/ })).toBeChecked();
-    fireEvent.click(screen.getByRole("button", { name: "Send 1 to PM" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send to PM" }));
 
     expect(onTriage).toHaveBeenCalledWith(current, { "finding-2": "accept" });
   });

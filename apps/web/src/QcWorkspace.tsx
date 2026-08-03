@@ -418,15 +418,20 @@ function FindingRow({
   selected,
   onSelected,
   response,
+  showRecommendation = false,
 }: {
   finding: V2ConversationPlanReviewFindingT;
   selectable: boolean;
   selected: boolean;
   onSelected: (selected: boolean) => void;
   response?: { disposition: "accept" | "rebut"; rationale: string } | null;
+  showRecommendation?: boolean;
 }): React.ReactElement {
   return (
-    <li className="qc-new-finding" data-severity={finding.severity}>
+    <li
+      className={`qc-new-finding${selectable ? " is-selectable" : ""}`}
+      data-severity={finding.severity}
+    >
       <div className="qc-new-finding-main">
         {selectable ? (
           <input
@@ -442,10 +447,17 @@ function FindingRow({
           <small>{finding.module_id ? `Plan area · ${finding.module_id}` : "Plan-wide"}</small>
         </div>
       </div>
-      <details>
-        <summary>Recommendation</summary>
-        <p>{finding.recommendation}</p>
-      </details>
+      {showRecommendation ? (
+        <div className="qc-new-finding-recommendation">
+          <strong>Recommendation</strong>
+          <p>{finding.recommendation}</p>
+        </div>
+      ) : (
+        <details>
+          <summary>Recommendation</summary>
+          <p>{finding.recommendation}</p>
+        </details>
+      )}
       {response ? (
         <details>
           <summary>PM response</summary>
@@ -459,20 +471,47 @@ function FindingRow({
   );
 }
 
+function QcStopActions({
+  review,
+  busy,
+  onCancel,
+  onStopAll,
+}: {
+  review: V2ConversationPlanReviewT;
+  busy: boolean;
+  onCancel: QcWorkspaceProps["onCancel"];
+  onStopAll: QcWorkspaceProps["onStopAll"];
+}): React.ReactElement {
+  return (
+    <div className="qc-new-stop-actions" aria-label="Stop plan work">
+      <Button variant="danger" disabled={busy} onClick={() => void onStopAll(review)}>
+        Stop QC and all agent work
+      </Button>
+      <Button disabled={busy} onClick={() => void onCancel(review, "Stopped by the user.")}>
+        Stop QC only
+      </Button>
+    </div>
+  );
+}
+
 function FindingTriage({
   review,
   findings,
   busy,
   onTriage,
   onRejectAll,
+  onCancel,
+  onStopAll,
 }: {
   review: V2ConversationPlanReviewT;
   findings: V2ConversationPlanReviewFindingT[];
   busy: boolean;
   onTriage: QcWorkspaceProps["onTriage"];
   onRejectAll: () => Promise<void>;
+  onCancel: QcWorkspaceProps["onCancel"];
+  onStopAll: QcWorkspaceProps["onStopAll"];
 }): React.ReactElement {
-  const [mode, setMode] = useState<"choice" | "individual" | "reject">("choice");
+  const [mode, setMode] = useState<"all" | "individual" | "none">("all");
   const [selected, setSelected] = useState(() => new Set(findings.map((finding) => finding.id)));
   const selectedCount = selected.size;
   const decisions = (accepted: Set<string>) =>
@@ -483,115 +522,93 @@ function FindingTriage({
   return (
     <section className="qc-new-decision" aria-labelledby="qc-triage-title">
       <div className="qc-new-decision-copy">
-        <span>YOUR DECISION</span>
         <h2 id="qc-triage-title">Which findings should the PM act on?</h2>
-        <p>
-          Nothing goes back to the planning manager until you choose. Rejected findings remain in
-          the review record but will not be used as revision instructions.
-        </p>
       </div>
 
-      {mode === "choice" ? (
-        <div className="qc-new-choice-grid">
-          <button
-            type="button"
-            className="qc-new-choice is-primary"
-            disabled={busy}
+      <div className="qc-new-choice-grid">
+        <button
+          type="button"
+          className={`qc-new-choice${mode === "all" ? " is-primary" : ""}`}
+          aria-pressed={mode === "all"}
+          disabled={busy}
+          onClick={() => {
+            setMode("all");
+            setSelected(new Set(findings.map((finding) => finding.id)));
+          }}
+        >
+          <strong>Accept all {findings.length}</strong>
+        </button>
+        <button
+          type="button"
+          className={`qc-new-choice${mode === "individual" ? " is-primary" : ""}`}
+          aria-pressed={mode === "individual"}
+          disabled={busy}
+          onClick={() => setMode("individual")}
+        >
+          <strong>Choose individually</strong>
+        </button>
+        <button
+          type="button"
+          className={`qc-new-choice is-danger${mode === "none" ? " is-selected" : ""}`}
+          aria-pressed={mode === "none"}
+          disabled={busy}
+          onClick={() => setMode("none")}
+        >
+          <strong>Accept none</strong>
+        </button>
+      </div>
+
+      <div className="qc-new-triage-actions">
+        {mode === "none" ? (
+          <Button variant="danger" disabled={busy} onClick={() => void onRejectAll()}>
+            {busy ? "Recording…" : "Keep current plan"}
+          </Button>
+        ) : (
+          <Button
+            variant="primary"
+            disabled={busy || (mode === "individual" && selectedCount === 0)}
             onClick={() =>
-              void onTriage(review, decisions(new Set(findings.map((item) => item.id))))
+              void onTriage(
+                review,
+                decisions(
+                  mode === "all" ? new Set(findings.map((finding) => finding.id)) : selected,
+                ),
+              )
             }
           >
-            <strong>Accept all {findings.length}</strong>
-            <span>Send every finding to the PM for revision</span>
-          </button>
-          <button
-            type="button"
-            className="qc-new-choice"
-            disabled={busy}
-            onClick={() => setMode("individual")}
-          >
-            <strong>Choose individually</strong>
-            <span>Accept only the findings you agree with</span>
-          </button>
-          <button
-            type="button"
-            className="qc-new-choice is-danger"
-            disabled={busy}
-            onClick={() => setMode("reject")}
-          >
-            <strong>Accept none</strong>
-            <span>Keep the current plan and override this review</span>
-          </button>
-        </div>
+            {busy ? "Sending…" : "Send to PM"}
+          </Button>
+        )}
+        <QcStopActions review={review} busy={busy} onCancel={onCancel} onStopAll={onStopAll} />
+      </div>
+
+      {mode === "individual" && selectedCount === 0 ? (
+        <p className="qc-new-selection-note">Select at least one finding, or choose Accept none.</p>
       ) : null}
 
-      {mode === "individual" ? (
-        <div className="qc-new-individual">
-          <header>
-            <div>
-              <strong>{selectedCount} accepted</strong>
-              <span>{findings.length - selectedCount} rejected</span>
-            </div>
-            <button type="button" onClick={() => setMode("choice")}>
-              Back
-            </button>
-          </header>
-          <ul className="qc-new-findings">
-            {findings.map((finding) => (
-              <FindingRow
-                key={finding.id}
-                finding={finding}
-                selectable
-                selected={selected.has(finding.id)}
-                onSelected={(checked) =>
-                  setSelected((current) => {
-                    const next = new Set(current);
-                    if (checked) next.add(finding.id);
-                    else next.delete(finding.id);
-                    return next;
-                  })
-                }
-              />
-            ))}
-          </ul>
-          <div className="qc-new-decision-bar">
-            <span>
-              {selectedCount > 0
-                ? `${selectedCount} finding${selectedCount === 1 ? "" : "s"} will be sent to the PM`
-                : "Choose at least one finding, or accept none"}
-            </span>
-            {selectedCount > 0 ? (
-              <Button
-                variant="primary"
-                disabled={busy}
-                onClick={() => void onTriage(review, decisions(selected))}
-              >
-                {busy ? "Sending…" : `Send ${selectedCount} to PM`}
-              </Button>
-            ) : (
-              <Button variant="danger" disabled={busy} onClick={() => setMode("reject")}>
-                Accept none
-              </Button>
-            )}
-          </div>
-        </div>
-      ) : null}
+      <ul className="qc-new-findings">
+        {findings.map((finding) => (
+          <FindingRow
+            key={finding.id}
+            finding={finding}
+            selectable={mode === "individual"}
+            selected={mode === "all" || selected.has(finding.id)}
+            onSelected={(checked) =>
+              setSelected((current) => {
+                const next = new Set(current);
+                if (checked) next.add(finding.id);
+                else next.delete(finding.id);
+                return next;
+              })
+            }
+            showRecommendation
+          />
+        ))}
+      </ul>
 
-      {mode === "reject" ? (
+      {mode === "none" ? (
         <div className="qc-new-confirm" role="alert">
-          <strong>Keep the original plan?</strong>
-          <p>
-            This rejects all {findings.length} findings and records QC as overridden. The planning
-            manager will not revise the plan.
-          </p>
-          <div>
-            <Button disabled={busy} onClick={() => setMode("choice")}>
-              Go back
-            </Button>
-            <Button variant="danger" disabled={busy} onClick={() => void onRejectAll()}>
-              {busy ? "Recording…" : "Reject all and keep plan"}
-            </Button>
-          </div>
+          <strong>The PM will not receive any findings.</strong>
         </div>
       ) : null}
     </section>
@@ -705,6 +722,9 @@ export function QcWorkspace({
   const currentFindings = useMemo(() => pausedRoundFindings(review, findings), [review, findings]);
   const round = currentRound(review);
   const terminal = TERMINAL.has(review.status);
+  const awaitingFindingDecision =
+    review.status === "awaiting_human" && review.paused_checkpoint === "after_review";
+  const visibleError = error && !/not awaiting human input/i.test(error) ? error : null;
   const accepted = (review.finding_decisions ?? []).filter(
     (item) => item.decision === "accept",
   ).length;
@@ -762,6 +782,8 @@ export function QcWorkspace({
           busy={busy}
           onTriage={onTriage}
           onRejectAll={() => onContinueWithoutQc(review)}
+          onCancel={onCancel}
+          onStopAll={onStopAll}
         />
       ) : null}
 
@@ -856,122 +878,88 @@ export function QcWorkspace({
         </section>
       ) : null}
 
-      {error ? (
+      {!terminal && !awaitingFindingDecision ? (
+        <QcStopActions review={review} busy={busy} onCancel={onCancel} onStopAll={onStopAll} />
+      ) : null}
+
+      {visibleError ? (
         <output className="qc-new-error" role="alert">
-          {error}
+          {visibleError}
         </output>
       ) : null}
 
-      <details className="qc-new-record">
-        <summary>Review record</summary>
-        <div>
-          <dl>
-            <div>
-              <dt>Plan</dt>
-              <dd>Version {planVersion?.version ?? review.plan_version_id}</dd>
-            </div>
-            <div>
-              <dt>Attempt</dt>
-              <dd>{review.attempt_number}</dd>
-            </div>
-            <div>
-              <dt>Accepted</dt>
-              <dd>{accepted}</dd>
-            </div>
-            <div>
-              <dt>Prior attempts</dt>
-              <dd>{history.length}</dd>
-            </div>
-          </dl>
-          {findings.length > 0 ? (
-            <ul className="qc-new-findings is-readonly">
-              {findings.map((finding) => (
-                <FindingRow
-                  key={finding.id}
-                  finding={finding}
-                  selectable={false}
-                  selected={false}
-                  onSelected={() => undefined}
-                  response={
-                    review.dispositions.find((item) => item.finding_id === finding.id) ?? null
-                  }
-                />
-              ))}
-            </ul>
-          ) : (
-            <p>No retained findings.</p>
-          )}
-          {review.chat_messages.length > 0 ? (
-            <details className="qc-new-transcript">
-              <summary>
-                Full reviewer ↔ PM transcript · {review.chat_messages.length}{" "}
-                {review.chat_messages.length === 1 ? "message" : "messages"}
-              </summary>
-              <ol>
-                {review.chat_messages.map((message) => (
-                  <li key={message.id}>
-                    <strong>
-                      {message.speaker === "pm"
-                        ? "Planning manager"
-                        : message.speaker === "reviewer"
-                          ? "Reviewer"
-                          : message.speaker === "human"
-                            ? "You"
-                            : "QC workflow"}
-                    </strong>
-                    <span>Round {message.round}</span>
-                    <p>{message.content}</p>
-                  </li>
-                ))}
-              </ol>
-            </details>
-          ) : null}
-          {history.length > 0 ? (
-            <details className="qc-new-history">
-              <summary>Previous attempts · {history.length}</summary>
-              <ol>
-                {history.map((pastReview) => {
-                  const pastFindings = visibleFindings(pastReview);
-                  return (
-                    <li key={pastReview.id}>
-                      <header>
-                        <strong>Attempt {pastReview.attempt_number}</strong>
-                        <span>{pastReview.status.replaceAll("_", " ")}</span>
-                      </header>
-                      <p>
-                        {pastReview.rounds_completed} of {pastReview.max_rounds} rounds completed
-                      </p>
-                      {pastFindings.length > 0 ? (
-                        <ul>
-                          {pastFindings.map((finding) => (
-                            <li key={finding.id}>{finding.finding}</li>
-                          ))}
-                        </ul>
-                      ) : (
-                        <p>No retained findings.</p>
-                      )}
-                    </li>
-                  );
-                })}
-              </ol>
-            </details>
-          ) : null}
-        </div>
-      </details>
-
-      {!terminal ? (
-        <section className="qc-new-stop" aria-label="Stop plan work">
+      {!awaitingFindingDecision ? (
+        <details className="qc-new-record">
+          <summary>Review record</summary>
           <div>
-            <strong>Need to stop?</strong>
-            <p>Stop QC alone, or stop QC and every active agent run for this project.</p>
+            <dl>
+              <div>
+                <dt>Plan</dt>
+                <dd>Version {planVersion?.version ?? review.plan_version_id}</dd>
+              </div>
+              <div>
+                <dt>Attempt</dt>
+                <dd>{review.attempt_number}</dd>
+              </div>
+              <div>
+                <dt>Accepted</dt>
+                <dd>{accepted}</dd>
+              </div>
+              <div>
+                <dt>Prior attempts</dt>
+                <dd>{history.length}</dd>
+              </div>
+            </dl>
+            {findings.length > 0 ? (
+              <ul className="qc-new-findings is-readonly">
+                {findings.map((finding) => (
+                  <FindingRow
+                    key={finding.id}
+                    finding={finding}
+                    selectable={false}
+                    selected={false}
+                    onSelected={() => undefined}
+                    response={
+                      review.dispositions.find((item) => item.finding_id === finding.id) ?? null
+                    }
+                  />
+                ))}
+              </ul>
+            ) : (
+              <p>No retained findings.</p>
+            )}
+            {history.length > 0 ? (
+              <details className="qc-new-history">
+                <summary>Previous attempts · {history.length}</summary>
+                <ol>
+                  {history.map((pastReview) => {
+                    const pastFindings = visibleFindings(pastReview);
+                    return (
+                      <li key={pastReview.id}>
+                        <header>
+                          <strong>Attempt {pastReview.attempt_number}</strong>
+                          <span>{pastReview.status.replaceAll("_", " ")}</span>
+                        </header>
+                        <p>
+                          {pastReview.rounds_completed} of {pastReview.max_rounds} rounds completed
+                        </p>
+                        {pastFindings.length > 0 ? (
+                          <ul>
+                            {pastFindings.map((finding) => (
+                              <li key={finding.id}>{finding.finding}</li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <p>No retained findings.</p>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ol>
+              </details>
+            ) : null}
           </div>
-          <Button variant="danger" disabled={busy} onClick={() => void onStopAll(review)}>
-            Stop QC and all agent work
-          </Button>
-          <Button disabled={busy} onClick={() => void onCancel(review, "Stopped by the user.")}>
-            Stop QC only
-          </Button>
-        </section>
+        </details>
       ) : null}
     </main>
   );
