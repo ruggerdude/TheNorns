@@ -86,6 +86,14 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     render(<App />);
     await openProjectFromPortfolio();
 
+    const workspaceHeader = document.querySelector(".workspace-header");
+    if (!(workspaceHeader instanceof HTMLElement)) throw new Error("Workspace header not found");
+    expect(within(workspaceHeader).getByRole("heading", { name: projectAlpha.name })).toBeVisible();
+    expect(within(workspaceHeader).queryByText(/Coordinator|Reviewer|GitHub/i)).toBeNull();
+    expect(screen.getByRole("region", { name: "Project details" })).toHaveTextContent(
+      /Coordinator|Reviewer/i,
+    );
+
     // Overview is the default tab, and it's the one already marked "on".
     expect(await screen.findByRole("button", { name: "Overview" })).toHaveClass("on");
     expect(screen.getByRole("button", { name: "Usage" })).toBeInTheDocument();
@@ -536,7 +544,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
       within(settings)
         .getAllByRole("heading", { level: 2 })
         .map((heading) => heading.textContent),
-    ).toEqual(["Reviewer cadence", "Timing and content", "NORN.md", "Remove project"]);
+    ).toEqual(["QC review", "Timing and content", "NORN.md", "Remove project"]);
     await user.type(
       await screen.findByLabelText("Project rules"),
       "# Rules\n\n- Preserve API compatibility.",

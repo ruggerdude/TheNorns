@@ -463,6 +463,11 @@ export class WorkspaceRegistry {
           operation: request.operation,
           status: "not_found",
         };
+      if (request.operation === "delete") {
+        return this.deleteRepositoryFolder(request.workspace_id ?? "", request.repository_id ?? "")
+          ? { request_id: request.request_id, operation: "delete", status: "ok" }
+          : { request_id: request.request_id, operation: "delete", status: "not_found" };
+      }
       if (request.operation === "browse") {
         const path = request.entry_id
           ? this.handlePath(workspace, request.entry_id, "folder")
@@ -517,6 +522,40 @@ export class WorkspaceRegistry {
     } catch {
       return undefined;
     }
+  }
+
+  /** Permanently removes one explicitly registered repository and its local authorization. */
+  private deleteRepositoryFolder(workspaceId: string, repositoryId: string): boolean {
+    return this.withMutationLock(() => {
+      this.reloadOrRecover();
+      const repository = this.state.repositories.find(
+        (entry) => entry.workspace_id === workspaceId && entry.repository_id === repositoryId,
+      );
+      const workspace = this.state.workspaces.find((entry) => entry.workspace_id === workspaceId);
+      if (!repository || !workspace) return false;
+
+      const stat = lstatSync(repository.repository_path);
+      if (stat.isSymbolicLink() || !stat.isDirectory()) return false;
+      const physical = realpathSync(repository.repository_path);
+      if (!this.contains(workspace.root_path, physical) || this.gitMetadata(physical) === null) {
+        return false;
+      }
+
+      rmSync(physical, { recursive: true, force: false });
+      this.state.repositories = this.state.repositories.filter(
+        (entry) => entry.workspace_id !== workspaceId || entry.repository_id !== repositoryId,
+      );
+      if (!this.state.repositories.some((entry) => entry.workspace_id === workspaceId)) {
+        this.state.workspaces = this.state.workspaces.filter(
+          (entry) => entry.workspace_id !== workspaceId,
+        );
+      }
+      for (const [id, handle] of this.handles) {
+        if (handle.workspace_id === workspaceId) this.handles.delete(id);
+      }
+      this.persist();
+      return true;
+    });
   }
 
   /** Exact local values that must be stripped from any cloud-bound text. */

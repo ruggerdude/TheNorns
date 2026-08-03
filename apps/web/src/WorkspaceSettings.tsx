@@ -1,9 +1,11 @@
-import { Suspense, lazy, useEffect, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import "./UtilitySurfaces.css";
 import { QC_MODE_OPTIONS, type QcModeT } from "./Projects";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 import { Alert, Button, Field, Select, Spinner, TextArea } from "./ui";
 import {
+  UPDATE_DETAIL_OPTIONS,
+  UPDATE_INTERVAL_OPTIONS,
   type UpdateDetailLevel,
   type UpdateIntervalSeconds,
   type UpdatePreferences,
@@ -108,10 +110,46 @@ async function archiveProjectRequest(projectId: string): Promise<void> {
   }
 }
 
-async function deleteProjectRequest(projectId: string): Promise<void> {
+interface ProjectDeletionOptionsDto {
+  project_name: string;
+  local_folder: { available: boolean; label: string | null };
+  github_repository: { available: boolean; label: string | null };
+}
+
+interface ProjectDeletionSelection {
+  delete_local_folder: boolean;
+  delete_github_repository: boolean;
+}
+
+async function projectDeletionOptionsRequest(
+  projectId: string,
+): Promise<ProjectDeletionOptionsDto> {
+  const response = await fetch(
+    `/api/v2/projects/${encodeURIComponent(projectId)}/deletion-options`,
+    { headers: authHeaders() },
+  );
+  if (response.status === 401) throw new UnauthorizedError();
+  const body = (await response.json().catch(() => ({}))) as Partial<ProjectDeletionOptionsDto> & {
+    detail?: string;
+    message?: string;
+  };
+  if (!response.ok) {
+    throw new ApiError(
+      body.message ?? body.detail ?? `request failed: ${response.status}`,
+      response.status,
+    );
+  }
+  return body as ProjectDeletionOptionsDto;
+}
+
+async function deleteProjectRequest(
+  projectId: string,
+  selection: ProjectDeletionSelection,
+): Promise<void> {
   const response = await fetch(`/api/v2/projects/${encodeURIComponent(projectId)}/destroy`, {
     method: "DELETE",
-    headers: authHeaders(),
+    headers: authHeaders(true),
+    body: JSON.stringify(selection),
   });
   if (response.status === 401) throw new UnauthorizedError();
   if (!response.ok) {
@@ -125,18 +163,6 @@ async function deleteProjectRequest(projectId: string): Promise<void> {
     );
   }
 }
-
-const intervalOptions: Array<{ value: UpdateIntervalSeconds; label: string }> = [
-  { value: 60, label: "Every minute" },
-  { value: 300, label: "Every 5 minutes" },
-  { value: 900, label: "Every 15 minutes" },
-];
-
-const detailOptions: Array<{ value: UpdateDetailLevel; label: string }> = [
-  { value: "summary", label: "Progress summary" },
-  { value: "detailed", label: "Detailed progress, costs, and completions" },
-  { value: "attention", label: "Only blockers and decisions" },
-];
 
 function PreferenceFields({
   value,
@@ -159,7 +185,7 @@ function PreferenceFields({
             })
           }
         >
-          {intervalOptions.map((option) => (
+          {UPDATE_INTERVAL_OPTIONS.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
@@ -173,7 +199,7 @@ function PreferenceFields({
             onChange({ ...value, detailLevel: event.target.value as UpdateDetailLevel })
           }
         >
-          {detailOptions.map((option) => (
+          {UPDATE_DETAIL_OPTIONS.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
@@ -210,6 +236,14 @@ export function WorkspaceSettings({
   const [error, setError] = useState<string | null>(null);
   const [archivingProject, setArchivingProject] = useState(false);
   const [deletingProject, setDeletingProject] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deletionOptions, setDeletionOptions] = useState<ProjectDeletionOptionsDto | null>(null);
+  const [deleteLocalFolder, setDeleteLocalFolder] = useState(false);
+  const [deleteGitHubRepository, setDeleteGitHubRepository] = useState(false);
+
+  const onUnauthorizedRef = useRef(onUnauthorized);
+  onUnauthorizedRef.current = onUnauthorized;
+  const handleUnauthorized = useCallback(() => onUnauthorizedRef.current(), []);
 
   const [qcSettings, setQcSettings] = useState<PlanningQcSettingsDto | null>(null);
   const [qcMode, setQcMode] = useState<QcModeT>("automatic");
@@ -231,13 +265,13 @@ export function WorkspaceSettings({
       })
       .catch((caught) => {
         if (!current) return;
-        if (caught instanceof UnauthorizedError) onUnauthorized();
+        if (caught instanceof UnauthorizedError) handleUnauthorized();
         else setError(caught instanceof Error ? caught.message : String(caught));
       });
     return () => {
       current = false;
     };
-  }, [projectId, onUnauthorized]);
+  }, [projectId, handleUnauthorized]);
 
   useEffect(() => {
     let current = true;
@@ -251,13 +285,13 @@ export function WorkspaceSettings({
       })
       .catch((caught) => {
         if (!current) return;
-        if (caught instanceof UnauthorizedError) onUnauthorized();
+        if (caught instanceof UnauthorizedError) handleUnauthorized();
         else setError(caught instanceof Error ? caught.message : String(caught));
       });
     return () => {
       current = false;
     };
-  }, [projectId, onUnauthorized]);
+  }, [projectId, handleUnauthorized]);
 
   const saveQcSettings = async () => {
     setQcSaving(true);
@@ -273,7 +307,7 @@ export function WorkspaceSettings({
       setQcSettings(body);
       setQcSaved(true);
     } catch (caught) {
-      if (caught instanceof UnauthorizedError) onUnauthorized();
+      if (caught instanceof UnauthorizedError) handleUnauthorized();
       else setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setQcSaving(false);
@@ -288,7 +322,7 @@ export function WorkspaceSettings({
       setRules(next);
       setRulesDraft(next.content);
     } catch (caught) {
-      if (caught instanceof UnauthorizedError) onUnauthorized();
+      if (caught instanceof UnauthorizedError) handleUnauthorized();
       else setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setRulesSaving(false);
@@ -315,26 +349,40 @@ export function WorkspaceSettings({
       await archiveProjectRequest(projectId);
       onProjectArchived(projectId);
     } catch (caught) {
-      if (caught instanceof UnauthorizedError) onUnauthorized();
+      if (caught instanceof UnauthorizedError) handleUnauthorized();
       else setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setArchivingProject(false);
     }
   };
 
-  const deleteProject = async () => {
-    const confirmed = window.confirm(
-      `Permanently delete "${projectName}"?\n\nThis cannot be undone. All project data including plans, phases, and history will be permanently removed.`,
-    );
-    if (!confirmed) return;
+  const openDeleteDialog = async () => {
+    setDeleteDialogOpen(true);
+    setDeletionOptions(null);
+    setDeleteLocalFolder(false);
+    setDeleteGitHubRepository(false);
+    setError(null);
+    try {
+      setDeletionOptions(await projectDeletionOptionsRequest(projectId));
+    } catch (caught) {
+      if (caught instanceof UnauthorizedError) handleUnauthorized();
+      else setError(caught instanceof Error ? caught.message : String(caught));
+      setDeleteDialogOpen(false);
+    }
+  };
 
+  const deleteProject = async () => {
     setDeletingProject(true);
     setError(null);
     try {
-      await deleteProjectRequest(projectId);
+      await deleteProjectRequest(projectId, {
+        delete_local_folder: deleteLocalFolder,
+        delete_github_repository: deleteGitHubRepository,
+      });
+      setDeleteDialogOpen(false);
       onProjectArchived(projectId);
     } catch (caught) {
-      if (caught instanceof UnauthorizedError) onUnauthorized();
+      if (caught instanceof UnauthorizedError) handleUnauthorized();
       else setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setDeletingProject(false);
@@ -344,7 +392,7 @@ export function WorkspaceSettings({
   return (
     <div className="workspace-settings-grid" data-testid="workspace-settings">
       <Suspense fallback={<Spinner label="Loading execution target settings…" />}>
-        <ExecutionTargetSettings projectId={projectId} onUnauthorized={onUnauthorized} />
+        <ExecutionTargetSettings projectId={projectId} onUnauthorized={handleUnauthorized} />
       </Suspense>
 
       <section
@@ -355,90 +403,80 @@ export function WorkspaceSettings({
         <div className="section-head">
           <div>
             <div className="eyebrow">Quality control</div>
-            <h2 id="qc-settings-heading">Reviewer cadence</h2>
+            <h2 id="qc-settings-heading">QC review</h2>
           </div>
         </div>
         {qcSettings === null ? (
           <Spinner label="Loading QC settings…" />
         ) : (
           <>
-            <Field label="Reviewer rounds">
-              {/* QCP-14: 0 is allowed here too now — it means review is off,
+            <div className="qc-settings-fields">
+              <Field label="Reviews">
+                {/* QCP-14: 0 is allowed here too now — it means review is off,
                   matching the wizard's pre-creation control. */}
-              <div className="rounds-stepper" data-testid="qc-settings-rounds">
-                <Button
-                  type="button"
-                  className="btn-small"
-                  disabled={qcRounds <= 0}
-                  onClick={() => {
-                    setQcRounds((count) => Math.max(0, count - 1));
-                    setQcSaved(false);
-                  }}
-                  aria-label="Fewer rounds"
-                >
-                  −
-                </Button>
-                <span className="rounds-value mono">{qcRounds}</span>
-                <Button
-                  type="button"
-                  className="btn-small"
-                  disabled={qcRounds >= 5}
-                  onClick={() => {
-                    setQcRounds((count) => Math.min(5, count + 1));
-                    setQcSaved(false);
-                  }}
-                  aria-label="More rounds"
-                >
-                  +
-                </Button>
-              </div>
-              <span className="field-help">
-                {qcRounds === 0
-                  ? "0 rounds: review is off. Plans go straight through with no independent review."
-                  : `${qcRounds} review round${qcRounds === 1 ? "" : "s"} before a plan is accepted.`}
-              </span>
-            </Field>
-            <Field label="QC pause mode">
-              <Select
-                data-testid="qc-settings-mode"
-                value={qcMode}
-                onChange={(event) => {
-                  setQcMode(event.target.value as QcModeT);
-                  setQcSaved(false);
-                }}
-              >
-                {QC_MODE_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </Select>
-              <span className="field-help">
-                {QC_MODE_OPTIONS.find((option) => option.value === qcMode)?.help} No mode skips Gate
-                C — an unresolved must-fix disagreement always pauses for you. This is the project
-                default — it does not change reviews already running.
-              </span>
-            </Field>
-            <label className="debate-toggle">
-              <input
-                type="checkbox"
-                data-testid="qc-settings-rebuttals"
-                checked={qcRebuttals}
-                onChange={(event) => {
-                  setQcRebuttals(event.target.checked);
-                  setQcSaved(false);
-                }}
-              />
-              Allow unadjudicated rebuttals (discouraged)
-            </label>
-            <span className="field-help">
-              Suppresses the pause for a declared rebuttal only — a hollow-acceptance pause always
-              fires regardless of this setting.
-            </span>
+                <div className="rounds-stepper" data-testid="qc-settings-rounds">
+                  <Button
+                    type="button"
+                    className="btn-small"
+                    disabled={qcRounds <= 0}
+                    onClick={() => {
+                      setQcRounds((count) => Math.max(0, count - 1));
+                      setQcSaved(false);
+                    }}
+                    aria-label="Fewer rounds"
+                  >
+                    −
+                  </Button>
+                  <span className="rounds-value mono">{qcRounds}</span>
+                  <Button
+                    type="button"
+                    className="btn-small"
+                    disabled={qcRounds >= 5}
+                    onClick={() => {
+                      setQcRounds((count) => Math.min(5, count + 1));
+                      setQcSaved(false);
+                    }}
+                    aria-label="More rounds"
+                  >
+                    +
+                  </Button>
+                </div>
+              </Field>
+              <Field label="Pause mode">
+                <div className="qc-mode-control">
+                  <Select
+                    data-testid="qc-settings-mode"
+                    value={qcMode}
+                    disabled={qcRounds === 0}
+                    onChange={(event) => {
+                      setQcMode(event.target.value as QcModeT);
+                      setQcSaved(false);
+                    }}
+                  >
+                    {QC_MODE_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </Select>
+                  <label className="qc-inline-toggle">
+                    <input
+                      type="checkbox"
+                      data-testid="qc-settings-rebuttals"
+                      checked={qcRebuttals}
+                      disabled={qcRounds === 0}
+                      onChange={(event) => {
+                        setQcRebuttals(event.target.checked);
+                        setQcSaved(false);
+                      }}
+                    />
+                    Allow rebuttals
+                  </label>
+                </div>
+              </Field>
+            </div>
             <div className="settings-save-row">
-              <span className="muted">
-                {qcSaved ? "QC settings saved" : "Changes apply to future review rounds"}
-              </span>
+              <span className="muted">{qcSaved ? "Saved" : null}</span>
               <Button
                 variant="primary"
                 data-testid="qc-settings-save"
@@ -562,11 +600,74 @@ export function WorkspaceSettings({
         </div>
         <div className="settings-save-row">
           <span className="muted">This action is permanent and cannot be undone.</span>
-          <Button variant="danger" disabled={deletingProject} onClick={() => void deleteProject()}>
-            {deletingProject ? "Deleting…" : "Delete project"}
+          <Button
+            variant="danger"
+            disabled={deletingProject}
+            onClick={() => void openDeleteDialog()}
+          >
+            Delete project
           </Button>
         </div>
       </section>
+      {deleteDialogOpen ? (
+        <div className="confirmation-backdrop" role="presentation">
+          <dialog open className="card confirmation-dialog" aria-labelledby="delete-project-title">
+            <div>
+              <div className="eyebrow">Are you sure?</div>
+              <h2 id="delete-project-title">Delete {projectName}?</h2>
+            </div>
+            <p>This permanently deletes the project, its plans, and its history.</p>
+            {deletionOptions === null ? (
+              <Spinner label="Checking linked project files…" />
+            ) : (
+              <div className="delete-resource-options">
+                {deletionOptions.local_folder.available ? (
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={deleteLocalFolder}
+                      onChange={(event) => setDeleteLocalFolder(event.target.checked)}
+                    />
+                    <span>
+                      Delete local folder
+                      {deletionOptions.local_folder.label ? (
+                        <small>{deletionOptions.local_folder.label}</small>
+                      ) : null}
+                    </span>
+                  </label>
+                ) : null}
+                {deletionOptions.github_repository.available ? (
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={deleteGitHubRepository}
+                      onChange={(event) => setDeleteGitHubRepository(event.target.checked)}
+                    />
+                    <span>
+                      Delete GitHub repository
+                      {deletionOptions.github_repository.label ? (
+                        <small>{deletionOptions.github_repository.label}</small>
+                      ) : null}
+                    </span>
+                  </label>
+                ) : null}
+              </div>
+            )}
+            <div className="confirmation-actions">
+              <Button disabled={deletingProject} onClick={() => setDeleteDialogOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                variant="danger"
+                disabled={deletingProject || deletionOptions === null}
+                onClick={() => void deleteProject()}
+              >
+                {deletingProject ? "Deleting…" : "Yes, delete project"}
+              </Button>
+            </div>
+          </dialog>
+        </div>
+      ) : null}
       {error ? <Alert>{error}</Alert> : null}
     </div>
   );

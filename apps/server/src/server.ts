@@ -770,6 +770,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       workspacePicker: boolean;
       workspaceRepositoryInventory: boolean;
       workspaceClone: boolean;
+      workspaceDelete: boolean;
     }
   >();
   const sessionSockets = new Map<WsLike, SessionSocketBinding>();
@@ -4139,6 +4140,89 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       });
     };
 
+    interface ProjectDeletionTargets {
+      project_name: string;
+      github_installation_id: string | null;
+      github_repository_id: string | null;
+      github_owner: string | null;
+      github_name: string | null;
+      local_runner_id: string | null;
+      local_workspace_id: string | null;
+      local_repository_id: string | null;
+      local_repository_display_name: string | null;
+    }
+
+    const projectDeletionTargets = async (projectId: string): Promise<ProjectDeletionTargets> => {
+      if (options.onboarding) {
+        const row = await options.onboarding.transactions.transaction(async (sql) => {
+          const result = await sql.query<ProjectDeletionTargets>(
+            `SELECT project.name AS project_name,
+                    github.github_installation_id,
+                    github.repository_id AS github_repository_id,
+                    github.github_owner,
+                    github.github_name,
+                    local.device_id AS local_runner_id,
+                    local.workspace_id AS local_workspace_id,
+                    local.repository_id AS local_repository_id,
+                    local.repository_display_name AS local_repository_display_name
+               FROM projects project
+               LEFT JOIN LATERAL (
+                 SELECT binding.github_installation_id, binding.repository_id,
+                        binding.github_owner, binding.github_name
+                   FROM repository_bindings binding
+                  WHERE binding.project_id=project.id
+                    AND binding.binding_type='github'
+                    AND binding.status NOT IN ('revoked','disconnected')
+                  ORDER BY CASE binding.role WHEN 'remote' THEN 0 ELSE 1 END,
+                           binding.created_at, binding.id
+                  LIMIT 1
+               ) github ON true
+               LEFT JOIN LATERAL (
+                 SELECT COALESCE(registration.device_id, binding.runner_id) AS device_id,
+                        binding.workspace_id, binding.repository_id,
+                        binding.repository_display_name
+                   FROM repository_bindings binding
+                   LEFT JOIN project_device_repository_grants grant_record
+                     ON grant_record.id=binding.project_device_repository_grant_id
+                   LEFT JOIN device_repository_registrations registration
+                     ON registration.id=grant_record.repository_registration_id
+                  WHERE binding.project_id=project.id
+                    AND binding.binding_type='local_runner'
+                    AND binding.status NOT IN ('revoked','disconnected')
+                  ORDER BY CASE binding.role WHEN 'workspace' THEN 0 ELSE 1 END,
+                           binding.created_at, binding.id
+                  LIMIT 1
+               ) local ON true
+              WHERE project.id=$1`,
+            [projectId],
+          );
+          return result.rows[0] ?? null;
+        });
+        if (row) return row;
+      }
+      const summary = await projects.summary(projectId);
+      return {
+        project_name: summary.name,
+        github_installation_id: null,
+        github_repository_id: null,
+        github_owner: null,
+        github_name: null,
+        local_runner_id: null,
+        local_workspace_id: null,
+        local_repository_id: null,
+        local_repository_display_name: null,
+      };
+    };
+
+    const canDestroyProject = async (
+      projectId: string,
+      user: { id: string; role: string },
+    ): Promise<boolean> => {
+      if (!projectAccessService || user.role === "admin") return true;
+      const access = await projectAccessService.access(projectId, { id: user.id });
+      return access.source === "owner";
+    };
+
     app.get("/api/projects", async (req, reply) => {
       const user = await requireSessionUser(req, reply);
       if (!user) return;
@@ -4197,15 +4281,143 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       }
     });
 
-    app.delete("/api/v2/projects/:id/destroy", async (req, reply) => {
+    app.get("/api/v2/projects/:id/deletion-options", async (req, reply) => {
       const user = await resolveUser(req);
       if (!user) return reply.code(401).send({ error: "unauthorized" });
       const { id } = req.params as { id: string };
       try {
+        if (!(await canDestroyProject(id, user))) {
+          return reply.code(403).send({
+            error: "forbidden",
+            message: "Only the project owner can delete this project.",
+          });
+        }
+        const targets = await projectDeletionTargets(id);
+        reply.header("Cache-Control", "no-store").send({
+          project_name: targets.project_name,
+          local_folder: {
+            available: Boolean(
+              targets.local_runner_id && targets.local_workspace_id && targets.local_repository_id,
+            ),
+            label: targets.local_repository_display_name,
+          },
+          github_repository: {
+            available: Boolean(
+              targets.github_installation_id &&
+                targets.github_repository_id &&
+                targets.github_owner &&
+                targets.github_name,
+            ),
+            label:
+              targets.github_owner && targets.github_name
+                ? `${targets.github_owner}/${targets.github_name}`
+                : null,
+          },
+        });
+      } catch (error) {
+        projectError(reply, error);
+      }
+    });
+
+    const DestroyProjectBody = z
+      .object({
+        delete_local_folder: z.boolean().default(false),
+        delete_github_repository: z.boolean().default(false),
+      })
+      .strict();
+
+    app.delete("/api/v2/projects/:id/destroy", async (req, reply) => {
+      const user = await resolveUser(req);
+      if (!user) return reply.code(401).send({ error: "unauthorized" });
+      const { id } = req.params as { id: string };
+      const body = DestroyProjectBody.safeParse(req.body ?? {});
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      try {
+        if (!(await canDestroyProject(id, user))) {
+          return reply.code(403).send({
+            error: "forbidden",
+            message: "Only the project owner can delete this project.",
+          });
+        }
+        const targets = await projectDeletionTargets(id);
+        if (body.data.delete_github_repository) {
+          if (
+            !github ||
+            !targets.github_installation_id ||
+            !targets.github_repository_id ||
+            !targets.github_owner ||
+            !targets.github_name
+          ) {
+            return reply.code(409).send({
+              error: "github_repository_unavailable",
+              message: "The linked GitHub repository is not available for deletion.",
+            });
+          }
+          await github.deleteRepository({
+            installationId: targets.github_installation_id,
+            repositoryId: targets.github_repository_id,
+            owner: targets.github_owner,
+            name: targets.github_name,
+          });
+        }
+        if (body.data.delete_local_folder) {
+          if (
+            !targets.local_runner_id ||
+            !targets.local_workspace_id ||
+            !targets.local_repository_id
+          ) {
+            return reply.code(409).send({
+              error: "local_folder_unavailable",
+              message: "The linked local project folder is not available for deletion.",
+            });
+          }
+          const reconciled = reconciledRunners.get(targets.local_runner_id);
+          if (
+            !reconciled ||
+            !reconciled.workspaceDelete ||
+            reconciled.socket !== runnerSockets.get(targets.local_runner_id)
+          ) {
+            return reply.code(409).send({
+              error: "local_agent_unavailable",
+              message: "Open or update the Local Agent on that computer, then try again.",
+            });
+          }
+          const deleted = await workspaceBroker.request(
+            targets.local_runner_id,
+            reconciled.generation,
+            {
+              operation: "delete",
+              workspace_id: targets.local_workspace_id,
+              repository_id: targets.local_repository_id,
+            },
+          );
+          if (deleted.status !== "ok") {
+            return reply.code(409).send({
+              error: "local_folder_delete_failed",
+              message: "The Local Agent could not delete that project folder.",
+            });
+          }
+        }
         await projects.destroy(id, user.id);
-        stores.audit(user.email, "project.destroyed", id, now());
+        stores.audit(
+          user.email,
+          "project.destroyed",
+          `${id}; local_folder=${body.data.delete_local_folder}; github_repository=${body.data.delete_github_repository}`,
+          now(),
+        );
         reply.code(204).send();
       } catch (error) {
+        if (error instanceof GitHubIntegrationError) {
+          githubError(reply, error);
+          return;
+        }
+        if (error instanceof WorkspaceBrokerError) {
+          reply.code(error.code === "timeout" ? 504 : 409).send({
+            error: error.code,
+            message: "The Local Agent could not complete the folder deletion.",
+          });
+          return;
+        }
         projectError(reply, error);
       }
     });
@@ -7939,6 +8151,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             workspacePicker: true,
             workspaceRepositoryInventory: true,
             workspaceClone: advertisedDeviceCapabilities.has("workspace_clone"),
+            workspaceDelete: advertisedDeviceCapabilities.has("workspace_delete"),
           });
         }
         stores.audit(`device:${authenticated.device_id}`, "device.wss_authenticated", "", now());
@@ -8141,6 +8354,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                 "workspace_repository_inventory",
               ),
               workspaceClone: body.capabilities.includes("workspace_clone"),
+              workspaceDelete: body.capabilities.includes("workspace_delete"),
             });
             const recentlyExecuted = new Set(body.recently_executed_command_ids);
             sendFrame(socket, {
@@ -8266,6 +8480,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             "workspace_repository_inventory",
           ),
           workspaceClone: body.capabilities.includes("workspace_clone"),
+          workspaceDelete: body.capabilities.includes("workspace_delete"),
         });
         stores.markSeen(authedRunnerId, now());
         stores.audit(`runner:${authedRunnerId}`, "runner.connected", "", now());

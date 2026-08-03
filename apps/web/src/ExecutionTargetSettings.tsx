@@ -353,7 +353,9 @@ export function ExecutionTargetSettings({
   const requestSequence = useRef(0);
   const claimIdempotencyKey = useRef(newIdempotencyKey());
   const currentProjectId = useRef(projectId);
+  const onUnauthorizedRef = useRef(onUnauthorized);
   currentProjectId.current = projectId;
+  onUnauthorizedRef.current = onUnauthorized;
 
   const resetClaimDraft = useCallback((): void => {
     setClaimTargetId(null);
@@ -419,7 +421,7 @@ export function ExecutionTargetSettings({
         return false;
       }
       if (caught instanceof UnauthorizedError) {
-        onUnauthorized();
+        onUnauthorizedRef.current();
         return false;
       }
       if (caught instanceof ApiError && caught.status === 404) {
@@ -436,7 +438,7 @@ export function ExecutionTargetSettings({
         setLoading(false);
       }
     }
-  }, [onUnauthorized, projectId, resetClaimDraft]);
+  }, [projectId, resetClaimDraft]);
 
   useEffect(() => {
     setAvailable(null);
@@ -492,7 +494,7 @@ export function ExecutionTargetSettings({
     } catch (caught) {
       if (currentProjectId.current !== projectAtStart) return;
       if (caught instanceof UnauthorizedError) {
-        onUnauthorized();
+        onUnauthorizedRef.current();
         return;
       }
       if (caught instanceof ApiError && caught.code === "project_work_active") {
@@ -565,7 +567,7 @@ export function ExecutionTargetSettings({
     } catch (caught) {
       if (currentProjectId.current !== projectAtStart) return;
       if (caught instanceof UnauthorizedError) {
-        onUnauthorized();
+        onUnauthorizedRef.current();
         return;
       }
       if (caught instanceof ApiError && caught.code === "project_work_active") {
@@ -856,7 +858,11 @@ export function ExecutionTargetSettings({
         </output>
       ) : null}
 
-      {owner && envelope && targets.length > 0 && !primaryClaim ? (
+      {owner &&
+      envelope &&
+      targets.length > 0 &&
+      !primaryClaim &&
+      draftTargetId !== envelope.selected_execution_target_id ? (
         <div className="settings-save-row execution-target-save-row">
           <span className="muted">
             Changing target creates a new immutable binding for future work.

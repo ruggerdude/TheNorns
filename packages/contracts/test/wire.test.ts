@@ -242,6 +242,31 @@ describe("runner workspace wire", () => {
     ).toBe(true);
   });
 
+  it("accepts an opaque repository deletion without any filesystem path or response payload", () => {
+    expect(
+      RunnerWorkspaceRequest.safeParse({
+        request_id: "workspace:delete",
+        operation: "delete",
+        workspace_id: "local:workspace",
+        repository_id: "local:repository",
+      }).success,
+    ).toBe(true);
+    expect(
+      RunnerWorkspaceRequest.safeParse({
+        request_id: "workspace:delete",
+        operation: "delete",
+        repository_id: "local:repository",
+      }).success,
+    ).toBe(false);
+    expect(
+      RunnerWorkspaceResponse.safeParse({
+        request_id: "workspace:delete",
+        operation: "delete",
+        status: "ok",
+      }).success,
+    ).toBe(true);
+  });
+
   it("accepts a bounded committed-repository inspection and rejects path leakage", () => {
     const request = {
       request_id: "workspace:inspect",

@@ -1926,8 +1926,9 @@ function ProjectGraph({
       </header>
       <main className={`page workspace-page workspace-page-${workspaceTab}`}>
         <div className="project-heading workspace-header">
-          <div className="eyebrow">Workspace</div>
           <h1>{project.name}</h1>
+        </div>
+        <section className="workspace-project-metadata" aria-label="Project details">
           <div className="meta">
             <Badge
               tone={
@@ -1950,7 +1951,7 @@ function ProjectGraph({
               {project.source_location}
             </div>
           ) : null}
-        </div>
+        </section>
 
         {workspaceTab === "overview" ? (
           <div className="workspace-tab-panel" data-testid="workspace-tab-overview">

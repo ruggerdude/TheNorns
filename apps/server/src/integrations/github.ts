@@ -252,6 +252,12 @@ export const GITHUB_TOKEN_SCOPES = {
     permissions: { contents: "read" },
     no_cache: true,
   }),
+  /** Permanently delete one explicitly confirmed repository. Never cache this token. */
+  deleteRepository: (repositoryId: number) => ({
+    repository_ids: [repositoryId],
+    permissions: { administration: "write" },
+    no_cache: true,
+  }),
   /** Commit `.github/workflows/norns-agent.yml` into one repository. */
   writeWorkflowFile: (repositoryId: number) => ({
     repository_ids: [repositoryId],
@@ -1132,6 +1138,31 @@ export class GitHubIntegrationService {
       GITHUB_TOKEN_SCOPES.cloneRepository(numericRepositoryId),
     );
     return { repository, token };
+  }
+
+  async deleteRepository(input: {
+    installationId: string;
+    repositoryId: string;
+    owner: string;
+    name: string;
+  }): Promise<void> {
+    const numericRepositoryId = Number(input.repositoryId);
+    if (!Number.isInteger(numericRepositoryId) || numericRepositoryId <= 0) {
+      throw new GitHubIntegrationError(
+        "invalid_repository_id",
+        "The linked GitHub repository identifier is invalid",
+        409,
+      );
+    }
+    const token = await this.installationToken(
+      input.installationId,
+      GITHUB_TOKEN_SCOPES.deleteRepository(numericRepositoryId),
+    );
+    await this.github<Record<string, never>>(
+      `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.name)}`,
+      token,
+      { method: "DELETE" },
+    );
   }
 
   async disconnect(connectionId: string): Promise<void> {

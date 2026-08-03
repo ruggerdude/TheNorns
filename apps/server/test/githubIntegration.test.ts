@@ -103,6 +103,9 @@ describe.sequential("workspace GitHub integration", () => {
       if (url === "https://api.github.com/repositories/9001") {
         return json(repository());
       }
+      if (url === "https://api.github.com/repos/octocat/hello-world" && init?.method === "DELETE") {
+        return new Response(null, { status: 204 });
+      }
       if (url === "https://api.github.com/user/repos") {
         return json(
           { ...repository(), id: 9002, name: "created", full_name: "octocat/created" },
@@ -195,6 +198,35 @@ describe.sequential("workspace GitHub integration", () => {
       repository_ids: [9001],
       permissions: { contents: "read" },
     });
+  });
+
+  it("deletes only the named repository with a one-use administration token", async () => {
+    const mintCount = http.mock.calls.filter(([input]) =>
+      String(input).endsWith("/app/installations/42/access_tokens"),
+    ).length;
+
+    await service.deleteRepository({
+      installationId: "42",
+      repositoryId: "9001",
+      owner: "octocat",
+      name: "hello-world",
+    });
+
+    const mintCalls = http.mock.calls.filter(([input]) =>
+      String(input).endsWith("/app/installations/42/access_tokens"),
+    );
+    expect(mintCalls).toHaveLength(mintCount + 1);
+    expect(JSON.parse(String(mintCalls.at(-1)?.[1]?.body))).toEqual({
+      permissions: { administration: "write" },
+      repository_ids: [9001],
+    });
+    expect(
+      http.mock.calls.find(
+        ([input, init]) =>
+          String(input) === "https://api.github.com/repos/octocat/hello-world" &&
+          init?.method === "DELETE",
+      ),
+    ).toBeDefined();
   });
 
   it("retries a transient GitHub outage while loading repositories", async () => {

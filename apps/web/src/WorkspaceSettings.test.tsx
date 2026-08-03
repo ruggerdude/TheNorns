@@ -102,6 +102,60 @@ describe("WorkspaceSettings project archiving", () => {
     expect(await screen.findByText("Projects with active work cannot be removed.")).toBeVisible();
     expect(onProjectArchived).not.toHaveBeenCalled();
   });
+
+  it("confirms permanent deletion and sends only the selected linked-resource options", async () => {
+    mock.get(`/api/v2/projects/${projectId}/deletion-options`, {
+      body: {
+        project_name: "Settings project",
+        local_folder: { available: true, label: "Settings project" },
+        github_repository: { available: true, label: "octocat/settings-project" },
+      },
+    });
+    mock.del(`/api/v2/projects/${projectId}/destroy`, { status: 204 });
+    setup();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "Delete project" }));
+    const dialog = await screen.findByRole("dialog", { name: "Delete Settings project?" });
+    expect(dialog).toHaveTextContent("Are you sure?");
+    await user.click(screen.getByRole("checkbox", { name: /delete local folder/i }));
+    await user.click(screen.getByRole("button", { name: "Yes, delete project" }));
+
+    await waitFor(() => expect(onProjectArchived).toHaveBeenCalledWith(projectId));
+    expect(
+      mock.calls.find(
+        (call) => call.method === "DELETE" && call.url === `/api/v2/projects/${projectId}/destroy`,
+      ),
+    ).toMatchObject({
+      body: {
+        delete_local_folder: true,
+        delete_github_repository: false,
+      },
+    });
+  });
+
+  it("keeps the project when the permanent-deletion dialog is cancelled", async () => {
+    mock.get(`/api/v2/projects/${projectId}/deletion-options`, {
+      body: {
+        project_name: "Settings project",
+        local_folder: { available: false, label: null },
+        github_repository: { available: true, label: "octocat/settings-project" },
+      },
+    });
+    setup();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "Delete project" }));
+    await user.click(await screen.findByRole("button", { name: "Cancel" }));
+
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(
+      mock.calls.some(
+        (call) => call.method === "DELETE" && call.url === `/api/v2/projects/${projectId}/destroy`,
+      ),
+    ).toBe(false);
+    expect(onProjectArchived).not.toHaveBeenCalled();
+  });
 });
 
 // QCP-12: the post-creation QC settings surface — rounds/mode/rebuttals were
@@ -196,10 +250,10 @@ describe("WorkspaceSettings QC settings", () => {
         },
       }),
     );
-    expect(await screen.findByText("QC settings saved")).toBeVisible();
+    expect(await screen.findByText("Saved")).toBeVisible();
   });
 
-  it("QCP-14: allows the rounds stepper down to 0 and labels it as review off", async () => {
+  it("QCP-14: allows the rounds stepper down to 0 and disables pause controls", async () => {
     const user = userEvent.setup();
     setup();
 
@@ -211,7 +265,8 @@ describe("WorkspaceSettings QC settings", () => {
 
     expect(screen.getByTestId("qc-settings-rounds")).toHaveTextContent("0");
     expect(decrement).toBeDisabled();
-    expect(screen.getByText(/review is off/i)).toBeVisible();
+    expect(screen.getByTestId("qc-settings-mode")).toBeDisabled();
+    expect(screen.getByTestId("qc-settings-rebuttals")).toBeDisabled();
   });
 
   it("QCP-14: submits 0 rounds via PATCH", async () => {

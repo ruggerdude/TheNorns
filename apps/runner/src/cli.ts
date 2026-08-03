@@ -331,6 +331,7 @@ function createPersistentRunner(input: {
     "workspace_picker",
     "workspace_repository_inventory",
     "workspace_clone",
+    "workspace_delete",
     ...(input.deviceExecutionEnabled === true ? ["device_execution"] : []),
   ];
   const execution: {
@@ -570,6 +571,7 @@ async function main(): Promise<void> {
           "workspace_picker",
           "workspace_repository_inventory",
           "workspace_clone",
+          "workspace_delete",
           ...(deviceExecutionEnabled ? ["device_execution"] : []),
         ],
       }),

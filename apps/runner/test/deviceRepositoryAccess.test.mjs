@@ -408,6 +408,41 @@ test("repository removal uses the workspace and repository composite key", async
   }
 });
 
+test("workspace deletion permanently removes only the exact registered repository folder", async () => {
+  const dataDir = temporaryDirectory();
+  const repositoryPath = createRepository(dataDir);
+  const registry = new WorkspaceRegistry(dataDir, async () => repositoryPath);
+
+  try {
+    const approved = await registry.chooseLocalRepository();
+    assert.ok(approved);
+    const refused = await registry.handleAsync({
+      request_id: "delete-wrong-workspace",
+      operation: "delete",
+      workspace_id: "local:wrong-workspace",
+      repository_id: approved.repository_id,
+    });
+    assert.equal(refused.status, "not_found");
+    assert.equal(existsSync(repositoryPath), true);
+
+    const deleted = await registry.handleAsync({
+      request_id: "delete-exact-repository",
+      operation: "delete",
+      workspace_id: approved.workspace_id,
+      repository_id: approved.repository_id,
+    });
+    assert.deepEqual(deleted, {
+      request_id: "delete-exact-repository",
+      operation: "delete",
+      status: "ok",
+    });
+    assert.equal(existsSync(repositoryPath), false);
+    assert.equal(registry.approvedRepositoryCount(), 0);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("malformed repository access state fails closed instead of discarding revocation evidence", async () => {
   const dataDir = temporaryDirectory();
   const repositoryPath = createRepository(dataDir);

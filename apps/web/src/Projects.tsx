@@ -34,6 +34,14 @@ import {
 } from "./projectSourceRequest";
 import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 import { useSingleFlightPolling } from "./useSingleFlightPolling";
+import {
+  UPDATE_DETAIL_OPTIONS,
+  UPDATE_INTERVAL_OPTIONS,
+  type UpdateDetailLevel,
+  type UpdateIntervalSeconds,
+  loadGlobalUpdatePreferences,
+  saveProjectUpdatePreferences,
+} from "./workspacePreferences";
 import "./CoreSurfaces.css";
 
 export interface ProjectSummary {
@@ -511,7 +519,6 @@ export function Projects({
   const [pmModel, setPmModel] = useState<PmModelT>(DEFAULT_PM_MODEL.anthropic);
   const [pmEffort, setPmEffort] = useState<CodexReasoningEffortT>(DEFAULT_CODEX_REASONING_EFFORT);
   const pmProvider = providerForPmModel(pmModel);
-  const selectedModel = pmModelOption(pmModel);
   const reviewerProviderPreview = pmProvider === "anthropic" ? "openai" : "anthropic";
   const reviewerPreviewLabel =
     pmModelOption(DEFAULT_PM_MODEL[reviewerProviderPreview])?.label ?? reviewerProviderPreview;
@@ -551,6 +558,9 @@ export function Projects({
   // qc_mode at kickoff).
   const [qcMode, setQcMode] = useState<QcModeT>("automatic");
   const [allowUnadjudicatedRebuttals, setAllowUnadjudicatedRebuttals] = useState(false);
+  const [projectUpdatePreferences, setProjectUpdatePreferences] = useState(
+    loadGlobalUpdatePreferences,
+  );
   // DESIGN R2 semantic change: the wizard's single submit creates the
   // repository/project and opens it — planning now begins in the conversation
   // after creation, so there is no wizard planning kickoff or attachment
@@ -1179,6 +1189,7 @@ export function Projects({
         });
         if (isNewLocalProject) {
           await applyReviewerPreference(completedProject.id);
+          saveProjectUpdatePreferences(completedProject.id, projectUpdatePreferences);
           await prepareNewLocalProject(completedProject);
           return;
         }
@@ -1268,7 +1279,10 @@ export function Projects({
       );
       // Advanced reviewer selection changes planning behavior, so apply it
       // before either the normal continuation or a blocker recovery.
-      if (startingPoint === "new") await applyReviewerPreference(completedProject.id);
+      if (startingPoint === "new") {
+        await applyReviewerPreference(completedProject.id);
+        saveProjectUpdatePreferences(completedProject.id, projectUpdatePreferences);
+      }
       if (onboarding.blockers.length > 0) {
         setOnboardingBlockers(onboarding.blockers);
         setDraftProject(completedProject);
@@ -1307,6 +1321,7 @@ export function Projects({
     derivedIdentity,
     repositoryPrivate,
     idempotencyKey,
+    projectUpdatePreferences,
     applyReviewerPreference,
     completeAdoption,
     finishNewProject,
@@ -1405,6 +1420,7 @@ export function Projects({
     setRoundsCount(3);
     setQcMode("automatic");
     setAllowUnadjudicatedRebuttals(false);
+    setProjectUpdatePreferences(loadGlobalUpdatePreferences());
     setIdempotencyKey(globalThis.crypto.randomUUID());
   }, []);
 
@@ -2407,7 +2423,6 @@ export function Projects({
                               <Select
                                 data-testid="pm-model"
                                 value={pmModel}
-                                aria-describedby="pm-model-description"
                                 onChange={(event) => setPmModel(event.target.value as PmModelT)}
                               >
                                 <optgroup label="Anthropic">
@@ -2425,9 +2440,6 @@ export function Projects({
                                   ))}
                                 </optgroup>
                               </Select>
-                              <span className="field-help" id="pm-model-description">
-                                {selectedModel?.description}
-                              </span>
                             </Field>
                             {pmProvider === "openai" ? (
                               <Field label="Coordinator Codex effort">
@@ -2444,9 +2456,6 @@ export function Projects({
                                   <option value="high">High</option>
                                   <option value="xhigh">Extra high</option>
                                 </Select>
-                                <span className="field-help">
-                                  Controls reasoning depth for this Codex planning run.
-                                </span>
                               </Field>
                             ) : null}
                             <Field label="Reviewer model">
@@ -2473,12 +2482,9 @@ export function Projects({
                                   ))}
                                 </optgroup>
                               </Select>
-                              <span className="field-help">
-                                Automatic picks the opposite provider from the coordinator.
-                              </span>
                             </Field>
                           </div>
-                          <Field label="Plan review rounds">
+                          <Field label="Reviews">
                             {/* DESIGN R2: zero rounds is allowed — it means
                                 review is off. */}
                             <div className="rounds-stepper" data-testid="rounds-stepper">
@@ -2504,24 +2510,8 @@ export function Projects({
                             </div>
                           </Field>
                           {roundsCount > 0 ? (
-                            <div className="policy">
-                              <strong>Cross-provider review is on.</strong>
-                              <br />
-                              {selectedModel?.label} will lead planning.{" "}
-                              {pmProvider === "anthropic" ? "OpenAI" : "Anthropic"} will
-                              independently review the plan.
-                            </div>
-                          ) : (
-                            <div className="policy">
-                              <strong>Plan review is off.</strong>
-                              <br />
-                              {selectedModel?.label} will lead planning with no independent review
-                              rounds.
-                            </div>
-                          )}
-                          {roundsCount > 0 ? (
-                            <>
-                              <Field label="QC pause mode">
+                            <div className="two-col-fields">
+                              <Field label="Pause mode">
                                 <Select
                                   data-testid="qc-mode"
                                   value={qcMode}
@@ -2533,11 +2523,6 @@ export function Projects({
                                     </option>
                                   ))}
                                 </Select>
-                                <span className="field-help">
-                                  {QC_MODE_OPTIONS.find((option) => option.value === qcMode)?.help}{" "}
-                                  This is the project default — it does not change reviews already
-                                  running, and can be overridden per work item at kickoff.
-                                </span>
                               </Field>
                               <label className="debate-toggle">
                                 <input
@@ -2548,14 +2533,54 @@ export function Projects({
                                     setAllowUnadjudicatedRebuttals(event.target.checked)
                                   }
                                 />
-                                Allow unadjudicated rebuttals (discouraged)
+                                Allow rebuttals
                               </label>
-                              <span className="field-help">
-                                Suppresses the pause for a declared rebuttal only — a
-                                hollow-acceptance pause always fires regardless of this setting.
-                              </span>
-                            </>
-                          ) : null}
+                            </div>
+                          ) : (
+                            <p className="field-help" data-testid="review-off-note">
+                              Reviews are off.
+                            </p>
+                          )}
+                          <div className="two-col-fields">
+                            <Field label="Update timing">
+                              <Select
+                                data-testid="project-update-timing"
+                                value={projectUpdatePreferences.intervalSeconds}
+                                onChange={(event) =>
+                                  setProjectUpdatePreferences((current) => ({
+                                    ...current,
+                                    intervalSeconds: Number(
+                                      event.target.value,
+                                    ) as UpdateIntervalSeconds,
+                                  }))
+                                }
+                              >
+                                {UPDATE_INTERVAL_OPTIONS.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </Select>
+                            </Field>
+                            <Field label="Update content">
+                              <Select
+                                data-testid="project-update-content"
+                                value={projectUpdatePreferences.detailLevel}
+                                onChange={(event) =>
+                                  setProjectUpdatePreferences((current) => ({
+                                    ...current,
+                                    detailLevel: event.target.value as UpdateDetailLevel,
+                                  }))
+                                }
+                              >
+                                {UPDATE_DETAIL_OPTIONS.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </Select>
+                            </Field>
+                          </div>
                         </div>
                       </details>
                     </>

@@ -123,7 +123,16 @@ export function canonicalDeviceCancellationEvidenceWssTranscript(
 export const RunnerWorkspaceRequest = z
   .object({
     request_id: opaqueId,
-    operation: z.enum(["list", "catalog", "browse", "validate", "choose", "clone", "inspect"]),
+    operation: z.enum([
+      "list",
+      "catalog",
+      "browse",
+      "validate",
+      "choose",
+      "clone",
+      "inspect",
+      "delete",
+    ]),
     workspace_id: opaqueId.optional(),
     entry_id: opaqueId.optional(),
     repository_id: opaqueId.optional(),
@@ -148,6 +157,13 @@ export const RunnerWorkspaceRequest = z
         code: z.ZodIssueCode.custom,
         path: ["repository_id"],
         message: "required",
+      });
+    }
+    if (value.operation === "delete" && (!value.workspace_id || !value.repository_id)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["repository_id"],
+        message: "workspace and repository required",
       });
     }
     if (
@@ -187,7 +203,16 @@ export type RunnerWorkspaceRepositoryT = z.infer<typeof RunnerWorkspaceRepositor
 export const RunnerWorkspaceResponse = z
   .object({
     request_id: opaqueId,
-    operation: z.enum(["list", "catalog", "browse", "validate", "choose", "clone", "inspect"]),
+    operation: z.enum([
+      "list",
+      "catalog",
+      "browse",
+      "validate",
+      "choose",
+      "clone",
+      "inspect",
+      "delete",
+    ]),
     status: z.enum([
       "ok",
       "cancelled",
@@ -241,12 +266,14 @@ export const RunnerWorkspaceResponse = z
       (value.operation === "list" && value.workspaces !== undefined) ||
       (value.operation === "catalog" && value.repositories !== undefined) ||
       (value.operation === "browse" && value.entries !== undefined) ||
+      (value.operation === "delete" && payloads.length === 0) ||
       ((value.operation === "validate" ||
         value.operation === "choose" ||
         value.operation === "clone") &&
         value.repository !== undefined) ||
       (value.operation === "inspect" && value.inspection !== undefined);
-    if (!correctPayload || payloads.length !== 1) {
+    const expectedPayloadCount = value.operation === "delete" ? 0 : 1;
+    if (!correctPayload || payloads.length !== expectedPayloadCount) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         message: "successful workspace response must contain exactly its operation payload",

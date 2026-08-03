@@ -5073,10 +5073,6 @@ button:disabled {
 }
 
 .workspace-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: .45rem 1.5rem;
   margin: .4rem 0 0;
   padding: 1.2rem 1.35rem;
   border: 1px solid var(--line);
@@ -5088,26 +5084,32 @@ button:disabled {
     ), color-mix(in srgb, var(--surface) 94%, transparent);
 }
 
-.workspace-header .eyebrow,
 .workspace-header h1 {
-  grid-column: 1;
-}
-
-.workspace-header h1 {
-  margin: .05rem 0;
+  margin: 0;
   font-size: clamp(1.5rem, 3vw, 2rem);
   letter-spacing: -.045em;
 }
 
-.workspace-header .meta {
-  grid-column: 2;
-  grid-row: 1 / span 2;
-  justify-content: flex-end;
+.workspace-project-metadata {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .75rem 1.5rem;
+  padding: .75rem 1.35rem;
+  border: 1px solid var(--line);
+  border-top: 0;
+  border-radius: 0 0 18px 18px;
+  background: color-mix(in srgb, var(--surface) 96%, transparent);
 }
 
-.workspace-header .project-detail-source {
-  grid-column: 1 / -1;
-  margin-top: .2rem;
+.workspace-project-metadata .meta {
+  justify-content: flex-end;
+  order: 2;
+}
+
+.workspace-project-metadata .project-detail-source {
+  min-width: 0;
+  order: 1;
 }
 
 .workspace-tab-panel {
@@ -5510,14 +5512,22 @@ button:disabled {
   }
 
   .workspace-header {
-    grid-template-columns: 1fr;
     padding: 1rem;
   }
 
-  .workspace-header .meta {
-    grid-column: 1;
-    grid-row: auto;
+  .workspace-project-metadata {
+    align-items: flex-start;
+    flex-direction: column;
+    padding: .75rem 1rem;
+  }
+
+  .workspace-project-metadata .meta {
     justify-content: flex-start;
+    order: 1;
+  }
+
+  .workspace-project-metadata .project-detail-source {
+    order: 2;
   }
 
   .workspace-tabs {
@@ -6291,7 +6301,8 @@ h4 {
     overflow: hidden;
   }
 
-  .workspace-page-work > .workspace-header {
+  .workspace-page-work > .workspace-header,
+  .workspace-page-work > .workspace-project-metadata {
     display: none;
   }
 
@@ -6646,7 +6657,8 @@ h4 {
     overflow: hidden;
   }
 
-  .workspace-page-work > .workspace-header {
+  .workspace-page-work > .workspace-header,
+  .workspace-page-work > .workspace-project-metadata {
     display: none;
   }
 

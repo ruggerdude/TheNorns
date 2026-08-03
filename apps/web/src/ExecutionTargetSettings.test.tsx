@@ -192,6 +192,7 @@ describe("ExecutionTargetSettings", () => {
     expect(within(group).getByText("busy")).toHaveClass("badge-info");
     expect(container).not.toHaveTextContent("grant-office");
     expect(container).not.toHaveTextContent("grant-studio");
+    expect(screen.queryByRole("button", { name: "Save execution target" })).not.toBeInTheDocument();
 
     const studio = within(group).getByRole("radio", { name: /Studio workstation/ });
     studio.focus();
@@ -449,7 +450,7 @@ describe("ExecutionTargetSettings", () => {
     expect(
       screen.getByText("Target changes are blocked while project work is active."),
     ).toBeVisible();
-    expect(screen.getByRole("button", { name: "Save execution target" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Save execution target" })).not.toBeInTheDocument();
     await user.click(studio);
     expect(mock.calls.some((call) => call.method === "PUT")).toBe(false);
   });
@@ -560,6 +561,26 @@ describe("ExecutionTargetSettings", () => {
     });
     await waitFor(() => expect(screen.queryByText("Stale project Mac")).not.toBeInTheDocument());
     expect(screen.getByText("Second project Mac")).toBeVisible();
+  });
+
+  it("does not reload the target when only the unauthorized callback identity changes", async () => {
+    installOwnerTargets();
+    mock.install();
+
+    const { rerender } = render(
+      <ExecutionTargetSettings projectId={projectId} onUnauthorized={() => undefined} />,
+    );
+    await screen.findByText("Office Mac mini");
+    rerender(<ExecutionTargetSettings projectId={projectId} onUnauthorized={() => undefined} />);
+
+    await waitFor(() =>
+      expect(
+        mock.calls.filter(
+          (call) =>
+            call.method === "GET" && call.url === `/api/projects/${projectId}/execution-targets`,
+        ),
+      ).toHaveLength(1),
+    );
   });
 
   it("fails closed on a privacy-widened target DTO", async () => {

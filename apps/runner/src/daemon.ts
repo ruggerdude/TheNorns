@@ -578,6 +578,7 @@ export class RunnerDaemon {
     | "workspace_picker"
     | "workspace_repository_inventory"
     | "workspace_clone"
+    | "workspace_delete"
     | "model_proxy"
     | "knowledge_transport"
   > {
@@ -586,12 +587,14 @@ export class RunnerDaemon {
           "workspace_picker",
           "workspace_repository_inventory",
           "workspace_clone",
+          "workspace_delete",
           "knowledge_transport",
         ]
       : [
           "workspace_picker",
           "workspace_repository_inventory",
           "workspace_clone",
+          "workspace_delete",
           "model_proxy",
           "knowledge_transport",
         ];

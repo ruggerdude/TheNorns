@@ -126,11 +126,13 @@ describe("project manager model selection", () => {
     expect(select).toHaveValue("claude-sonnet-5");
   });
 
-  it("submits Fable with Anthropic as PM and previews OpenAI review", async () => {
+  it("submits Fable with Anthropic as PM and previews OpenAI review compactly", async () => {
     const select = await openCreateDialog();
     await userEvent.selectOptions(select, "claude-fable-5");
 
-    expect(screen.getByText(/Claude Fable 5 will lead planning.*OpenAI/i)).toBeInTheDocument();
+    expect(screen.getByTestId("reviewer-model")).toHaveDisplayValue(
+      "Automatic (cross-provider) · GPT-5.6 Terra",
+    );
     expect(await submit("Fable project")).toMatchObject({
       body: {
         pm_provider: "anthropic",
@@ -145,7 +147,9 @@ describe("project manager model selection", () => {
     expect(screen.getByTestId("pm-effort")).toHaveValue("medium");
     await userEvent.selectOptions(screen.getByTestId("pm-effort"), "xhigh");
 
-    expect(screen.getByText(/GPT-5.6 Sol will lead planning.*Anthropic/i)).toBeInTheDocument();
+    expect(screen.getByTestId("reviewer-model")).toHaveDisplayValue(
+      "Automatic (cross-provider) · Claude Sonnet 5",
+    );
     expect(await submit("Sol project")).toMatchObject({
       body: {
         pm_provider: "openai",

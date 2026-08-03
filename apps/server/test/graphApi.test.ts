@@ -197,6 +197,40 @@ describe("projects API", () => {
       ),
     ).toEqual(expect.arrayContaining(["project.archived", "project.restored"]));
   });
+
+  it("previews linked deletion resources and requires explicit external-delete flags", async () => {
+    const users = new UserStore();
+    TOKEN = testAdminToken(users);
+    server = await buildServer({
+      stores: new RelayStores(),
+      users,
+      projects: new ProjectStore(),
+      legacyHelperRoutes: { enabled: true },
+    });
+    const created = await inject(server, "POST", "/api/projects", {
+      name: "Delete carefully",
+      description: "Deletion options",
+      pm_provider: "anthropic",
+    });
+    const projectId = (created.json() as { id: string }).id;
+
+    expect(
+      (await inject(server, "GET", `/api/v2/projects/${projectId}/deletion-options`)).json(),
+    ).toEqual({
+      project_name: "Delete carefully",
+      local_folder: { available: false, label: null },
+      github_repository: { available: false, label: null },
+    });
+    expect(
+      (
+        await inject(server, "DELETE", `/api/v2/projects/${projectId}/destroy`, {
+          delete_local_folder: false,
+          delete_github_repository: false,
+        })
+      ).statusCode,
+    ).toBe(204);
+    expect((await inject(server, "GET", `/api/projects/${projectId}`)).statusCode).toBe(404);
+  });
 });
 
 describe("project graph API", () => {

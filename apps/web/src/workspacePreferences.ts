@@ -14,6 +14,24 @@ export const DEFAULT_UPDATE_PREFERENCES: UpdatePreferences = {
   detailLevel: "summary",
 };
 
+export const UPDATE_INTERVAL_OPTIONS: ReadonlyArray<{
+  value: UpdateIntervalSeconds;
+  label: string;
+}> = [
+  { value: 60, label: "Every minute" },
+  { value: 300, label: "Every 5 minutes" },
+  { value: 900, label: "Every 15 minutes" },
+];
+
+export const UPDATE_DETAIL_OPTIONS: ReadonlyArray<{
+  value: UpdateDetailLevel;
+  label: string;
+}> = [
+  { value: "summary", label: "Progress summary" },
+  { value: "detailed", label: "Detailed progress, costs, and completions" },
+  { value: "attention", label: "Only blockers and decisions" },
+];
+
 function storage(): Storage | null {
   if (typeof window === "undefined") return null;
   try {

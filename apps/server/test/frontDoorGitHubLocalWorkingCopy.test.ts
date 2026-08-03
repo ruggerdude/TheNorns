@@ -142,6 +142,7 @@ describe.sequential("Front Door GitHub + this computer creation", () => {
           "workspace_picker",
           "workspace_repository_inventory",
           "workspace_clone",
+          "workspace_delete",
         ],
       },
       repository_grants: [],

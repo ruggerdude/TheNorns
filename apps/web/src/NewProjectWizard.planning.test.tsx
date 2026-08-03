@@ -31,7 +31,10 @@ describe("new project: name-first creation, planning in the conversation", () =>
   const onOpenProject = vi.fn<(project: ProjectSummary, options?: ProjectOpenOptions) => void>();
   const onOpenAccount = vi.fn();
 
-  afterEach(() => mock.restore());
+  afterEach(() => {
+    mock.restore();
+    vi.unstubAllGlobals();
+  });
 
   function setup(connections = [connection("github:42", "octocat")]) {
     onOpenProject.mockReset();
@@ -210,18 +213,45 @@ describe("new project: name-first creation, planning in the conversation", () =>
     await user.type(screen.getByTestId("project-name"), "Ravel Search");
     await user.click(screen.getByText("Options"));
 
-    expect(screen.getByText("Cross-provider review is on.")).toBeInTheDocument();
+    expect(screen.getByTestId("qc-mode")).toBeInTheDocument();
     const fewer = screen.getByRole("button", { name: /fewer rounds/i });
     await user.click(fewer);
     await user.click(fewer);
     await user.click(fewer);
     expect(screen.getByTestId("rounds-stepper")).toHaveTextContent("0");
     expect(fewer).toBeDisabled();
-    expect(screen.getByText("Plan review is off.")).toBeInTheDocument();
+    expect(screen.getByTestId("review-off-note")).toHaveTextContent("Reviews are off");
     expect(screen.queryByText("Cross-provider review is on.")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /more rounds/i }));
-    expect(screen.getByText("Cross-provider review is on.")).toBeInTheDocument();
+    expect(screen.getByTestId("qc-mode")).toBeInTheDocument();
+  });
+
+  it("sets progress update timing and content with the project QC options", async () => {
+    const values = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    };
+    vi.stubGlobal("localStorage", storage);
+    setup();
+    const user = userEvent.setup();
+    await openWizard();
+    await user.type(screen.getByTestId("project-name"), "Ravel status updates");
+    await user.click(screen.getByText("Options"));
+
+    await user.selectOptions(screen.getByTestId("project-update-timing"), "900");
+    await user.selectOptions(screen.getByTestId("project-update-content"), "attention");
+    await user.click(screen.getByRole("button", { name: /create project/i }));
+
+    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
+    expect(
+      JSON.parse(storage.getItem("norns:update-preferences:project:proj_wizard") ?? "null"),
+    ).toEqual({
+      intervalSeconds: 900,
+      detailLevel: "attention",
+    });
   });
 
   it("does not show success or navigate when repository creation fails", async () => {
