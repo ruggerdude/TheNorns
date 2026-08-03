@@ -277,6 +277,7 @@ function runStatusLabel(run: PhasePlanningRunDto): string {
 
 export interface PhaseTabProps {
   projectId: string;
+  projectName?: string | null;
   initialRunId?: string | null;
   initialConversationId?: string | null;
   initialNewConversation?: boolean;
@@ -1761,6 +1762,7 @@ export function PhaseTab(props: PhaseTabProps): React.ReactElement {
     >
       <ConversationWorkspace
         projectId={props.projectId}
+        projectName={props.projectName}
         initialConversationId={props.initialConversationId}
         initialNewConversation={props.initialNewConversation}
         initialBrief={props.initialBrief}

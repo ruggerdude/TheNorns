@@ -79,9 +79,8 @@ function currentRound(review: V2ConversationPlanReviewT): number {
 
 function ownerLabel(review: V2ConversationPlanReviewT): string {
   if (review.status === "awaiting_human") return "Waiting for your decision";
-  if (review.live_progress?.stage === "revising") return "Planning manager is revising the plan";
-  if (review.live_progress?.stage === "reviewing")
-    return "Independent reviewer is checking the plan";
+  if (review.live_progress?.stage === "revising") return "Plan revision in progress";
+  if (review.live_progress?.stage === "reviewing") return "Review in progress";
   if (review.status === "queued") return "Review is queued";
   return "Quality review is working";
 }
@@ -315,6 +314,7 @@ function QcProgressPopout({
   const estimate = STAGE_ESTIMATE_SECONDS[live.stage];
   const takingLongerThanUsual = stepElapsed > estimate * 2;
   const round = live.round ?? currentRound(review);
+  const outputCharacters = live.output_characters;
   const hasMeasuredProgress = live.total_items > 0 && live.completed_items > 0;
   const itemLabel = hasMeasuredProgress
     ? `${Math.min(live.completed_items, live.total_items)} completed of ${live.total_items} item${live.total_items === 1 ? "" : "s"}`
@@ -383,6 +383,14 @@ function QcProgressPopout({
                 <dd>{itemLabel}</dd>
               </div>
             ) : null}
+            <div>
+              <dt>Live output</dt>
+              <dd>
+                {outputCharacters > 0
+                  ? `${outputCharacters.toLocaleString()} characters received`
+                  : "Waiting for response data"}
+              </dd>
+            </div>
           </dl>
           <p className="qc-new-working-meta">
             <StageElapsed startedAt={live.started_at} />
@@ -700,46 +708,31 @@ export function QcWorkspace({
   const accepted = (review.finding_decisions ?? []).filter(
     (item) => item.decision === "accept",
   ).length;
-  const stageTitle =
-    review.status === "awaiting_human"
-      ? review.paused_checkpoint === "after_review"
-        ? `Round ${round} reviewer pass complete`
-        : review.paused_checkpoint === "after_revision"
-          ? `Round ${round} revision complete`
-          : `Round ${round} needs your ruling`
-      : terminal
-        ? review.status === "converged"
-          ? "Quality review passed"
-          : review.status === "cap_reached"
-            ? "Review limit reached"
-            : review.status === "failed"
-              ? "Quality review stopped"
-              : "Quality review cancelled"
-        : `Round ${round} of ${review.max_rounds}`;
+  const stageTitle = `Round ${terminal ? review.rounds_completed : round} of ${review.max_rounds}`;
+  const stageDetail =
+    review.status === "awaiting_human" && review.paused_checkpoint === "after_review"
+      ? `Reviewer pass complete. ${currentFindings.length} finding${currentFindings.length === 1 ? " is" : "s are"} waiting for your decision before the PM can revise anything.`
+      : review.status === "awaiting_human" && review.paused_checkpoint === "after_revision"
+        ? "Plan revision complete. Review the PM response before continuing."
+        : review.status === "awaiting_human"
+          ? "This round needs your ruling before QC can continue."
+          : review.status === "converged"
+            ? "Quality review passed. Approve this plan to begin development."
+            : review.status === "cap_reached"
+              ? "QC used the available rounds. Review the record and decide whether to proceed."
+              : review.status === "failed"
+                ? "The plan is unchanged. Choose a recovery path without leaving QC."
+                : review.status === "cancelled"
+                  ? "The review was stopped. The plan remains unchanged."
+                  : null;
 
   return (
     <main className="qc-new-workspace" data-testid="qc-new-workspace">
       <header className="qc-new-header">
         <div>
-          <span>QUALITY CONTROL</span>
-          <h1>{stageTitle}</h1>
-          <p>
-            {review.status === "awaiting_human" && review.paused_checkpoint === "after_review"
-              ? `${currentFindings.length} finding${currentFindings.length === 1 ? " is" : "s are"} waiting for your decision before the PM can revise anything.`
-              : review.status === "converged"
-                ? "The review is complete. Approve this plan to begin development."
-                : review.status === "cap_reached"
-                  ? "QC used the available rounds. Review the record and decide whether to proceed."
-                  : review.status === "failed"
-                    ? "The plan is unchanged. Choose a recovery path without leaving QC."
-                    : review.status === "cancelled"
-                      ? "The review was stopped. The plan remains unchanged."
-                      : ownerLabel(review)}
-          </p>
-        </div>
-        <div className="qc-new-round" aria-label="Review position">
-          <strong>{terminal ? review.rounds_completed : round}</strong>
-          <span>of {review.max_rounds} rounds</span>
+          <h1>Quality control</h1>
+          <p className="qc-new-stage-title">{stageTitle}</p>
+          {stageDetail ? <p className="qc-new-header-detail">{stageDetail}</p> : null}
         </div>
       </header>
 

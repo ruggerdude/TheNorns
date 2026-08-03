@@ -125,6 +125,8 @@ function renderWorkspace(current = review()) {
 describe("QcWorkspace", () => {
   it("makes accept all, choose individually, and accept none the primary gate", () => {
     renderWorkspace();
+    expect(screen.getByRole("heading", { name: "Quality control" })).toBeVisible();
+    expect(screen.getAllByText("Round 1 of 2").length).toBeGreaterThan(0);
     expect(
       screen.getByRole("heading", { name: "Which findings should the PM act on?" }),
     ).toBeVisible();
@@ -238,6 +240,7 @@ describe("QcWorkspace", () => {
           model: "gpt",
           completed_items: 2,
           total_items: 5,
+          output_characters: 1_284,
           activity: "Checking 5 plan modules against the QC requirements",
           output_preview: '{"findings":[{"severity":"should_fix"',
           started_at: "2026-08-02T12:01:18.000Z",
@@ -262,6 +265,10 @@ describe("QcWorkspace", () => {
     expect(screen.getByText("4:12 on this step")).toBeVisible();
     expect(screen.getByText("gpt")).toBeVisible();
     expect(screen.getByText("2 completed of 5 items")).toBeVisible();
+    expect(screen.getByText("1,284 characters received")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Quality control" })).toBeVisible();
+    expect(screen.getAllByText("Round 1 of 2").length).toBeGreaterThan(0);
+    expect(screen.queryByText("Independent reviewer is checking the plan")).not.toBeInTheDocument();
     expect(screen.getByRole("progressbar", { name: "Current QC step progress" })).toHaveAttribute(
       "value",
       "2",
@@ -294,6 +301,7 @@ describe("QcWorkspace", () => {
           model: "gpt-5.6-sol",
           completed_items: 0,
           total_items: 6,
+          output_characters: 0,
           activity: "Checking 6 plan modules against the QC requirements",
           output_preview: "",
           started_at: "2026-08-02T12:01:18.000Z",
@@ -306,6 +314,7 @@ describe("QcWorkspace", () => {
     expect(screen.queryByText("92%")).not.toBeInTheDocument();
     expect(screen.queryByText("0 of 6 items")).not.toBeInTheDocument();
     expect(screen.getByText("6 items in this review step")).toBeVisible();
+    expect(screen.getByText("Waiting for response data")).toBeVisible();
     expect(
       screen.getByRole("progressbar", { name: "Current QC step progress" }),
     ).not.toHaveAttribute("value");

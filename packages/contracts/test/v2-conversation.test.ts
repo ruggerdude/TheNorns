@@ -87,17 +87,16 @@ describe("V2 conversation contracts", () => {
         },
       }).success,
     ).toBe(true);
-    expect(
-      V2PlanningLiveProgress.safeParse({
-        stage: "generating",
-        round: null,
-        attempt: 1,
-        provider: "deepseek",
-        model: "deepseek-v4-flash",
-        started_at: at,
-        checkpoint_at: at,
-      }).success,
-    ).toBe(true);
+    const live = V2PlanningLiveProgress.parse({
+      stage: "generating",
+      round: null,
+      attempt: 1,
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+      started_at: at,
+      checkpoint_at: at,
+    });
+    expect(live.output_characters).toBe(0);
   });
 
   it("stores only visible message parts and makes user submission identity explicit", () => {

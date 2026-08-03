@@ -1003,6 +1003,12 @@ export class ConversationPlanWorkflowService {
         model: input.event.model,
         completed_items: input.event.completedItems,
         total_items: input.event.totalItems,
+        output_characters:
+          input.event.outputCharacters !== undefined
+            ? input.event.outputCharacters
+            : sameOperation
+              ? (previous?.output_characters ?? 0)
+              : 0,
         activity: input.event.activity,
         output_preview:
           input.event.outputPreview !== undefined

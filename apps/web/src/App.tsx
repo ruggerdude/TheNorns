@@ -2377,6 +2377,7 @@ function ProjectGraph({
             <Suspense fallback={<Spinner label="Loading conversation workspace…" />}>
               <PhaseTab
                 projectId={project.id}
+                projectName={project.name}
                 initialRunId={phaseJourneyRunId}
                 initialConversationId={initialConversationId}
                 initialNewConversation={Boolean(initialWorkRoute && !initialConversationId)}

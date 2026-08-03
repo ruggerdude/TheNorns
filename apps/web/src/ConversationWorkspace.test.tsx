@@ -16,7 +16,7 @@ import type {
   V2WorkPlanVersionT,
 } from "@norns/contracts";
 import { V2_HUMAN_WAIT_INSTRUCTION_HASH } from "@norns/contracts";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -1791,6 +1791,7 @@ describe("conversation workspace", () => {
     render(
       <ConversationWorkspace
         projectId={projectId}
+        projectName="Signal Studio"
         initialConversationId={conversationId}
         onUnauthorized={() => undefined}
       />,
@@ -1799,7 +1800,11 @@ describe("conversation workspace", () => {
     expect(
       await screen.findByRole("region", { name: "Quality control workspace" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Quality review passed" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Signal Studio" })).toBeInTheDocument();
+    expect(screen.queryByText(/Execution target/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/QC checks planned/)).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Quality control" })).toBeInTheDocument();
+    expect(screen.getByText(/Quality review passed/)).toBeInTheDocument();
     expect(screen.queryByText("Plan Contract · Version 1")).not.toBeInTheDocument();
     expect(screen.queryByTestId("conversation-action-approve_plan")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
@@ -1894,7 +1899,7 @@ describe("conversation workspace", () => {
       />,
     );
 
-    expect(await screen.findByRole("heading", { name: "Round 1 of 3" })).toBeInTheDocument();
+    expect((await screen.findAllByText("Round 1 of 3")).length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
     await userEvent.click(screen.getByText("Review record"));
     await userEvent.click(screen.getByText("Previous attempts · 1"));
@@ -2085,18 +2090,18 @@ describe("conversation workspace", () => {
     resolveProposal(Response.json({ message: proposalMessage, action: saveAction }));
 
     expect(await screen.findByText("I drafted a structured plan proposal.")).toBeInTheDocument();
-    expect(screen.getByText("Proposed Plan Contract")).toBeInTheDocument();
+    expect(screen.queryByText("Proposed Plan Contract")).not.toBeInTheDocument();
     expect(await screen.findByText("Plan Contract · Version 1")).toBeInTheDocument();
     expect(proposalBodies).toHaveLength(1);
     expect(proposalBodies[0]?.idempotency_key).toEqual(expect.any(String));
 
-    expect(
-      screen.getByRole("button", { name: "Confirm action: Approve plan and send to QC" }),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Send to QC" })).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Confirm action: Reject and return to PM" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Review cadence" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send to QC" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reject plan" })).toBeInTheDocument();
+    expect(screen.queryByTestId("conversation-action-send_plan_to_qc")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("conversation-action-reject_plan")).not.toBeInTheDocument();
+    expect(screen.queryByText("Exact content hash")).not.toBeInTheDocument();
+    expect(screen.queryByText("Delivery status")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Confirm action: Request changes" }),
     ).not.toBeInTheDocument();
@@ -2117,6 +2122,120 @@ describe("conversation workspace", () => {
     expect(
       screen.getByRole("button", { name: "Confirm action: Request changes" }),
     ).toBeInTheDocument();
+  });
+
+  it("returns a rejected plan to the PM chat as the latest plan document", async () => {
+    const version = planVersion();
+    const rejectedVersion = planVersion({ status: "rejected" });
+    const sendAction = planAction({
+      id: "action-send-before-reject",
+      source_message_id: "message-plan-before-reject",
+    });
+    const rejectAction = planAction({
+      id: "action-reject-plan",
+      source_message_id: "message-plan-before-reject",
+      action_type: "reject_plan",
+      payload: {
+        parameters: {
+          plan_version_id: version.id,
+          content_hash: version.content_hash,
+          reason: "The plan needs another PM pass.",
+        },
+      },
+    });
+    const appliedRejectAction = planAction({
+      ...rejectAction,
+      status: "applied",
+      confirmed_by_user_id: "user-1",
+      confirmation_idempotency_key: "confirm-reject-plan",
+      confirmation_request_fingerprint: "c".repeat(64),
+      confirmed_at: now,
+      recorded_at: now,
+      sent_at: now,
+      acknowledged_at: now,
+      applied_at: now,
+    });
+    const planMessage = message({
+      id: "message-plan-before-reject",
+      role: "assistant",
+      sequence: 1,
+      parts: [
+        { type: "plan", plan_version_id: version.id },
+        { type: "action", action_id: sendAction.id },
+        { type: "action", action_id: rejectAction.id },
+      ],
+    });
+    const rejectedMessage = message({
+      id: "message-rejected-plan",
+      role: "system",
+      sequence: 2,
+      parts: [
+        {
+          type: "text",
+          format: "markdown",
+          text: "Rejected Plan v1: The plan needs another PM pass.",
+        },
+        { type: "plan", plan_version_id: rejectedVersion.id },
+        { type: "action", action_id: rejectAction.id },
+      ],
+    });
+    const effect = { kind: "plan_rejected" as const, plan_version: rejectedVersion };
+    let rejected = false;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith("/planning-reviewer")) {
+          return Response.json({
+            provider: "openai",
+            model: "gpt-5.6-sol",
+            mode: "explicit",
+            qc_mode: "automatic",
+            allow_unadjudicated_rebuttals: false,
+            default_max_rounds: 1,
+          });
+        }
+        if (
+          url.endsWith(`/conversations/${conversationId}`) &&
+          (!init?.method || init.method === "GET")
+        ) {
+          return detailResponse(
+            rejected ? [planMessage, rejectedMessage] : [planMessage],
+            null,
+            null,
+            {
+              workItem: { ...workItem, status: "planning" },
+              planVersions: [rejected ? rejectedVersion : version],
+              actions: rejected ? [appliedRejectAction] : [sendAction, rejectAction],
+            },
+          );
+        }
+        if (url.endsWith(`/actions/${rejectAction.id}/confirm`) && init?.method === "POST") {
+          rejected = true;
+          return Response.json({ action: appliedRejectAction, effect });
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Reject plan" }));
+
+    expect(await screen.findByText(/Rejected Plan v1/)).toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "Message the project PM" })).toBeInTheDocument();
+    const planCards = screen.getAllByRole("article", {
+      name: "Deliver conversation-first planning",
+    });
+    expect(within(planCards.at(-1) as HTMLElement).getByText("Rejected")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reject plan" })).not.toBeInTheDocument();
   });
 
   it.each(["typed command", "Plan button", "Plan button — skip QC"] as const)(
@@ -2446,41 +2565,30 @@ describe("conversation workspace", () => {
         expect(await screen.findByText(intentText)).toBeInTheDocument();
         expect(await screen.findByText("Plan Contract · Version 1")).toBeInTheDocument();
         expect(await screen.findByText("UI preview", { exact: true })).toBeInTheDocument();
-        expect(screen.queryByRole("button", { name: "Send to QC" })).not.toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Send to QC" })).toBeInTheDocument();
       } else if (skipsQc) {
         await waitFor(() => expect(saved).toBe(true));
         expect(handedOff).toBe(false);
         expect(approved).toBe(false);
-        await user.click(
-          await screen.findByRole("button", {
-            name: "Confirm action: Skip QC and continue",
-          }),
-        );
+        await user.click(await screen.findByRole("button", { name: "Continue without QC" }));
         await waitFor(() => expect(handedOff).toBe(true));
         expect(approved).toBe(false);
         expect(await screen.findByTestId("qc-new-workspace")).toBeInTheDocument();
-        expect(screen.getByRole("heading", { name: "Quality review passed" })).toBeInTheDocument();
+        expect(screen.getByRole("heading", { name: "Quality control" })).toBeInTheDocument();
+        expect(screen.getByText(/Quality review passed/)).toBeInTheDocument();
         expect(
           await screen.findByRole("button", { name: "Approve plan and start development" }),
         ).toBeInTheDocument();
       } else {
         await waitFor(() => expect(saved).toBe(true));
         expect(handedOff).toBe(false);
-        expect(
-          await screen.findByRole("button", {
-            name: "Confirm action: Approve plan and send to QC",
-          }),
-        ).toBeInTheDocument();
+        expect(await screen.findByRole("button", { name: "Send to QC" })).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "Plan with PM" })).toBeInTheDocument();
-        await user.click(
-          screen.getByRole("button", {
-            name: "Confirm action: Approve plan and send to QC",
-          }),
-        );
+        await user.click(screen.getByRole("button", { name: "Send to QC" }));
         await waitFor(() => expect(handedOff).toBe(true));
         expect(await screen.findByTestId("qc-new-workspace")).toBeInTheDocument();
         expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
-        expect(await screen.findByText("QC checks planned: 2 · Agents: 1")).toBeInTheDocument();
+        expect(screen.queryByText("QC checks planned: 2 · Agents: 1")).not.toBeInTheDocument();
       }
       expect(proposalBodies).toEqual([
         {
@@ -3127,7 +3235,7 @@ describe("conversation workspace", () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(screen.getByRole("heading", { name: "Round 2 of 3" })).toBeInTheDocument();
+    expect(screen.getAllByText("Round 2 of 3").length).toBeGreaterThan(0);
     expect(detailCalls).toBe(1);
 
     await act(async () => {
@@ -3530,9 +3638,7 @@ describe("conversation workspace", () => {
     await waitFor(() => expect(confirmationBodies).toHaveLength(2));
     expect(confirmationBodies[0]?.idempotency_key).toEqual(expect.any(String));
     expect(confirmationBodies[1]?.idempotency_key).toBe(confirmationBodies[0]?.idempotency_key);
-    expect(
-      await screen.findByRole("heading", { name: "Quality review passed" }),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Quality control" })).toBeInTheDocument();
   });
 
   it("keeps one in-memory confirmation key when session storage is unavailable", async () => {
@@ -3708,11 +3814,7 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await user.click(
-      await screen.findByRole("button", {
-        name: "Confirm action: Approve plan and send to QC",
-      }),
-    );
+    await user.click(await screen.findByRole("button", { name: "Send to QC" }));
     expect(
       await screen.findByText("stale plan hash", {
         exact: false,
@@ -3720,9 +3822,7 @@ describe("conversation workspace", () => {
       }),
     ).toBeInTheDocument();
     expect(screen.getByText("Plan Contract · Version 1")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Confirm action: Approve plan and send to QC" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Send to QC" })).toBeInTheDocument();
   });
 
   it("sends the kickoff QC-mode selection on the confirm request and issues no follow-up PATCH", async () => {
@@ -6094,9 +6194,8 @@ describe("conversation workspace", () => {
       />,
     );
 
-    expect(
-      await screen.findByRole("heading", { name: "Round 1 reviewer pass complete" }),
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Quality control" })).toBeInTheDocument();
+    expect(screen.getAllByText("Round 1 of 3").length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Accept all 1/ })).toBeInTheDocument();

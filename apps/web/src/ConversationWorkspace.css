@@ -1803,6 +1803,38 @@
   font-size: var(--text-xs);
 }
 
+.conversation-plan-footer {
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--line);
+}
+
+.conversation-plan-decisions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.conversation-plan-decisions > label {
+  display: grid;
+  min-width: min(18rem, 100%);
+  gap: 0.3rem;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  font-weight: 750;
+}
+
+.conversation-plan-decisions > div {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.55rem;
+}
+
+.conversation-plan-decisions .conversation-action-error {
+  flex-basis: 100%;
+}
+
 .conversation-plan-diff > div {
   margin-top: 0.65rem;
 }
@@ -4080,6 +4112,17 @@
   .conversation-plan-change-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .conversation-plan-decisions,
+  .conversation-plan-decisions > div {
+    width: 100%;
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .conversation-plan-decisions .btn {
+    width: 100%;
   }
 
   .conversation-thread-viewport {

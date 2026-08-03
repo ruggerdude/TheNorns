@@ -89,6 +89,7 @@ import {
   MockupRequestComposer,
   PmUpdateControls,
 } from "./ExecutionConversationControls";
+import { QC_MODE_OPTIONS } from "./Projects";
 import { QcWorkspace } from "./QcWorkspace";
 import {
   AI_PROVIDERS,
@@ -267,6 +268,7 @@ type SidebarConversationFamily = {
 
 interface ConversationWorkspaceProps {
   projectId: string;
+  projectName?: string | null;
   initialConversationId?: string | null;
   initialNewConversation?: boolean;
   initialBrief?: string | null;
@@ -607,6 +609,7 @@ type ConversationActionContextValue = {
   executionProposalBusy: boolean;
   executionProposalError: string | null;
   messageActionIds: Set<string>;
+  compactPlanActionIds: Set<string>;
   onUnauthorized: () => void;
 };
 
@@ -1814,10 +1817,114 @@ function PlanPreview({ data }: DataMessagePartProps<PlanData>): React.ReactEleme
   if (!data.version) return <ReferenceCard data={data} />;
   return (
     <>
-      <ConversationPlanCard version={data.version} />
+      <ConversationPlanCard
+        version={data.version}
+        footer={<PlanDecisionControls version={data.version} />}
+      />
       <StaffingReviewControl version={data.version} reviews={data.reviews} />
       <PlanChangeControl version={data.version} reviews={data.reviews} />
     </>
+  );
+}
+
+const COMPACT_PLAN_ACTION_STATUSES = new Set([
+  "proposed",
+  "confirmed",
+  "recorded",
+  "sent",
+  "agent_acknowledged",
+]);
+
+function PlanDecisionControls({
+  version,
+}: {
+  version: V2WorkPlanVersionT;
+}): React.ReactElement | null {
+  const context = useContext(ConversationActionContext);
+  const [qcMode, setQcMode] = useState<QcModeT>("automatic");
+  const actions = context ? [...context.actions.values()] : [];
+  const targetsVersion = (action: V2ConversationActionT): boolean =>
+    context?.compactPlanActionIds.has(action.id) === true &&
+    action.payload.parameters.plan_version_id === version.id &&
+    action.payload.parameters.content_hash === version.content_hash &&
+    COMPACT_PLAN_ACTION_STATUSES.has(action.status);
+  const send =
+    actions.find((action) => action.action_type === "send_plan_to_qc" && targetsVersion(action)) ??
+    null;
+  const reject =
+    actions.find((action) => action.action_type === "reject_plan" && targetsVersion(action)) ??
+    null;
+  const skipsQc =
+    send !== null &&
+    (send.payload.parameters.review as { mode?: string } | undefined)?.mode === "skip_qc";
+  const qcModeId = `plan-review-cadence-${version.id}`;
+
+  useEffect(() => {
+    if (!send || skipsQc) return;
+    let current = true;
+    void fetchPlanningReviewerSettings(send.project_id)
+      .then((settings) => {
+        if (current) setQcMode(settings.qc_mode);
+      })
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [send, skipsQc]);
+
+  if (!context || (!send && !reject)) return null;
+  const busy = context.busyActionId !== null;
+  const error =
+    (send ? context.errors.get(send.id) : null) ??
+    (reject ? context.errors.get(reject.id) : null) ??
+    null;
+
+  return (
+    <div className="conversation-plan-decisions" aria-label="Plan review actions">
+      {send && !skipsQc ? (
+        <label htmlFor={qcModeId}>
+          <span>Review cadence</span>
+          <Select
+            id={qcModeId}
+            aria-label="Review cadence"
+            value={qcMode}
+            disabled={busy}
+            onChange={(event) => setQcMode(event.target.value as QcModeT)}
+          >
+            {QC_MODE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </Select>
+        </label>
+      ) : null}
+      <div>
+        {send ? (
+          <Button
+            variant="primary"
+            disabled={busy}
+            onClick={() => void context.confirm(send, skipsQc ? undefined : qcMode)}
+          >
+            {context.busyActionId === send.id
+              ? "Sending…"
+              : skipsQc
+                ? "Continue without QC"
+                : "Send to QC"}
+          </Button>
+        ) : null}
+        {reject ? (
+          <Button variant="danger" disabled={busy} onClick={() => void context.confirm(reject)}>
+            {context.busyActionId === reject.id ? "Rejecting…" : "Reject plan"}
+          </Button>
+        ) : null}
+      </div>
+      {error ? (
+        <output className="conversation-action-error" role="alert">
+          {error}
+        </output>
+      ) : null}
+    </div>
   );
 }
 
@@ -1900,6 +2007,13 @@ function ActionPreview({ data }: DataMessagePartProps<ActionData>): React.ReactE
   const action = context?.actions.get(data.id) ?? data.action;
   if (!action || !context) return <ReferenceCard data={data} />;
   if (action.action_type === "answer_human_wait") return <></>;
+  if (
+    ((action.action_type === "send_plan_to_qc" || action.action_type === "reject_plan") &&
+      context.compactPlanActionIds.has(action.id)) ||
+    (action.action_type === "save_plan_candidate" && action.status === "applied")
+  ) {
+    return <></>;
+  }
   return (
     <ConversationActionCard
       action={action}
@@ -4462,7 +4576,7 @@ function ConversationThread({
           detail.conversation.id,
           action.id,
           idempotencyKey,
-          startsQc ? "gated_when_contested" : qcMode,
+          startsQc ? (qcMode ?? "gated_when_contested") : qcMode,
         );
         setActionOverrides((current) => new Map(current).set(action.id, result.action));
         const effect = result.effect;
@@ -4525,6 +4639,12 @@ function ConversationThread({
         message.parts.flatMap((part) => (part.type === "action" ? [part.action_id] : [])),
       ),
     );
+    const compactPlanActionIds = new Set(
+      detail.messages.flatMap((message) => {
+        if (!message.parts.some((part) => part.type === "plan")) return [];
+        return message.parts.flatMap((part) => (part.type === "action" ? [part.action_id] : []));
+      }),
+    );
     const effects = new Map<string, ConversationActionEffect>(
       detail.action_effects.map((record) => [record.action_id, record.effect]),
     );
@@ -4560,6 +4680,7 @@ function ConversationThread({
       executionProposalBusy,
       executionProposalError,
       messageActionIds,
+      compactPlanActionIds,
       onUnauthorized,
     };
   }, [
@@ -5330,6 +5451,7 @@ function NewWorkForm({
 
 export function ConversationWorkspace({
   projectId,
+  projectName = null,
   initialConversationId = null,
   initialNewConversation = false,
   initialBrief = null,
@@ -6261,122 +6383,128 @@ export function ConversationWorkspace({
     toolControl?: ReactNode,
     primaryAction?: ReactNode,
     planSummary?: string | null,
-  ) => (
-    <header className="conversation-header">
-      <Button
-        className="btn-small conversation-sidebar-toggle"
-        aria-expanded={!conversationSidebarCollapsed || conversationListOpen}
-        aria-controls="project-conversations"
-        aria-label="Expand work items"
-        onClick={() => {
-          setConversationSidebarCollapsed(false);
-          setConversationListOpen(true);
-        }}
-      >
-        <span aria-hidden="true">☰</span>
-      </Button>
-      <div className="conversation-header-identity">
-        {executionTargetLabel ? (
-          <span className="conversation-header-target">{executionTargetLabel}</span>
-        ) : null}
-        <h2>
-          {showNew
-            ? "Start new work"
-            : detail
-              ? displayConversationTitle(detail.work_item.title)
-              : "Conversation"}
-        </h2>
-        {planSummary ? (
-          <span className="conversation-header-plan-summary">{planSummary}</span>
-        ) : null}
-      </div>
-      {!showNew && detail ? (
-        <div className="conversation-header-actions">
-          {primaryAction}
-          <div className="conversation-header-menu">
-            <Button
-              className="btn-small"
-              variant="ghost"
-              aria-label="Chat options"
-              aria-haspopup="dialog"
-              aria-expanded={headerMenuOpen}
-              onClick={(event) => {
-                event.stopPropagation();
-                setHeaderMenuOpen((open) => !open);
-              }}
-            >
-              <span aria-hidden="true">•••</span>
-            </Button>
-            <dialog
-              className="conversation-header-menu-popover"
-              aria-label="Chat options"
-              open={headerMenuOpen}
-            >
-              <div className="conversation-header-menu-status">
-                <span>Conversation</span>
-                <Badge tone={detail.conversation.status === "active" ? "success" : "default"}>
-                  {detail.conversation.status.replaceAll("_", " ")}
-                </Badge>
-              </div>
-              {modelControl ? (
-                <div
-                  className="conversation-header-menu-section"
-                  onClick={(event) => {
-                    if (
-                      event.target instanceof Element &&
-                      event.target.closest(".conversation-agents-button") !== null
-                    ) {
-                      setHeaderMenuOpen(false);
-                    }
-                  }}
-                  onKeyUp={(event) => {
-                    if (
-                      (event.key === "Enter" || event.key === " ") &&
-                      event.target instanceof Element &&
-                      event.target.closest(".conversation-agents-button") !== null
-                    ) {
-                      setHeaderMenuOpen(false);
-                    }
-                  }}
-                >
-                  <span>Model and agents</span>
-                  {modelControl}
-                </div>
-              ) : null}
-              {toolControl ? (
-                <div className="conversation-header-menu-section">
-                  <span>Tools</span>
-                  {toolControl}
-                </div>
-              ) : null}
-              <div className="conversation-header-menu-actions">
-                <button
-                  type="button"
-                  disabled={loadingDetail}
-                  onClick={() => {
-                    setHeaderMenuOpen(false);
-                    void refresh();
-                  }}
-                >
-                  {loadingDetail ? "Refreshing…" : "Refresh conversation"}
-                </button>
-                <button
-                  type="button"
-                  disabled={!lastResponseText}
-                  onClick={() => {
-                    setHeaderMenuOpen(false);
-                    void copyLastResponse();
-                  }}
-                >
-                  {lastResponseCopied ? "Copied" : "Copy last response"}
-                </button>
-              </div>
-            </dialog>
-          </div>
+  ) => {
+    const showingQc =
+      !showNew && detail?.conversation.kind === "planning" && detail.plan_reviews.length > 0;
+    return (
+      <header className="conversation-header">
+        <Button
+          className="btn-small conversation-sidebar-toggle"
+          aria-expanded={!conversationSidebarCollapsed || conversationListOpen}
+          aria-controls="project-conversations"
+          aria-label="Expand work items"
+          onClick={() => {
+            setConversationSidebarCollapsed(false);
+            setConversationListOpen(true);
+          }}
+        >
+          <span aria-hidden="true">☰</span>
+        </Button>
+        <div className="conversation-header-identity">
+          {!showingQc && executionTargetLabel ? (
+            <span className="conversation-header-target">{executionTargetLabel}</span>
+          ) : null}
+          <h2>
+            {showingQc
+              ? (projectName ?? projectContext?.name ?? "Project")
+              : showNew
+                ? "Start new work"
+                : detail
+                  ? displayConversationTitle(detail.work_item.title)
+                  : "Conversation"}
+          </h2>
+          {!showingQc && planSummary ? (
+            <span className="conversation-header-plan-summary">{planSummary}</span>
+          ) : null}
         </div>
-      ) : null}
-    </header>
-  );
+        {!showNew && detail ? (
+          <div className="conversation-header-actions">
+            {primaryAction}
+            <div className="conversation-header-menu">
+              <Button
+                className="btn-small"
+                variant="ghost"
+                aria-label="Chat options"
+                aria-haspopup="dialog"
+                aria-expanded={headerMenuOpen}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setHeaderMenuOpen((open) => !open);
+                }}
+              >
+                <span aria-hidden="true">•••</span>
+              </Button>
+              <dialog
+                className="conversation-header-menu-popover"
+                aria-label="Chat options"
+                open={headerMenuOpen}
+              >
+                <div className="conversation-header-menu-status">
+                  <span>Conversation</span>
+                  <Badge tone={detail.conversation.status === "active" ? "success" : "default"}>
+                    {detail.conversation.status.replaceAll("_", " ")}
+                  </Badge>
+                </div>
+                {modelControl ? (
+                  <div
+                    className="conversation-header-menu-section"
+                    onClick={(event) => {
+                      if (
+                        event.target instanceof Element &&
+                        event.target.closest(".conversation-agents-button") !== null
+                      ) {
+                        setHeaderMenuOpen(false);
+                      }
+                    }}
+                    onKeyUp={(event) => {
+                      if (
+                        (event.key === "Enter" || event.key === " ") &&
+                        event.target instanceof Element &&
+                        event.target.closest(".conversation-agents-button") !== null
+                      ) {
+                        setHeaderMenuOpen(false);
+                      }
+                    }}
+                  >
+                    <span>Model and agents</span>
+                    {modelControl}
+                  </div>
+                ) : null}
+                {toolControl ? (
+                  <div className="conversation-header-menu-section">
+                    <span>Tools</span>
+                    {toolControl}
+                  </div>
+                ) : null}
+                <div className="conversation-header-menu-actions">
+                  <button
+                    type="button"
+                    disabled={loadingDetail}
+                    onClick={() => {
+                      setHeaderMenuOpen(false);
+                      void refresh();
+                    }}
+                  >
+                    {loadingDetail ? "Refreshing…" : "Refresh conversation"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!lastResponseText}
+                    onClick={() => {
+                      setHeaderMenuOpen(false);
+                      void copyLastResponse();
+                    }}
+                  >
+                    {lastResponseCopied ? "Copied" : "Copy last response"}
+                  </button>
+                </div>
+              </dialog>
+            </div>
+          </div>
+        ) : null}
+      </header>
+    );
+  };
 
   return (
     <div

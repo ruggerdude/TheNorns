@@ -2354,6 +2354,10 @@ export const V2PlanningLiveProgress = z
     model: V2NonEmptyString.nullable(),
     completed_items: nonNegativeInteger.default(0),
     total_items: nonNegativeInteger.default(0),
+    /** Total visible structured-output characters received for this operation.
+     * Unlike completed_items, this can advance while one whole-plan response
+     * is still streaming. */
+    output_characters: nonNegativeInteger.default(0),
     activity: V2NonEmptyString.default("Working on the current QC step"),
     /** Bounded provider output that is safe to show as the visible live
      * response. This is the model's emitted structured answer, not hidden

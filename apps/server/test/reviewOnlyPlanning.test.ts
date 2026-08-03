@@ -244,6 +244,7 @@ describe("review-only conversational planning", () => {
     expect(output.at(-1)).toMatchObject({
       stage: "reviewing",
       round: 1,
+      outputCharacters: 15,
       outputPreview: '{"findings":[]}',
     });
     expect(reviewer.requests).toHaveLength(1);

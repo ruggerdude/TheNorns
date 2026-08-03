@@ -2809,6 +2809,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
         model: "gpt-5.6-sol",
         completedItems: 0,
         totalItems: seed.seedPlan.plan.modules.length,
+        outputCharacters: 13,
         activity: "Checking plan modules against the QC requirements",
         outputPreview: '{"findings":[',
       },
@@ -2825,6 +2826,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       attempt: 1,
       provider: "openai",
       model: "gpt-5.6-sol",
+      output_characters: 13,
       output_preview: '{"findings":[',
     });
     await workflow.recordReviewOnlyProgress({

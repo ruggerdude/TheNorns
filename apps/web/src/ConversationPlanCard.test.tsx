@@ -64,15 +64,20 @@ function planVersion(): V2WorkPlanVersionT {
 }
 
 describe("conversation Plan Contract card", () => {
-  it("shows the server-authored version, ordered work, controls, evidence, budget, and diff", () => {
-    render(<ConversationPlanCard version={planVersion()} />);
+  it("shows the server-authored version, ordered work, controls, evidence, budget, diff, and footer", () => {
+    render(
+      <ConversationPlanCard
+        version={planVersion()}
+        footer={<button type="button">Send to QC</button>}
+      />,
+    );
 
     const card = screen.getByRole("article", {
       name: "Ship a dependable notification experience",
     });
     expect(within(card).getByText("Plan Contract · Version 2")).toBeInTheDocument();
     expect(within(card).getByText("Changes requested")).toBeInTheDocument();
-    expect(within(card).getByTitle("a".repeat(64))).toHaveTextContent("aaaaaaaaaa");
+    expect(within(card).queryByTitle("a".repeat(64))).not.toBeInTheDocument();
     expect(within(card).getByText("$73.50")).toBeInTheDocument();
 
     const sequence = within(card).getByRole("list", { name: "Plan task sequence" });
@@ -97,5 +102,6 @@ describe("conversation Plan Contract card", () => {
     expect(within(card).getByText("Added Web UI task")).toBeInTheDocument();
     expect(within(card).getByText("Raised API verification coverage")).toBeInTheDocument();
     expect(within(card).getByText("Removed manual retry step")).toBeInTheDocument();
+    expect(within(card).getByRole("button", { name: "Send to QC" })).toBeInTheDocument();
   });
 });

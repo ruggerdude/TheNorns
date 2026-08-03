@@ -1,4 +1,5 @@
 import type { V2WorkPlanContractT, V2WorkPlanVersionT } from "@norns/contracts";
+import type { ReactNode } from "react";
 import { Badge } from "./ui";
 
 const STATUS_LABELS: Record<V2WorkPlanVersionT["status"], string> = {
@@ -83,10 +84,12 @@ export function PlanVersionDiff({
 
 export function ConversationPlanCard({
   version,
+  footer,
 }: {
   version: V2WorkPlanVersionT;
+  footer?: ReactNode;
 }): React.ReactElement {
-  return <PlanCard plan={version.plan} version={version} cardId={version.id} />;
+  return <PlanCard plan={version.plan} version={version} cardId={version.id} footer={footer} />;
 }
 
 export function ConversationPlanDraftCard({
@@ -96,17 +99,19 @@ export function ConversationPlanDraftCard({
   actionId: string;
   plan: V2WorkPlanContractT;
 }): React.ReactElement {
-  return <PlanCard plan={plan} version={null} cardId={`draft-${actionId}`} />;
+  return <PlanCard plan={plan} version={null} cardId={`draft-${actionId}`} footer={null} />;
 }
 
 function PlanCard({
   cardId,
   plan,
   version,
+  footer,
 }: {
   cardId: string;
   plan: V2WorkPlanContractT;
   version: V2WorkPlanVersionT | null;
+  footer: ReactNode;
 }): React.ReactElement {
   const titleId = `conversation-plan-${cardId}`;
   const staffingByModule = new Map(plan.staffing.map((staffing) => [staffing.module_id, staffing]));
@@ -130,10 +135,7 @@ function PlanCard({
         </div>
         <div className="conversation-plan-status">
           {version ? (
-            <>
-              <Badge tone={badgeTone(version.status)}>{STATUS_LABELS[version.status]}</Badge>
-              <code title={version.content_hash}>{version.content_hash.slice(0, 10)}</code>
-            </>
+            <Badge tone={badgeTone(version.status)}>{STATUS_LABELS[version.status]}</Badge>
           ) : (
             <Badge tone="warn">Not saved</Badge>
           )}
@@ -247,6 +249,7 @@ function PlanCard({
           Confirm “Save plan candidate” to assign an immutable version, content hash, and diff.
         </p>
       )}
+      {footer ? <footer className="conversation-plan-footer">{footer}</footer> : null}
     </article>
   );
 }

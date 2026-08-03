@@ -130,6 +130,7 @@ export interface ReviewOnlyProgressEvent {
   model: string;
   completedItems: number;
   totalItems: number;
+  outputCharacters?: number;
   activity: string;
   outputPreview?: string | null;
 }
@@ -933,16 +934,21 @@ async function completeStructuredWithRepair<T>(
       let result: StructuredResult<T>;
       if (chat.onOutput && adapter.streamStructured) {
         let streamed = "";
-        let publishedLength = 0;
+        let publishedCharacters = 0;
         let publishedAt = 0;
         let outputWrites = Promise.resolve();
         const publish = () => {
+          const outputCharacters = streamed.length;
+          if (outputCharacters === publishedCharacters) return;
           const preview = streamed.slice(0, 6_000);
-          if (preview.length === publishedLength) return;
-          publishedLength = preview.length;
+          publishedCharacters = outputCharacters;
           publishedAt = Date.now();
           outputWrites = outputWrites.then(async () => {
-            await chat.onOutput?.({ ...progressEvent, outputPreview: preview });
+            await chat.onOutput?.({
+              ...progressEvent,
+              outputCharacters,
+              outputPreview: preview,
+            });
           });
         };
         try {
@@ -952,7 +958,7 @@ async function completeStructuredWithRepair<T>(
             schemaName,
             (delta) => {
               streamed += delta;
-              if (publishedLength === 0 || Date.now() - publishedAt >= 1_000) publish();
+              if (publishedCharacters === 0 || Date.now() - publishedAt >= 1_000) publish();
             },
           );
           publish();
