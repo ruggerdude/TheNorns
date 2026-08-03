@@ -1872,22 +1872,17 @@ export function Projects({
               const tasksDone = health?.completed_tasks ?? 0;
               const tasksTotal = health?.total_tasks ?? 0;
               return (
-                <article
+                <a
                   className={`card proj-row core-project-row s-${status}`}
                   key={project.id}
                   data-testid="proj-row"
+                  href={`#project-${encodeURIComponent(project.id)}`}
+                  aria-label={`Enter ${project.name}`}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    onOpenProject(project);
+                  }}
                 >
-                  <a
-                    className="pr-row-enter"
-                    href={`#project-${encodeURIComponent(project.id)}`}
-                    aria-label={`Enter ${project.name}`}
-                    onClick={(event) => {
-                      event.preventDefault();
-                      onOpenProject(project);
-                    }}
-                  >
-                    <span className="sr-only">Enter {project.name}</span>
-                  </a>
                   <div className="core-project-identity">
                     <div className="core-project-title-row">
                       <span className="status-dot" aria-hidden="true" />
@@ -1959,7 +1954,7 @@ export function Projects({
                         project.reviewer_provider}
                     </span>
                   </div>
-                </article>
+                </a>
               );
             })}
           </div>

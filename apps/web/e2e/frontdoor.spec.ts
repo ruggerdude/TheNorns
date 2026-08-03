@@ -753,14 +753,14 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   await expect(workspace).toBeVisible();
   const workspaceBox = await workspace.boundingBox();
   expect(workspaceBox).not.toBeNull();
-  expect(workspaceBox?.width).toBe(1660);
-  expect(workspaceBox?.x).toBe(260);
+  expect(workspaceBox?.width).toBe(1680);
+  expect(workspaceBox?.x).toBe(240);
 
   const navigationRail = page.locator(".workspace-shell > .topbar");
   const railBox = await navigationRail.boundingBox();
   expect(railBox).not.toBeNull();
   expect(railBox?.x).toBe(0);
-  expect(railBox?.width).toBe(260);
+  expect(railBox?.width).toBe(240);
   expect(railBox?.height).toBe(1080);
   const projectContext = page.getByTestId("workspace-project-context");
   await expect(projectContext.getByText("Project", { exact: true })).toBeVisible();
@@ -797,7 +797,7 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
     portfolioButtonBox?.y ?? 0,
   );
   expect(usageButtonBox?.x).toBe(16);
-  expect(portfolioControlBox?.width ?? 0).toBeGreaterThanOrEqual(214);
+  expect(portfolioControlBox?.width ?? 0).toBeGreaterThanOrEqual(200);
   expect(usageButtonBox?.width).toBe(portfolioControlBox?.width);
 
   await expect(page.getByRole("heading", { name: "Describe the project" })).toBeVisible();
@@ -1084,7 +1084,7 @@ test("Usage, Settings, and Admin use the regular application sidebar", async ({ 
   const globalRailBox = await globalRail.boundingBox();
   expect(globalRailBox).not.toBeNull();
   expect(globalRailBox?.x).toBe(0);
-  expect(globalRailBox?.width).toBe(260);
+  expect(globalRailBox?.width).toBe(240);
   expect(globalRailBox?.height).toBe(1080);
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();

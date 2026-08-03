@@ -350,7 +350,7 @@ test("project operations and exact mockup approval work on desktop and mobile", 
   await expect(dashboard).toBeVisible();
   await expect(dashboard.getByRole("heading", { name: "Status" })).toBeVisible();
   await expect(dashboard.getByText("Review checkout mockup")).toBeVisible();
-  await expect(dashboard.getByText("$8.00")).toBeVisible();
+  await expect(dashboard.getByLabel("Project operations summary").getByText("$8.00")).toBeVisible();
   const desktopColumns = await dashboard
     .locator(".operations-grid")
     .evaluate((element) => getComputedStyle(element).gridTemplateColumns);
