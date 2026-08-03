@@ -39,6 +39,7 @@ jobs:
         run: ./scripts/package-windows-agent.ps1 -Version '${{ inputs.version }}'
       - name: Authenticode sign installer
         id: signing
+        if: inputs.publish_release
         shell: pwsh
         env:
           SIGNING_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
@@ -98,6 +99,7 @@ jobs:
         run: ./scripts/package-macos-agent.sh '${{ inputs.version }}'
       - name: Developer ID sign and notarize installer
         id: notarization
+        if: inputs.publish_release
         env:
           APPLICATION_CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_P12_BASE64 }}
           INSTALLER_CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_P12_BASE64 }}
