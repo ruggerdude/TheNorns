@@ -371,11 +371,12 @@ async function request<T>(path: string, body?: unknown, signal?: AbortSignal): P
     signal,
   });
   if (res.status === 401) throw new UnauthorizedError();
-  const json = (await res.json()) as T & { detail?: string; message?: string };
+  const json = (await res.json()) as T & { detail?: string; error?: string; message?: string };
   if (!res.ok) {
     throw new ApiError(
       json.message ?? json.detail ?? `Request failed (${res.status}). Try again.`,
       res.status,
+      json.error ?? null,
     );
   }
   return json;
@@ -573,7 +574,10 @@ export function Projects({
   const [repositoryPrivate, setRepositoryPrivate] = useState(true);
   const [sourceError, setSourceError] = useState<string | null>(null);
   const [githubSetupBusy, setGitHubSetupBusy] = useState(false);
-  const [submissionError, setSubmissionError] = useState<string | null>(null);
+  const [submissionError, setSubmissionError] = useState<{
+    code: string | null;
+    message: string;
+  } | null>(null);
   const [localSources, setLocalSources] = useState<LocalRepositoryInventory | null>(null);
   const [localSourcesError, setLocalSourcesError] = useState<string | null>(null);
   const [localSelection, setLocalSelection] = useState<LocalRepositorySelection | null>(null);
@@ -1407,9 +1411,13 @@ export function Projects({
     } catch (e) {
       setCreationStatus(null);
       if (executionLocation !== "github_actions") setCloneDestination(null);
-      e instanceof UnauthorizedError
-        ? onUnauthorized()
-        : setSubmissionError(e instanceof Error ? e.message : String(e));
+      if (e instanceof UnauthorizedError) onUnauthorized();
+      else {
+        setSubmissionError({
+          code: e instanceof ApiError ? e.code : null,
+          message: e instanceof Error ? e.message : String(e),
+        });
+      }
     } finally {
       setCreating(false);
     }
@@ -2779,7 +2787,22 @@ export function Projects({
                     </section>
                   ) : null}
                   {submissionError ? (
-                    <Alert testId="onboarding-submit-error">{submissionError}</Alert>
+                    <Alert testId="onboarding-submit-error">
+                      <span className="project-submit-error-content">
+                        <span>{submissionError.message}</span>
+                        {submissionError.code === "github_reauthorization_required" ||
+                        submissionError.code === "github_app_credentials_invalid" ||
+                        submissionError.message.toLowerCase().includes("bad credentials") ? (
+                          <Button
+                            className="project-submit-error-action"
+                            variant="ghost"
+                            onClick={() => onOpenAccount("connections")}
+                          >
+                            Reconnect GitHub
+                          </Button>
+                        ) : null}
+                      </span>
+                    </Alert>
                   ) : null}
                   {creationStatus ? (
                     <output

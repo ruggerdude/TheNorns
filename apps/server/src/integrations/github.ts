@@ -406,6 +406,24 @@ export class GitHubIntegrationError extends Error {
  */
 export const GITHUB_APP_PERMISSION_MISSING = "github_app_permission_missing";
 export const GITHUB_REPOSITORY_UNAVAILABLE = "github_repository_unavailable";
+const GITHUB_BAD_CREDENTIALS = "github_bad_credentials";
+const GITHUB_APP_CREDENTIALS_INVALID = "github_app_credentials_invalid";
+
+function githubReauthorizationRequired(): GitHubIntegrationError {
+  return new GitHubIntegrationError(
+    "github_reauthorization_required",
+    "Your GitHub authorization is no longer valid. Reconnect GitHub in Settings, then try again.",
+    409,
+  );
+}
+
+function githubAppCredentialsInvalid(): GitHubIntegrationError {
+  return new GitHubIntegrationError(
+    GITHUB_APP_CREDENTIALS_INVALID,
+    "The GitHub App credentials are no longer valid. Open GitHub Connections in Settings and reconnect the app, then try again.",
+    409,
+  );
+}
 
 function base64Url(value: string | Uint8Array): string {
   return Buffer.from(value).toString("base64url");
@@ -948,10 +966,9 @@ export class GitHubIntegrationService {
     userId: string,
     restoreInstallationId?: string,
   ): Promise<GitHubConnectionSummary[]> {
-    const token = await this.userAccessToken(userId);
-    const response = await this.github<{ installations: GitHubInstallation[] }>(
+    const response = await this.githubAsUser<{ installations: GitHubInstallation[] }>(
+      userId,
       "/user/installations?per_page=100",
-      token,
     );
     return this.transactions.transaction(async (tx) => {
       for (const installation of response.installations) {
@@ -1002,15 +1019,12 @@ export class GitHubIntegrationService {
   ): Promise<GitHubRepositorySummary[]> {
     const connection = await this.connection(connectionId);
     // Installation-wide by API design; narrowed to metadata:read.
-    const token = await this.installationToken(
-      connection.installation_id,
-      GITHUB_TOKEN_SCOPES.listRepositories,
-    );
     const repositories: GitHubRepository[] = [];
     for (let page = 1; page <= 10; page += 1) {
-      const response = await this.github<{ repositories: GitHubRepository[] }>(
+      const response = await this.githubAsInstallation<{ repositories: GitHubRepository[] }>(
+        connection.installation_id,
+        GITHUB_TOKEN_SCOPES.listRepositories,
         `/installation/repositories?per_page=100&page=${page}`,
-        token,
       );
       repositories.push(...response.repositories);
       if (response.repositories.length < 100) break;
@@ -1100,7 +1114,7 @@ export class GitHubIntegrationService {
           403,
         );
       }
-      repository = await this.github<GitHubRepository>("/user/repos", authorization.accessToken, {
+      repository = await this.githubAsUser<GitHubRepository>(userId, "/user/repos", {
         method: "POST",
         body: JSON.stringify({
           name: input.name,
@@ -1405,8 +1419,31 @@ export class GitHubIntegrationService {
     return { ...row, accessToken: this.requireCipher().decrypt(row.access_token_ciphertext) };
   }
 
-  private async userAccessToken(userId: string): Promise<string> {
-    return (await this.authorization(userId)).accessToken;
+  /**
+   * User OAuth tokens can be revoked before their stored expiry. Retry one
+   * request with the refresh token, then turn a second 401 into a recovery
+   * instruction instead of exposing GitHub's raw "Bad credentials" response.
+   */
+  private async githubAsUser<T>(userId: string, path: string, init: RequestInit = {}): Promise<T> {
+    const authorization = await this.authorization(userId);
+    try {
+      return await this.github<T>(path, authorization.accessToken, init);
+    } catch (error) {
+      if (!(error instanceof GitHubIntegrationError) || error.code !== GITHUB_BAD_CREDENTIALS) {
+        throw error;
+      }
+    }
+
+    const refreshed = await this.refreshAuthorization(authorization);
+
+    try {
+      return await this.github<T>(path, refreshed.accessToken, init);
+    } catch (error) {
+      if (error instanceof GitHubIntegrationError && error.code === GITHUB_BAD_CREDENTIALS) {
+        throw githubReauthorizationRequired();
+      }
+      throw error;
+    }
   }
 
   private async refreshAuthorization(
@@ -1431,18 +1468,23 @@ export class GitHubIntegrationService {
     }
     const config = this.requireConfig();
     const cipher = this.requireCipher();
-    const token = await this.oauthToken({
-      client_id: config.clientId,
-      client_secret: config.clientSecret,
-      grant_type: "refresh_token",
-      refresh_token: cipher.decrypt(row.refresh_token_ciphertext),
-    });
+    const refreshToken = cipher.decrypt(row.refresh_token_ciphertext);
+    let token: OAuthTokenResponse;
+    try {
+      token = await this.oauthToken({
+        client_id: config.clientId,
+        client_secret: config.clientSecret,
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+      });
+    } catch (error) {
+      if (error instanceof GitHubIntegrationError && error.code === "github_authorization_failed") {
+        throw githubReauthorizationRequired();
+      }
+      throw error;
+    }
     if (!token.access_token) {
-      throw new GitHubIntegrationError(
-        "github_reauthorization_required",
-        token.error_description ?? "GitHub authorization could not be refreshed",
-        409,
-      );
+      throw githubReauthorizationRequired();
     }
     const now = Date.now();
     const next: AuthorizationRow = {
@@ -1593,6 +1635,7 @@ export class GitHubIntegrationService {
           409,
         );
       }
+      if (response.status === 401) throw githubAppCredentialsInvalid();
       const permissionHint =
         response.status === 403
           ? " Check whether the GitHub App installation has been suspended."
@@ -1607,6 +1650,34 @@ export class GitHubIntegrationService {
       "GitHub is temporarily unavailable. Refresh repositories in a moment.",
       409,
     );
+  }
+
+  /** A cached installation token can be revoked before its nominal expiry. */
+  private async githubAsInstallation<T>(
+    installationId: string,
+    scope: GitHubInstallationTokenScope,
+    path: string,
+    init: RequestInit = {},
+  ): Promise<T> {
+    const token = await this.installationToken(installationId, scope);
+    try {
+      return await this.github<T>(path, token, init);
+    } catch (error) {
+      if (!(error instanceof GitHubIntegrationError) || error.code !== GITHUB_BAD_CREDENTIALS) {
+        throw error;
+      }
+    }
+
+    this.forgetInstallationTokens(installationId);
+    const refreshed = await this.installationToken(installationId, scope);
+    try {
+      return await this.github<T>(path, refreshed, init);
+    } catch (error) {
+      if (error instanceof GitHubIntegrationError && error.code === GITHUB_BAD_CREDENTIALS) {
+        throw githubAppCredentialsInvalid();
+      }
+      throw error;
+    }
   }
 
   /** Drop every cached installation token (revocation / re-installation path). */
@@ -1781,6 +1852,13 @@ export class GitHubIntegrationService {
       if (canRetry && transient && attempt < 2) {
         await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** attempt));
         continue;
+      }
+      if (response.status === 401) {
+        throw new GitHubIntegrationError(
+          GITHUB_BAD_CREDENTIALS,
+          `${payload.message ?? "GitHub rejected the saved authorization"}.`,
+          409,
+        );
       }
       const permissionHint =
         response.status === 403 || response.status === 422

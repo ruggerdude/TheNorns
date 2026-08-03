@@ -24,6 +24,9 @@ describe.sequential("workspace GitHub integration", () => {
   let manifestPrivateKey: string;
   let transientAccessTokenFailures = 0;
   let rejectInstallationRefresh = false;
+  let rejectInstallationRepositoryCredentials = 0;
+  let rejectPersonalRepositoryCredentials = 0;
+  let oauthTokenRequests = 0;
   let deleteRepositoryStatus = 204;
   let rejectDeleteRepositoryScope = false;
 
@@ -57,6 +60,7 @@ describe.sequential("workspace GitHub integration", () => {
     http = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
       const url = String(input);
       if (url === "https://github.com/login/oauth/access_token") {
+        oauthTokenRequests += 1;
         return json({
           access_token: "github-user-token",
           refresh_token: "github-refresh-token",
@@ -118,6 +122,10 @@ describe.sequential("workspace GitHub integration", () => {
         return json({ token: "installation-token", expires_at: "2026-07-17T04:00:00Z" });
       }
       if (url.startsWith("https://api.github.com/installation/repositories")) {
+        if (rejectInstallationRepositoryCredentials > 0) {
+          rejectInstallationRepositoryCredentials -= 1;
+          return json({ message: "Bad credentials" }, 401);
+        }
         return json({ repositories: [repository()] });
       }
       if (url === "https://api.github.com/repositories/9001") {
@@ -129,6 +137,10 @@ describe.sequential("workspace GitHub integration", () => {
           : new Response(null, { status: 204 });
       }
       if (url === "https://api.github.com/user/repos") {
+        if (rejectPersonalRepositoryCredentials > 0) {
+          rejectPersonalRepositoryCredentials -= 1;
+          return json({ message: "Bad credentials" }, 401);
+        }
         return json(
           { ...repository(), id: 9002, name: "created", full_name: "octocat/created" },
           201,
@@ -195,6 +207,24 @@ describe.sequential("workspace GitHub integration", () => {
     await expect(
       service.resolveRepository("another-workspace-user", "github:42", "9001"),
     ).resolves.toMatchObject({ full_name: "octocat/hello-world" });
+  });
+
+  it("replaces a rejected installation token before listing repositories", async () => {
+    const tokenRequestsBefore = http.mock.calls.filter(([input]) =>
+      String(input).endsWith("/app/installations/42/access_tokens"),
+    ).length;
+    rejectInstallationRepositoryCredentials = 1;
+
+    await expect(service.listRepositories("norns-user-1", "github:42")).resolves.toMatchObject([
+      { id: "9001", full_name: "octocat/hello-world" },
+    ]);
+
+    const tokenRequestsAfter = http.mock.calls.filter(([input]) =>
+      String(input).endsWith("/app/installations/42/access_tokens"),
+    ).length;
+    // The fixture's nominal expiry is intentionally in the past, so this call
+    // mints once before the rejected API request and once more for the retry.
+    expect(tokenRequestsAfter).toBe(tokenRequestsBefore + 2);
   });
 
   it("mints an uncached, repository-scoped read credential for one local clone", async () => {
@@ -333,6 +363,23 @@ describe.sequential("workspace GitHub integration", () => {
     });
   });
 
+  it("refreshes a rejected personal authorization and retries repository creation", async () => {
+    const refreshesBefore = oauthTokenRequests;
+    rejectPersonalRepositoryCredentials = 1;
+
+    await expect(
+      service.createRepository("norns-user-1", {
+        connection_id: "github:42",
+        name: "created-after-refresh",
+        description: "Created after refreshing GitHub authorization",
+        private: true,
+        auto_init: true,
+      }),
+    ).resolves.toMatchObject({ id: "9002", full_name: "octocat/created" });
+
+    expect(oauthTokenRequests).toBe(refreshesBefore + 1);
+  });
+
   it("treats an entirely absent GitHub configuration as disabled", () => {
     expect(githubIntegrationConfigFromEnvironment({}, "https://norns.example")).toBeNull();
   });
@@ -434,7 +481,8 @@ describe.sequential("workspace GitHub integration", () => {
   it("returns cached connections when GitHub rejects a live refresh", async () => {
     rejectInstallationRefresh = true;
     await expect(service.status("norns-user-1")).resolves.toMatchObject({
-      refresh_error: "Bad credentials.",
+      refresh_error:
+        "Your GitHub authorization is no longer valid. Reconnect GitHub in Settings, then try again.",
       user_authorization: { connected: true, login: "octocat" },
       connections: [{ id: "github:42", owner_login: "octocat" }],
     });

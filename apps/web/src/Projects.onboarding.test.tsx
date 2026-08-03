@@ -461,6 +461,37 @@ describe("O1: GitHub and local Git repository onboarding", () => {
     expect(screen.queryByText("request failed: 500")).not.toBeInTheDocument();
   });
 
+  it("opens GitHub settings when repository creation needs reauthorization", async () => {
+    mock.post("/api/v2/projects/onboarding", {
+      status: 409,
+      body: {
+        error: "github_reauthorization_required",
+        message:
+          "Your GitHub authorization is no longer valid. Reconnect GitHub in Settings, then try again.",
+      },
+    });
+    const onOpenAccount = vi.fn();
+    mock.install();
+    render(
+      <Projects
+        onOpenProject={onOpenProject}
+        openProjects={[]}
+        onUnauthorized={vi.fn()}
+        onSignOut={vi.fn()}
+        user={null}
+        onOpenAccount={onOpenAccount}
+        onOpenAdmin={vi.fn()}
+      />,
+    );
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.type(screen.getByTestId("project-name"), "Fresh application");
+    await user.click(screen.getByRole("button", { name: /create project/i }));
+    await user.click(await screen.findByRole("button", { name: "Reconnect GitHub" }));
+
+    expect(onOpenAccount).toHaveBeenCalledWith("connections");
+  });
+
   it.each([
     {
       label: "New + GitHub",
