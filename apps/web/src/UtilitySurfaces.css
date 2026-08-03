@@ -289,15 +289,21 @@
   inset: 0;
   display: grid;
   place-items: center;
+  min-height: 100dvh;
+  overflow-y: auto;
   padding: var(--space-4);
   background: rgb(15 23 42 / 0.55);
   backdrop-filter: blur(3px);
 }
 
 .confirmation-dialog {
+  position: relative;
+  inset: auto;
   width: min(34rem, 100%);
+  max-height: calc(100dvh - (2 * var(--space-4)));
   margin: 0;
   gap: var(--space-4);
+  overflow-y: auto;
   padding: var(--space-6);
   box-shadow: var(--shadow-lg);
 }
@@ -331,6 +337,30 @@
   font-weight: 400;
   color: var(--muted);
   text-overflow: ellipsis;
+}
+
+.delete-project-progress {
+  display: block;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--text-sm);
+}
+
+.delete-project-remediation {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-subtle);
+}
+
+.delete-project-remediation p {
+  margin: 0;
+}
+
+.delete-project-remediation .btn {
+  justify-self: start;
 }
 
 .confirmation-actions {

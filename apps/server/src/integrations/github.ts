@@ -1162,6 +1162,7 @@ export class GitHubIntegrationService {
       `/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.name)}`,
       token,
       { method: "DELETE" },
+      [404],
     );
   }
 
@@ -1722,7 +1723,12 @@ export class GitHubIntegrationService {
     return payload;
   }
 
-  private async github<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
+  private async github<T>(
+    path: string,
+    token: string,
+    init: RequestInit = {},
+    acceptedStatuses: readonly number[] = [],
+  ): Promise<T> {
     const method = (init.method ?? "GET").toUpperCase();
     const canRetry = method === "GET" || path.endsWith("/access_tokens");
     for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -1741,7 +1747,7 @@ export class GitHubIntegrationService {
         message?: string;
         documentation_url?: string;
       };
-      if (response.ok) return payload;
+      if (response.ok || acceptedStatuses.includes(response.status)) return payload;
       const transient = [502, 503, 504].includes(response.status);
       if (canRetry && transient && attempt < 2) {
         await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** attempt));

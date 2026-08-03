@@ -1,4 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import "./UtilitySurfaces.css";
 import { QC_MODE_OPTIONS, type QcModeT } from "./Projects";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
@@ -155,11 +156,13 @@ async function deleteProjectRequest(
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as {
       detail?: string;
+      error?: string;
       message?: string;
     };
     throw new ApiError(
       body.message ?? body.detail ?? `request failed: ${response.status}`,
       response.status,
+      body.error ?? null,
     );
   }
 }
@@ -237,6 +240,7 @@ export function WorkspaceSettings({
   const [archivingProject, setArchivingProject] = useState(false);
   const [deletingProject, setDeletingProject] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteError, setDeleteError] = useState<Error | null>(null);
   const [deletionOptions, setDeletionOptions] = useState<ProjectDeletionOptionsDto | null>(null);
   const [deleteLocalFolder, setDeleteLocalFolder] = useState(false);
   const [deleteGitHubRepository, setDeleteGitHubRepository] = useState(false);
@@ -361,6 +365,7 @@ export function WorkspaceSettings({
     setDeletionOptions(null);
     setDeleteLocalFolder(false);
     setDeleteGitHubRepository(false);
+    setDeleteError(null);
     setError(null);
     try {
       setDeletionOptions(await projectDeletionOptionsRequest(projectId));
@@ -373,6 +378,7 @@ export function WorkspaceSettings({
 
   const deleteProject = async () => {
     setDeletingProject(true);
+    setDeleteError(null);
     setError(null);
     try {
       await deleteProjectRequest(projectId, {
@@ -383,7 +389,7 @@ export function WorkspaceSettings({
       onProjectArchived(projectId);
     } catch (caught) {
       if (caught instanceof UnauthorizedError) handleUnauthorized();
-      else setError(caught instanceof Error ? caught.message : String(caught));
+      else setDeleteError(caught instanceof Error ? caught : new Error(String(caught)));
     } finally {
       setDeletingProject(false);
     }
@@ -618,65 +624,121 @@ export function WorkspaceSettings({
           </Button>
         </div>
       </section>
-      {deleteDialogOpen ? (
-        <div className="confirmation-backdrop" role="presentation">
-          <dialog open className="card confirmation-dialog" aria-labelledby="delete-project-title">
-            <div>
-              <div className="eyebrow">Are you sure?</div>
-              <h2 id="delete-project-title">Delete {projectName}?</h2>
-            </div>
-            <p>This permanently deletes the project, its plans, and its history.</p>
-            {deletionOptions === null ? (
-              <Spinner label="Checking linked project files…" />
-            ) : (
-              <div className="delete-resource-options">
-                {deletionOptions.local_folder.available ? (
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={deleteLocalFolder}
-                      onChange={(event) => setDeleteLocalFolder(event.target.checked)}
-                    />
-                    <span>
-                      Delete local folder
-                      {deletionOptions.local_folder.label ? (
-                        <small>{deletionOptions.local_folder.label}</small>
-                      ) : null}
-                    </span>
-                  </label>
-                ) : null}
-                {deletionOptions.github_repository.available ? (
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={deleteGitHubRepository}
-                      onChange={(event) => setDeleteGitHubRepository(event.target.checked)}
-                    />
-                    <span>
-                      Delete GitHub repository
-                      {deletionOptions.github_repository.label ? (
-                        <small>{deletionOptions.github_repository.label}</small>
-                      ) : null}
-                    </span>
-                  </label>
-                ) : null}
-              </div>
-            )}
-            <div className="confirmation-actions">
-              <Button disabled={deletingProject} onClick={() => setDeleteDialogOpen(false)}>
-                Cancel
-              </Button>
-              <Button
-                variant="danger"
-                disabled={deletingProject || deletionOptions === null}
-                onClick={() => void deleteProject()}
+      {deleteDialogOpen
+        ? createPortal(
+            <div className="confirmation-backdrop" role="presentation">
+              <dialog
+                open
+                className="card confirmation-dialog"
+                aria-labelledby="delete-project-title"
+                aria-describedby="delete-project-description"
               >
-                {deletingProject ? "Deleting…" : "Yes, delete project"}
-              </Button>
-            </div>
-          </dialog>
-        </div>
-      ) : null}
+                <div>
+                  <div className="eyebrow">Are you sure?</div>
+                  <h2 id="delete-project-title">Delete {projectName}?</h2>
+                </div>
+                <p id="delete-project-description">
+                  This permanently deletes the project, its plans, and its history.
+                </p>
+                {deletionOptions === null ? (
+                  <Spinner label="Checking linked project files…" />
+                ) : (
+                  <div className="delete-resource-options">
+                    {deletionOptions.local_folder.available ? (
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={deleteLocalFolder}
+                          onChange={(event) => setDeleteLocalFolder(event.target.checked)}
+                        />
+                        <span>
+                          Delete local folder
+                          {deletionOptions.local_folder.label ? (
+                            <small>{deletionOptions.local_folder.label}</small>
+                          ) : null}
+                        </span>
+                      </label>
+                    ) : null}
+                    {deletionOptions.github_repository.available ? (
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={deleteGitHubRepository}
+                          onChange={(event) => setDeleteGitHubRepository(event.target.checked)}
+                        />
+                        <span>
+                          Delete GitHub repository
+                          {deletionOptions.github_repository.label ? (
+                            <small>{deletionOptions.github_repository.label}</small>
+                          ) : null}
+                        </span>
+                      </label>
+                    ) : null}
+                  </div>
+                )}
+                {deletingProject ? (
+                  <output className="delete-project-progress">
+                    {deleteGitHubRepository
+                      ? "Deleting the linked GitHub repository and project… This can take a moment."
+                      : deleteLocalFolder
+                        ? "Deleting the local folder and project… This can take a moment."
+                        : "Deleting the project…"}
+                  </output>
+                ) : null}
+                {deleteError ? <Alert>{deleteError.message}</Alert> : null}
+                {deleteError instanceof ApiError &&
+                deleteError.code === "github_app_permission_missing" ? (
+                  <div className="delete-project-remediation">
+                    <p>
+                      A GitHub App owner must add <strong>Administration: write</strong>, save the
+                      app, and accept the pending permission update on this installation.
+                    </p>
+                    <p>
+                      <a href="https://github.com/settings/apps" target="_blank" rel="noreferrer">
+                        Open GitHub App settings
+                      </a>{" "}
+                      ·{" "}
+                      <a
+                        href="https://github.com/settings/installations"
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        Open installed GitHub Apps
+                      </a>
+                    </p>
+                    <Button
+                      onClick={() => {
+                        setDeleteGitHubRepository(false);
+                        setDeleteError(null);
+                      }}
+                    >
+                      Keep GitHub repository instead
+                    </Button>
+                  </div>
+                ) : null}
+                <div className="confirmation-actions">
+                  <Button
+                    disabled={deletingProject}
+                    onClick={() => {
+                      setDeleteDialogOpen(false);
+                      setDeleteError(null);
+                    }}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    variant="danger"
+                    disabled={deletingProject || deletionOptions === null}
+                    onClick={() => void deleteProject()}
+                  >
+                    {deletingProject ? "Deleting…" : "Yes, delete project"}
+                  </Button>
+                </div>
+              </dialog>
+            </div>,
+            document.body,
+          )
+        : null}
       {error ? <Alert>{error}</Alert> : null}
     </div>
   );

@@ -118,20 +118,102 @@ describe("WorkspaceSettings project archiving", () => {
     await user.click(await screen.findByRole("button", { name: "Delete project" }));
     const dialog = await screen.findByRole("dialog", { name: "Delete Settings project?" });
     expect(dialog).toHaveTextContent("Are you sure?");
-    await user.click(screen.getByRole("checkbox", { name: /delete local folder/i }));
+    expect(dialog.closest(".confirmation-backdrop")?.parentElement).toBe(document.body);
+    await user.click(screen.getByRole("checkbox", { name: /delete github repository/i }));
     await user.click(screen.getByRole("button", { name: "Yes, delete project" }));
 
     await waitFor(() => expect(onProjectArchived).toHaveBeenCalledWith(projectId));
+    expect(
+      screen.queryByRole("dialog", { name: "Delete Settings project?" }),
+    ).not.toBeInTheDocument();
     expect(
       mock.calls.find(
         (call) => call.method === "DELETE" && call.url === `/api/v2/projects/${projectId}/destroy`,
       ),
     ).toMatchObject({
       body: {
-        delete_local_folder: true,
-        delete_github_repository: false,
+        delete_local_folder: false,
+        delete_github_repository: true,
       },
     });
+  });
+
+  it("keeps repository-deletion failures visible inside the dialog and allows a retry", async () => {
+    mock.get(`/api/v2/projects/${projectId}/deletion-options`, {
+      body: {
+        project_name: "Settings project",
+        local_folder: { available: false, label: null },
+        github_repository: { available: true, label: "octocat/settings-project" },
+      },
+    });
+    mock.del(`/api/v2/projects/${projectId}/destroy`, {
+      status: 409,
+      body: {
+        error: "github_app_permission_missing",
+        message:
+          "The GitHub App permission grant does not cover administration: write. A human must update it.",
+      },
+    });
+    setup();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "Delete project" }));
+    const dialog = await screen.findByRole("dialog", { name: "Delete Settings project?" });
+    await user.click(screen.getByRole("checkbox", { name: /delete github repository/i }));
+    await user.click(screen.getByRole("button", { name: "Yes, delete project" }));
+
+    const message = await screen.findByText(
+      "The GitHub App permission grant does not cover administration: write. A human must update it.",
+    );
+    expect(message.closest("dialog")).toBe(dialog);
+    expect(screen.getByRole("link", { name: "Open GitHub App settings" })).toHaveAttribute(
+      "href",
+      "https://github.com/settings/apps",
+    );
+    expect(screen.getByRole("link", { name: "Open installed GitHub Apps" })).toHaveAttribute(
+      "href",
+      "https://github.com/settings/installations",
+    );
+    expect(screen.getByRole("button", { name: "Yes, delete project" })).toBeEnabled();
+    expect(screen.getByRole("checkbox", { name: /delete github repository/i })).toBeChecked();
+    expect(onProjectArchived).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Keep GitHub repository instead" }));
+    expect(screen.getByRole("checkbox", { name: /delete github repository/i })).not.toBeChecked();
+    expect(message).not.toBeInTheDocument();
+  });
+
+  it("shows repository-deletion progress until the project closes", async () => {
+    mock.get(`/api/v2/projects/${projectId}/deletion-options`, {
+      body: {
+        project_name: "Settings project",
+        local_folder: { available: false, label: null },
+        github_repository: { available: true, label: "octocat/settings-project" },
+      },
+    });
+    let finishDeletion!: (result: { status: number }) => void;
+    mock.del(
+      `/api/v2/projects/${projectId}/destroy`,
+      () =>
+        new Promise((resolve) => {
+          finishDeletion = resolve;
+        }),
+    );
+    setup();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "Delete project" }));
+    await user.click(await screen.findByRole("checkbox", { name: /delete github repository/i }));
+    await user.click(screen.getByRole("button", { name: "Yes, delete project" }));
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Deleting the linked GitHub repository and project… This can take a moment.",
+    );
+    expect(screen.getByRole("button", { name: "Deleting…" })).toBeDisabled();
+
+    finishDeletion({ status: 204 });
+    await waitFor(() => expect(onProjectArchived).toHaveBeenCalledWith(projectId));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("keeps the project when the permanent-deletion dialog is cancelled", async () => {

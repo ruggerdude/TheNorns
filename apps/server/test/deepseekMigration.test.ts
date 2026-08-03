@@ -37,13 +37,17 @@ describe.sequential("DeepSeek provider migration", () => {
     await database.close();
   });
 
-  it("registers 0080 last and applies it through the current migration runner", async () => {
+  it("registers and applies 0080 through the current migration runner", async () => {
     const sources = await currentV2MigrationSources();
-    expect(sources.at(-1)).toMatchObject({ name: DEEPSEEK_PROVIDER_MIGRATION_NAME });
-    expect(sources.at(-1)?.sql).toContain("'deepseek'");
+    const source = sources.find(({ name }) => name === DEEPSEEK_PROVIDER_MIGRATION_NAME);
+    expect(source).toBeDefined();
+    expect(source?.sql).toContain("'deepseek'");
 
     const results = await runCurrentV2Migrations(database as unknown as V2MigrationDatabase);
-    expect(results.at(-1)).toMatchObject({ name: DEEPSEEK_PROVIDER_MIGRATION_NAME, applied: true });
+    expect(results.find(({ name }) => name === DEEPSEEK_PROVIDER_MIGRATION_NAME)).toMatchObject({
+      name: DEEPSEEK_PROVIDER_MIGRATION_NAME,
+      applied: true,
+    });
   }, 60_000);
 
   it("installs every durable provider constraint with DeepSeek accepted", async () => {

@@ -23,6 +23,7 @@ describe.sequential("workspace GitHub integration", () => {
   let manifestPrivateKey: string;
   let transientAccessTokenFailures = 0;
   let rejectInstallationRefresh = false;
+  let deleteRepositoryStatus = 204;
 
   beforeAll(async () => {
     pg = new PGlite();
@@ -104,7 +105,9 @@ describe.sequential("workspace GitHub integration", () => {
         return json(repository());
       }
       if (url === "https://api.github.com/repos/octocat/hello-world" && init?.method === "DELETE") {
-        return new Response(null, { status: 204 });
+        return deleteRepositoryStatus === 404
+          ? json({ message: "Not Found" }, 404)
+          : new Response(null, { status: 204 });
       }
       if (url === "https://api.github.com/user/repos") {
         return json(
@@ -227,6 +230,19 @@ describe.sequential("workspace GitHub integration", () => {
           init?.method === "DELETE",
       ),
     ).toBeDefined();
+  });
+
+  it("treats an already deleted repository as a successful retry", async () => {
+    deleteRepositoryStatus = 404;
+    await expect(
+      service.deleteRepository({
+        installationId: "42",
+        repositoryId: "9001",
+        owner: "octocat",
+        name: "hello-world",
+      }),
+    ).resolves.toBeUndefined();
+    deleteRepositoryStatus = 204;
   });
 
   it("retries a transient GitHub outage while loading repositories", async () => {

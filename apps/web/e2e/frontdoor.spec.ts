@@ -515,6 +515,24 @@ async function prepare(
     if (/^\/api\/projects\/project-[^/]+$/.test(path) && request.method() === "GET") {
       return fulfill(route, projects[0]);
     }
+    if (path.endsWith("/deletion-options") && request.method() === "GET") {
+      return fulfill(route, {
+        project_name: projects[0]?.name ?? "front-door-app",
+        local_folder: { available: false, label: null },
+        github_repository: { available: true, label: "octocat/front-door-app" },
+      });
+    }
+    if (path.endsWith("/destroy") && request.method() === "DELETE") {
+      return fulfill(
+        route,
+        {
+          error: "github_app_permission_missing",
+          message:
+            "The GitHub App's permission grant on this installation does not cover administration: write.",
+        },
+        409,
+      );
+    }
     if (/^\/api\/v2\/projects\/project-[^/]+\/rules$/.test(path) && request.method() === "GET") {
       return fulfill(route, {
         filename: "NORN.md",
@@ -1057,6 +1075,32 @@ test("Project archiving lives only in project Settings", async ({ page }) => {
   const dangerZone = page.getByRole("region", { name: "Remove project" });
   await expect(dangerZone).toBeVisible();
   await expect(dangerZone.getByRole("button", { name: "Archive project" })).toBeVisible();
+
+  await dangerZone.getByRole("button", { name: "Delete project" }).click();
+  const deleteDialog = page.getByRole("dialog", { name: "Delete front-door-app?" });
+  await expect(deleteDialog).toBeVisible();
+  const dialogBox = await deleteDialog.boundingBox();
+  expect((dialogBox?.x ?? 0) + (dialogBox?.width ?? 0) / 2).toBeCloseTo(390 / 2, 0);
+  expect((dialogBox?.y ?? 0) + (dialogBox?.height ?? 0) / 2).toBeCloseTo(844 / 2, 0);
+  expect(dialogBox?.x ?? -1).toBeGreaterThanOrEqual(0);
+  expect((dialogBox?.x ?? 0) + (dialogBox?.width ?? 0)).toBeLessThanOrEqual(390);
+
+  await deleteDialog.getByRole("checkbox", { name: /delete github repository/i }).check();
+  await deleteDialog.getByRole("button", { name: "Yes, delete project" }).click();
+  await expect(
+    deleteDialog.getByText(
+      "The GitHub App's permission grant on this installation does not cover administration: write.",
+    ),
+  ).toBeVisible();
+  await expect(
+    deleteDialog.getByRole("button", { name: "Keep GitHub repository instead" }),
+  ).toBeVisible();
+  const errorDialogBox = await deleteDialog.boundingBox();
+  expect((errorDialogBox?.x ?? 0) + (errorDialogBox?.width ?? 0) / 2).toBeCloseTo(390 / 2, 0);
+  expect((errorDialogBox?.y ?? 0) + (errorDialogBox?.height ?? 0) / 2).toBeCloseTo(844 / 2, 0);
+  expect((errorDialogBox?.y ?? 0) + (errorDialogBox?.height ?? 0)).toBeLessThanOrEqual(844);
+  await deleteDialog.getByRole("button", { name: "Cancel" }).click();
+  await expect(deleteDialog).toBeHidden();
 
   await page.getByRole("button", { name: "Menu", exact: true }).click();
   await workspaceNavigation.getByRole("button", { name: "Portfolio", exact: true }).click();

@@ -517,6 +517,11 @@ export const DEEPSEEK_PROVIDER_MIGRATION_URL = new URL(
   "../../../drizzle/0080_deepseek_provider.sql",
   import.meta.url,
 );
+export const PROJECT_DESTROY_MIGRATION_NAME = "0081_project_destroy";
+export const PROJECT_DESTROY_MIGRATION_URL = new URL(
+  "../../../drizzle/0081_project_destroy.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -868,6 +873,10 @@ export async function loadQcRoutineRoundDefaultMigrationSql(): Promise<string> {
 
 export async function loadDeepSeekProviderMigrationSql(): Promise<string> {
   return readFile(DEEPSEEK_PROVIDER_MIGRATION_URL, "utf8");
+}
+
+export async function loadProjectDestroyMigrationSql(): Promise<string> {
+  return readFile(PROJECT_DESTROY_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1361,6 +1370,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: DEEPSEEK_PROVIDER_MIGRATION_NAME,
       sql: await loadDeepSeekProviderMigrationSql(),
+    },
+    {
+      name: PROJECT_DESTROY_MIGRATION_NAME,
+      sql: await loadProjectDestroyMigrationSql(),
     },
   ];
 }
