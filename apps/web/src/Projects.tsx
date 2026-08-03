@@ -330,6 +330,22 @@ interface CloneDestinationSelection {
   computer_id: string;
 }
 
+interface LocalAgentDownloads {
+  windows: string | null;
+  macos: string | null;
+}
+
+function localAgentDownloads(payload: unknown): LocalAgentDownloads | null {
+  if (!payload || typeof payload !== "object" || !("downloads" in payload)) return null;
+  const downloads = (payload as { downloads: unknown }).downloads;
+  if (!downloads || typeof downloads !== "object") return null;
+  const candidate = downloads as Record<string, unknown>;
+  return {
+    windows: typeof candidate.windows === "string" ? candidate.windows : null,
+    macos: typeof candidate.macos === "string" ? candidate.macos : null,
+  };
+}
+
 async function request<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {
     method: body ? "POST" : "GET",
@@ -547,6 +563,7 @@ export function Projects({
     DISABLED_LOCAL_EXECUTION_CAPABILITIES,
   );
   const [computers, setComputers] = useState<OwnedDeviceProjectionT[] | null>(null);
+  const [agentDownloads, setAgentDownloads] = useState<LocalAgentDownloads | null>(null);
   const [computersError, setComputersError] = useState<string | null>(null);
   const [selectedComputerId, setSelectedComputerId] = useState("");
   const [cloneDestination, setCloneDestination] = useState<CloneDestinationSelection | null>(null);
@@ -906,12 +923,16 @@ export function Projects({
     maxBackoffMs: 60_000,
     resourceKey: "project-computers",
     load: async () => {
-      const payload = await request<{ devices: unknown }>("/api/devices");
-      return OwnedDeviceProjection.array().parse(payload.devices);
+      const payload = await request<{ devices: unknown; downloads?: unknown }>("/api/devices");
+      return {
+        computers: OwnedDeviceProjection.array().parse(payload.devices),
+        downloads: localAgentDownloads(payload),
+      };
     },
-    onSuccess: (availableComputers) => {
+    onSuccess: ({ computers: availableComputers, downloads }) => {
       setComputersError(null);
       setComputers(availableComputers);
+      setAgentDownloads(downloads);
       setSelectedComputerId((current) => {
         if (availableComputers.some((computer) => computer.device_id === current)) return current;
         return (
@@ -1551,6 +1572,21 @@ export function Projects({
         computer.agent.capabilities.includes("workspace_clone") &&
         computer.agent.capabilities.includes("workspace_clone_destination"),
     ) ?? [];
+  const activeComputers = computers?.filter((computer) => computer.lifecycle === "active") ?? [];
+  const computersNeedingFolderUpdate = activeComputers.filter(
+    (computer) =>
+      computer.status.availability === "online" &&
+      !readyComputers.some((readyComputer) => readyComputer.device_id === computer.device_id),
+  );
+  const computerNeedingFolderUpdate =
+    computersNeedingFolderUpdate.find((computer) => computer.device_id === selectedComputerId) ??
+    computersNeedingFolderUpdate[0];
+  const folderUpdateDownload =
+    computerNeedingFolderUpdate?.os_family === "macos"
+      ? agentDownloads?.macos
+      : computerNeedingFolderUpdate?.os_family === "windows"
+        ? agentDownloads?.windows
+        : null;
   const computerExecution = executionLocation !== "github_actions";
   const sourceReady = isLocalSource
     ? legacyLocalCreationAvailable && Boolean(localSelection)
@@ -2396,7 +2432,7 @@ export function Projects({
                             }}
                           >
                             <strong>This computer</strong>
-                            <span>Create a local working folder here.</span>
+                            <span>Select a folder here with the Local Agent.</span>
                           </button>
                           <button
                             type="button"
@@ -2412,7 +2448,7 @@ export function Projects({
                             }}
                           >
                             <strong>Remote computer</strong>
-                            <span>Create a folder on an online computer.</span>
+                            <span>Select a folder with that computer's Local Agent.</span>
                           </button>
                           <button
                             type="button"
@@ -2437,9 +2473,22 @@ export function Projects({
                             <Spinner label="Checking your computers…" />
                           ) : readyComputers.length === 0 ? (
                             <div className="connection-required connection-required-action-only">
-                              <Button type="button" className="btn-small" disabled>
-                                No agent
-                              </Button>
+                              {computersNeedingFolderUpdate.length > 0 && folderUpdateDownload ? (
+                                <a
+                                  className="btn btn-primary btn-small"
+                                  href={folderUpdateDownload}
+                                >
+                                  Update agent
+                                </a>
+                              ) : (
+                                <Button type="button" className="btn-small" disabled>
+                                  {computersNeedingFolderUpdate.length > 0
+                                    ? "Agent update needed"
+                                    : activeComputers.length > 0
+                                      ? "Agent offline"
+                                      : "No agent"}
+                                </Button>
+                              )}
                             </div>
                           ) : (
                             <div className="computer-project-picker">

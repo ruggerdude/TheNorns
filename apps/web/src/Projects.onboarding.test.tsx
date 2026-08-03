@@ -128,7 +128,16 @@ describe("O1: GitHub and local Git repository onboarding", () => {
         legacy_local_creation_available: true,
       },
     });
-    mock.get("/api/devices", { body: { devices: [projectComputer] } });
+    mock.get("/api/devices", {
+      body: {
+        devices: [projectComputer],
+        downloads: {
+          windows: "https://downloads.example/Norns-Local-Agent-Setup.exe",
+          macos: "https://downloads.example/Norns-Local-Agent-macOS.pkg",
+          macos_release: "notarized",
+        },
+      },
+    });
     mock.post("/api/v2/computers/device-1/clone-destination", {
       body: { clone_destination_id: "local:destination-1", label: "Projects" },
     });
@@ -378,6 +387,39 @@ describe("O1: GitHub and local Git repository onboarding", () => {
     expect(screen.queryByText("Online Local Agent required")).not.toBeInTheDocument();
     expect(screen.queryByText(/open or update the Local Agent/i)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Open Computers" })).not.toBeInTheDocument();
+  });
+
+  it("offers the installer when an online agent needs the folder-selection update", async () => {
+    mock.get("/api/devices", {
+      body: {
+        devices: [
+          {
+            ...projectComputer,
+            agent: {
+              ...projectComputer.agent,
+              capabilities: projectComputer.agent.capabilities.filter(
+                (capability) => capability !== "workspace_clone_destination",
+              ),
+            },
+          },
+        ],
+        downloads: {
+          windows: null,
+          macos: "https://downloads.example/Norns-Local-Agent-macOS.pkg",
+          macos_release: "notarized",
+        },
+      },
+    });
+    const user = userEvent.setup();
+    renderWizard();
+    await user.click(await screen.findByRole("button", { name: /new project/i }));
+    await user.click(screen.getByRole("button", { name: /^this computer/i }));
+
+    expect(await screen.findByRole("link", { name: "Update agent" })).toHaveAttribute(
+      "href",
+      "https://downloads.example/Norns-Local-Agent-macOS.pkg",
+    );
+    expect(screen.queryByRole("button", { name: "No agent" })).not.toBeInTheDocument();
   });
 
   it("keeps a computer check failure beside the execution choice and out of GitHub destination", async () => {
