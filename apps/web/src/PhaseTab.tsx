@@ -287,7 +287,6 @@ export interface PhaseTabProps {
   onComposerOpened?: () => void;
   onRunStarted?: (runId: string) => void;
   onJourneyChanged?: () => void;
-  onOpenRecoveryDetails?: (phaseId: string) => void;
   onConversationSelected?: (conversationId: string, replace?: boolean) => void;
   onNewConversation?: () => void;
   onUnauthorized: () => void;
@@ -301,7 +300,6 @@ function LegacyPhaseTab({
   onComposerOpened,
   onRunStarted,
   onJourneyChanged,
-  onOpenRecoveryDetails,
   onUnauthorized,
 }: PhaseTabProps): React.ReactElement {
   // a/b — setup form
@@ -726,12 +724,6 @@ function LegacyPhaseTab({
     executionDisplayState === "failed" ||
     executionDisplayState === "blocked" ||
     executionDisplayState === "start_attention";
-  const recoveryPhaseId = executionIsClosed
-    ? null
-    : (terminalDesignatedAttempt?.phaseId ??
-      failedExecutionRows[0]?.phase_id ??
-      blockedExecutionRows[0]?.phase_id ??
-      null);
   const affectedExecutionNames = [...failedExecutionRows, ...blockedExecutionRows]
     .map((row) => row.name)
     .join(", ");
@@ -1527,21 +1519,19 @@ function LegacyPhaseTab({
                         : " without a verified result"}
                       {executionIsClosed
                         ? ". This closed phase is retained here as read-only history."
-                        : ". Open recovery details to inspect the current attempt and decide the next step."}
+                        : ". This attempt needs attention."}
                     </>
                   ) : (
                     <>
                       Coding stopped after it started
-                      {affectedExecutionNames ? ` for ${affectedExecutionNames}` : ""}. Open
-                      recovery details to inspect the failed work and decide the next step.
+                      {affectedExecutionNames ? ` for ${affectedExecutionNames}` : ""}.
                     </>
                   )}
                 </p>
               ) : executionDisplayState === "blocked" ? (
                 <p data-testid="phase-execution-kickoff-note">
                   Coding is blocked
-                  {affectedExecutionNames ? ` for ${affectedExecutionNames}` : ""}. Open recovery
-                  details to see what needs attention.
+                  {affectedExecutionNames ? ` for ${affectedExecutionNames}` : ""}.
                 </p>
               ) : executionDisplayState === "closed" ? (
                 <p data-testid="phase-execution-kickoff-note">
@@ -1581,16 +1571,6 @@ function LegacyPhaseTab({
                 </p>
               )}
             </output>
-            {recoveryPhaseId && onOpenRecoveryDetails ? (
-              <Button
-                variant="primary"
-                className="phase-primary-action"
-                data-testid="phase-open-recovery-details"
-                onClick={() => onOpenRecoveryDetails(recoveryPhaseId)}
-              >
-                Open recovery details
-              </Button>
-            ) : null}
             {executionStartRetryAvailable ? (
               <Button
                 variant="primary"

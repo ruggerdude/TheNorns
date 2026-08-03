@@ -22,15 +22,7 @@ import { Debates } from "./Debates";
 import { Login, type LoginMode } from "./Login";
 import { PortfolioMenu } from "./PortfolioMenu";
 import { ProjectMembers } from "./ProjectMembers";
-import {
-  AttentionDecisionForm,
-  type AttentionItemDto,
-  type PortfolioAttentionDto,
-  type ProjectOpenOptions,
-  type ProjectSummary,
-  Projects,
-} from "./Projects";
-import { RunLog } from "./RunLog";
+import { type ProjectOpenOptions, type ProjectSummary, Projects } from "./Projects";
 import { type StaffingEdit, StrategyReview, type StrategyReviewDto } from "./StrategyReview";
 import { AuthenticatedHeaderActions } from "./UserMenu";
 import { WorkspaceSettings, prefetchProjectRules } from "./WorkspaceSettings";
@@ -318,12 +310,8 @@ interface PhaseExecutionDto {
   }>;
 }
 
-/** True while a run is still able to produce log output / accrue spend —
- *  used both to decide the fast poll cadence (App.tsx) and whether a task's
- *  RunLog panel should keep polling (RunLog.tsx). */
+/** True while a run is still able to produce output or accrue spend. */
 const RUN_ACTIVE_STATES = new Set(["created", "dispatched", "running", "verifying"]);
-
-type PhaseExecutionTask = PhaseExecutionDto["tasks"][number];
 
 function effectivePhaseStatus(execution: PhaseExecutionDto): string {
   const needsAttention = execution.tasks.some(
@@ -369,345 +357,6 @@ interface PlanningRunPollDto {
 }
 
 const NON_TERMINAL_RUN_STATUSES = new Set(["queued", "drafting", "reviewing", "revising"]);
-
-function agentRoleLabel(roles: string[] | undefined): string {
-  return roles?.length ? roles.map((role) => role.replaceAll("_", " ")).join(", ") : "Agent";
-}
-
-function evidenceLabel(evidence: {
-  artifact_id: string;
-  content_hash: string;
-  media_type: string;
-  label: string;
-}): string {
-  return `${evidence.label} · ${evidence.media_type} · ${evidence.content_hash.slice(0, 12)}`;
-}
-
-function formatUsd(amount: number): string {
-  return `$${amount.toFixed(2)}`;
-}
-
-/**
- * EXECUTION E13 — a single honest line of cost. Renders "—" rather than a
- * fabricated $0.00 whenever `spendUsd` is null (nothing metered yet), even
- * when a real budget is already known. Returns null (nothing rendered) only
- * when there is NEITHER a spend figure NOR a budget figure to show — the
- * caller decides whether that absence itself is worth a line ("no run yet").
- */
-function CostLine({
-  spendUsd,
-  budgetUsd,
-  testId,
-}: {
-  spendUsd: number | null | undefined;
-  budgetUsd: number | null | undefined;
-  testId?: string;
-}): React.ReactElement | null {
-  if (spendUsd === undefined && budgetUsd === undefined) return null;
-  const spendText =
-    spendUsd === null || spendUsd === undefined ? (
-      <span className="cost-unknown">no metered spend yet</span>
-    ) : (
-      <span className="cost-amount">{formatUsd(spendUsd)}</span>
-    );
-  return (
-    <div className="cost-line" data-testid={testId}>
-      <span>Spend:</span>
-      {spendText}
-      {budgetUsd !== null && budgetUsd !== undefined ? (
-        <span>of {formatUsd(budgetUsd)} budget</span>
-      ) : (
-        <span className="cost-unknown">budget not reserved yet</span>
-      )}
-    </div>
-  );
-}
-
-function TaskQcPanel({
-  task,
-  projectId,
-  phaseId,
-  reviewRequired,
-  focused,
-  onUnauthorized,
-}: {
-  task: PhaseExecutionTask;
-  projectId: string;
-  phaseId: string;
-  reviewRequired: boolean;
-  focused: boolean;
-  onUnauthorized: () => void;
-}): React.ReactElement {
-  const [directionTarget, setDirectionTarget] = useState("project_manager");
-  const [directionText, setDirectionText] = useState("");
-  const [directionBusy, setDirectionBusy] = useState(false);
-  const [directionStatus, setDirectionStatus] = useState<string | null>(null);
-  const reviewer = task.reviewer_agent ?? task.reviews?.at(-1)?.reviewer ?? null;
-  const implementationAgent = task.implementation_agent;
-
-  const sendDirection = async () => {
-    if (!directionText.trim()) return;
-    setDirectionBusy(true);
-    setDirectionStatus(null);
-    try {
-      await postJson(`/api/v2/projects/${projectId}/directions`, {
-        phase_id: phaseId,
-        task_id: task.id,
-        direction_target: directionTarget,
-        direction_text: directionText.trim(),
-        idempotency_key: `direction-${task.id}-${Date.now()}`,
-      });
-      setDirectionText("");
-      setDirectionStatus("Direction recorded in project memory. Agent delivery is pending.");
-    } catch (error) {
-      if (error instanceof UnauthorizedError) onUnauthorized();
-      else setDirectionStatus(error instanceof Error ? error.message : String(error));
-    } finally {
-      setDirectionBusy(false);
-    }
-  };
-
-  return (
-    <article
-      className={`phase-task task-${task.state} ${focused ? "is-focused" : ""}`}
-      id={`task-qc-${task.id}`}
-      data-testid={`task-qc-${task.id}`}
-    >
-      <div className="phase-task-head">
-        <strong>{task.title}</strong>
-        <Badge
-          tone={
-            task.state === "completed"
-              ? "success"
-              : ["blocked", "failed"].includes(task.state)
-                ? "danger"
-                : ["in_progress", "verifying", "in_review"].includes(task.state)
-                  ? "info"
-                  : "default"
-          }
-        >
-          {task.state.replaceAll("_", " ")}
-        </Badge>
-      </div>
-      <div className="phase-task-meta">
-        <span>
-          {task.complexity} · {task.risk} risk
-        </span>
-        {task.dependencies.length ? (
-          <span>Depends on {task.dependencies.length}</span>
-        ) : (
-          <span>Ready path</span>
-        )}
-        <span>{task.evidence_count} evidence</span>
-      </div>
-
-      <div className="agent-identity-grid">
-        <section className="agent-identity-card" aria-label="Implementation Agent">
-          <span className="eyebrow">Implementation Agent</span>
-          {implementationAgent ? (
-            <>
-              <strong>{implementationAgent.model}</strong>
-              <span>
-                {implementationAgent.provider} · {agentRoleLabel(implementationAgent.roles)}
-              </span>
-              <span className="mono">
-                {implementationAgent.profile_id} · {task.assignment?.status ?? "assigned"}
-              </span>
-            </>
-          ) : (
-            <span className="muted">No implementation agent assigned</span>
-          )}
-        </section>
-        <section className="agent-identity-card" aria-label="Independent QC Reviewer">
-          <span className="eyebrow">Independent QC Reviewer</span>
-          {reviewer ? (
-            <>
-              <strong>{reviewer.model}</strong>
-              <span>
-                {reviewer.provider} · {agentRoleLabel(reviewer.roles)}
-              </span>
-              <span className="mono">{reviewer.profile_id}</span>
-            </>
-          ) : (
-            <span className="muted">
-              {reviewRequired
-                ? "Awaiting independent reviewer assignment"
-                : "Review not required for this quick change"}
-            </span>
-          )}
-        </section>
-      </div>
-
-      {task.run ? (
-        <div className="run-line">
-          <span>
-            Run {task.run.attempt}: {task.run.state}
-          </span>
-          <span>Verification: {task.run.verification_status}</span>
-          {task.run.commit_sha ? <code>{task.run.commit_sha.slice(0, 8)}</code> : null}
-          {/* EXECUTION E10 — the click-through to the review. E4 published the
-              branch and opened the pull request; until now that fact lived only
-              in a run-log string and the UI could not link to it. */}
-          {task.run.pull_request_url ? (
-            <a
-              className="run-pull-request"
-              data-testid={`task-pr-${task.id}`}
-              href={task.run.pull_request_url}
-              rel="noreferrer noopener"
-              target="_blank"
-            >
-              View pull request
-            </a>
-          ) : task.run.published_branch ? (
-            <span className="muted" data-testid={`task-branch-${task.id}`}>
-              Branch {task.run.published_branch}
-              {task.run.publication_note ? ` · ${task.run.publication_note}` : ""}
-            </span>
-          ) : null}
-        </div>
-      ) : null}
-      {/* EXECUTION E13 — live cost for this task's designated run. Absent
-          entirely (no line at all) when the task has no run yet; a "—"
-          rather than $0.00 once a run exists but nothing has been metered. */}
-      {task.run && task.cost ? (
-        <CostLine
-          spendUsd={task.cost.spend_usd}
-          budgetUsd={task.cost.budget_usd}
-          testId={`task-cost-${task.id}`}
-        />
-      ) : null}
-      {/* EXECUTION E13 — the run's streamed log output, live while the run is
-          active and frozen (one final fetch, then no more polling) once it
-          is not. */}
-      {task.run ? (
-        <RunLog
-          projectId={projectId}
-          phaseId={phaseId}
-          taskId={task.id}
-          active={RUN_ACTIVE_STATES.has(task.run.state)}
-          onUnauthorized={onUnauthorized}
-        />
-      ) : null}
-      {task.run?.failure_detail ? <Alert>{task.run.failure_detail}</Alert> : null}
-      {/* EXECUTION E10 — WHICH command failed, and its output. A red badge over
-          a sha256 digest is not something a human can act on. */}
-      {task.failed_verification_commands?.length ? (
-        <details
-          className="verification-failures"
-          data-testid={`task-verification-${task.id}`}
-          open
-        >
-          <summary>
-            Verification failed: {task.failed_verification_commands.map((c) => c.name).join(", ")}
-          </summary>
-          {task.failed_verification_commands.map((failure) => (
-            <div className="verification-failure" key={`${task.id}-${failure.name}`}>
-              <div className="verification-failure-head">
-                <code>{failure.command.join(" ")}</code>
-                <span className="muted">exit {failure.exit_code}</span>
-              </div>
-              {failure.output ? <pre className="verification-output">{failure.output}</pre> : null}
-            </div>
-          ))}
-        </details>
-      ) : null}
-
-      <details className="task-qc-details" open={focused || Boolean(task.reviews?.length)}>
-        <summary>
-          QC timeline · {task.reviews?.length ?? 0} review
-          {(task.reviews?.length ?? 0) === 1 ? "" : "s"}
-        </summary>
-        <div className="qc-timeline">
-          {task.reviews?.length ? (
-            task.reviews.map((review) => (
-              <article className="qc-review" key={review.id}>
-                <div className="qc-review-head">
-                  <strong>Round {review.review_round}</strong>
-                  <Badge
-                    tone={
-                      review.decision === "approved"
-                        ? "success"
-                        : review.decision === "escalated"
-                          ? "danger"
-                          : "warn"
-                    }
-                  >
-                    {review.decision}
-                  </Badge>
-                  <time dateTime={review.created_at}>
-                    {new Intl.DateTimeFormat(undefined, {
-                      dateStyle: "medium",
-                      timeStyle: "short",
-                    }).format(new Date(review.created_at))}
-                  </time>
-                </div>
-                <p className="qc-reviewer">
-                  <strong>{review.reviewer.model}</strong> · {review.reviewer.provider} ·{" "}
-                  {review.reviewer.profile_id}
-                </p>
-                <p className="qc-summary">{review.summary}</p>
-                {review.evidence.length ? (
-                  <div className="qc-evidence">
-                    <strong>Evidence reviewed</strong>
-                    <ul>
-                      {review.evidence.map((evidence, index) => (
-                        <li key={`${review.id}-evidence-${index}`}>{evidenceLabel(evidence)}</li>
-                      ))}
-                    </ul>
-                  </div>
-                ) : null}
-              </article>
-            ))
-          ) : (
-            <p className="muted">
-              {reviewRequired
-                ? "No independent QC review has been recorded yet."
-                : "Review not required for this quick change."}
-            </p>
-          )}
-
-          <section className="task-direction" aria-label={`Direction for ${task.title}`}>
-            <div>
-              <strong>Provide direction</strong>
-              <p className="muted">
-                Direction is recorded in project memory. Delivery to the selected agent remains
-                pending until a coordinator context-assembly step consumes it; active runs are not
-                interrupted.
-              </p>
-            </div>
-            <Field label="Send to">
-              <Select
-                value={directionTarget}
-                onChange={(event) => setDirectionTarget(event.target.value)}
-              >
-                <option value="project_manager">Project Manager</option>
-                <option value="implementation_agent">Implementation Agent</option>
-                <option value="reviewer">QC Reviewer</option>
-                <option value="all_agents">All agents</option>
-              </Select>
-            </Field>
-            <Field label="Direction">
-              <TextArea
-                value={directionText}
-                placeholder="Clarify constraints, request rework, or give the next-step direction…"
-                onChange={(event) => setDirectionText(event.target.value)}
-              />
-            </Field>
-            <Button
-              className="btn-small"
-              variant="primary"
-              disabled={directionBusy || !directionText.trim()}
-              onClick={() => void sendDirection()}
-            >
-              {directionBusy ? "Recording…" : "Record direction"}
-            </Button>
-            {directionStatus ? <Alert>{directionStatus}</Alert> : null}
-          </section>
-        </div>
-      </details>
-    </article>
-  );
-}
 
 async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(path, { headers: authHeaders(false) });
@@ -831,7 +480,6 @@ function ProjectGraph({
   const [resume, setResume] = useState<ProjectResumeDto | null>(null);
   const [monitoredPhaseId, setMonitoredPhaseId] = useState<string | null>(null);
   const [phaseExecution, setPhaseExecution] = useState<PhaseExecutionDto | null>(null);
-  const [executionError, setExecutionError] = useState<string | null>(null);
   const [phaseJourneyRunId, setPhaseJourneyRunId] = useState<string | null>(
     isCanonicalPlanningJourney ? (project.focus_planning_run_id ?? null) : null,
   );
@@ -855,7 +503,6 @@ function ProjectGraph({
   const [updatePreferences, setUpdatePreferences] = useState<UpdatePreferences>(() =>
     resolveUpdatePreferences(project.id),
   );
-  const focusedTaskId = project.focus_task_id ?? null;
 
   // ------------------------------------------------------------------
   // Legacy planning recovery state. New work is composed in Work; these
@@ -871,8 +518,6 @@ function ProjectGraph({
   const [strategyReview, setStrategyReview] = useState<StrategyReviewDto | null>(null);
   const [strategyBusy, setStrategyBusy] = useState(false);
   const [strategyError, setStrategyError] = useState<string | null>(null);
-  const [phaseAttention, setPhaseAttention] = useState<AttentionItemDto[]>([]);
-  const [phaseAttentionBusy, setPhaseAttentionBusy] = useState<string | null>(null);
   // Last-known-*good* approval state (never "pending"): what we revert to when
   // an in-flight mutation fails, so the banner is never left stuck at pending.
   const lastGoodApprovalRef = useRef<ApprovalState>({ kind: "never" });
@@ -1130,18 +775,9 @@ function ProjectGraph({
     }
   }, [resume, monitoredPhaseId, project.focus_phase_id]);
 
-  useEffect(() => {
-    if (!focusedTaskId || !phaseExecution?.tasks.some((task) => task.id === focusedTaskId)) return;
-    document.getElementById(`task-qc-${focusedTaskId}`)?.scrollIntoView?.({
-      behavior: "smooth",
-      block: "center",
-    });
-  }, [focusedTaskId, phaseExecution]);
-
   const loadPhaseExecution = useCallback(async () => {
     if (!monitoredPhaseId) return;
     try {
-      setExecutionError(null);
       setPhaseExecution(
         await getJson<PhaseExecutionDto>(
           `/api/v2/projects/${project.id}/phases/${monitoredPhaseId}/execution`,
@@ -1149,7 +785,7 @@ function ProjectGraph({
       );
     } catch (err) {
       if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
-      else setExecutionError(err instanceof Error ? err.message : String(err));
+      else setPhaseExecution(null);
     }
   }, [monitoredPhaseId, project.id, onLogout]);
 
@@ -1158,7 +794,6 @@ function ProjectGraph({
   useEffect(() => {
     if (!monitoredPhaseId) return;
     setPhaseExecution(null);
-    setExecutionError(null);
   }, [monitoredPhaseId]);
 
   // EXECUTION E13 — polling cadence, and why it does NOT simply obey
@@ -1283,65 +918,6 @@ function ProjectGraph({
       setStrategyBusy(false);
     }
   }, [strategyReview, project.id, onLogout, loadResume]);
-
-  const loadProjectAttention = useCallback(async () => {
-    try {
-      const portfolio = await getJson<PortfolioAttentionDto>("/api/v2/attention");
-      setPhaseAttention(
-        monitoredPhaseId
-          ? portfolio.items.filter(
-              (item) => item.project_id === project.id && item.phase_id === monitoredPhaseId,
-            )
-          : [],
-      );
-    } catch (err) {
-      if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
-      else setPhaseAttention([]);
-    }
-  }, [monitoredPhaseId, project.id, onLogout]);
-
-  useEffect(() => {
-    void loadProjectAttention();
-    const timer = window.setInterval(() => void loadProjectAttention(), 10_000);
-    return () => window.clearInterval(timer);
-  }, [loadProjectAttention]);
-
-  const resolvePhaseDecision = useCallback(
-    async (
-      item: AttentionItemDto,
-      input: {
-        selectedOptionId: string;
-        rationale: string;
-        directionTarget: string;
-        directionText: string;
-        idempotencyKey: string;
-      },
-    ) => {
-      const decision = item.decision;
-      if (!decision) return;
-      setPhaseAttentionBusy(item.key);
-      try {
-        await postJson(
-          `/api/v2/projects/${item.project_id}/decision-points/${encodeURIComponent(decision.decision_point_id)}/resolve`,
-          {
-            expected_condition_fingerprint: decision.condition_fingerprint,
-            selected_option_id: input.selectedOptionId,
-            rationale: input.rationale,
-            direction_target: input.directionTarget,
-            direction_text: input.directionText,
-            idempotency_key: input.idempotencyKey,
-          },
-        );
-        await Promise.all([loadProjectAttention(), loadPhaseExecution(), loadResume()]);
-      } catch (err) {
-        if (err instanceof UnauthorizedError) onLogout("Session expired. Sign in again.");
-        else setResumeError(err instanceof Error ? err.message : String(err));
-      } finally {
-        setPhaseAttentionBusy(null);
-      }
-    },
-    [onLogout, loadProjectAttention, loadPhaseExecution, loadResume],
-  );
 
   const relationalGraph = useMemo<RelationalGraphReadModel | null>(() => {
     if (!draftOnly) return null;
@@ -2018,102 +1594,11 @@ function ProjectGraph({
                   void loadLatestRelationalPlanningRun();
                   void loadPhaseExecution();
                 }}
-                onOpenRecoveryDetails={(phaseId) => {
-                  setMonitoredPhaseId(phaseId);
-                  setWorkspaceTab("work");
-                  if (phaseId === monitoredPhaseId) void loadPhaseExecution();
-                }}
                 onConversationSelected={onConversationSelected}
                 onNewConversation={onNewConversation}
                 onUnauthorized={() => onLogout("Session expired. Sign in again.")}
               />
             </Suspense>
-
-            {phaseExecution ? (
-              <section className="card phase-execution" aria-labelledby="phase-execution-heading">
-                <div className="section-head">
-                  <div>
-                    <div className="eyebrow">Execution details</div>
-                    <h3 id="phase-execution-heading">{phaseExecution.phase.objective_summary}</h3>
-                  </div>
-                  <Badge
-                    tone={
-                      monitoredPhaseStatus === "needs attention"
-                        ? "danger"
-                        : monitoredPhaseStatus === "completed"
-                          ? "success"
-                          : "info"
-                    }
-                  >
-                    {monitoredPhaseStatus}
-                  </Badge>
-                </div>
-                <div className="phase-progress" aria-label="Phase task progress">
-                  <span
-                    style={{
-                      width: `${phaseExecution.phase.total_tasks ? (phaseExecution.phase.completed_tasks / phaseExecution.phase.total_tasks) * 100 : 0}%`,
-                    }}
-                  />
-                </div>
-                <p className="muted">
-                  {phaseExecution.phase.completed_tasks}/{phaseExecution.phase.total_tasks} tasks
-                  complete
-                </p>
-                <CostLine
-                  spendUsd={phaseExecution.phase.spend_usd}
-                  budgetUsd={phaseExecution.phase.budget_usd}
-                  testId="phase-cost"
-                />
-                <div className="phase-task-list" data-testid="phase-task-list">
-                  {phaseExecution.tasks.map((task) => (
-                    <TaskQcPanel
-                      key={task.id}
-                      task={task}
-                      projectId={project.id}
-                      phaseId={phaseExecution.phase.id}
-                      reviewRequired={phaseExecution.phase.planning_mode !== "quick"}
-                      focused={focusedTaskId === task.id}
-                      onUnauthorized={() => onLogout("Session expired. Sign in again.")}
-                    />
-                  ))}
-                </div>
-              </section>
-            ) : monitoredPhaseId && !executionError ? (
-              <Spinner label="Loading execution details…" />
-            ) : null}
-            {executionError ? <Alert testId="execution-error">{executionError}</Alert> : null}
-
-            {monitoredPhaseId && phaseAttention.length > 0 ? (
-              <section
-                className="card needs-you-panel"
-                aria-labelledby="phase-needs-you-heading"
-                data-testid="phase-needs-you"
-              >
-                <div className="section-head">
-                  <div>
-                    <div className="eyebrow">Needs you</div>
-                    <h3 id="phase-needs-you-heading">
-                      {phaseAttention.length} item{phaseAttention.length === 1 ? "" : "s"} in this
-                      phase
-                    </h3>
-                  </div>
-                </div>
-                {phaseAttention.map((item) => (
-                  <article key={item.key} className={`attention-item severity-${item.severity}`}>
-                    <h4>{item.title}</h4>
-                    <p>{item.summary}</p>
-                    {item.decision ? (
-                      <AttentionDecisionForm
-                        item={{ ...item, decision: item.decision }}
-                        busy={phaseAttentionBusy === item.key}
-                        onResolve={(input) => resolvePhaseDecision(item, input)}
-                      />
-                    ) : null}
-                  </article>
-                ))}
-              </section>
-            ) : null}
-            {resumeError ? <Alert testId="resume-error">{resumeError}</Alert> : null}
           </div>
         ) : null}
 

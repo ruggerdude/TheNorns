@@ -823,7 +823,7 @@ describe("PHASE TAB (P2)", () => {
     expect(screen.queryByTestId("phase-execution-error")).not.toBeInTheDocument();
   });
 
-  it("lets a current failed execution override a stale successful kickoff and opens recovery details", async () => {
+  it("lets a current failed execution override a stale successful kickoff without adding a detail panel", async () => {
     setToken("present");
     mock = workspaceMocks();
     mock.post(runsUrl, { body: { planning_run_id: "run-1" } });
@@ -877,8 +877,8 @@ describe("PHASE TAB (P2)", () => {
     );
     expect(screen.queryByTestId("phase-retry-execution")).not.toBeInTheDocument();
 
-    await user.click(screen.getByTestId("phase-open-recovery-details"));
-    expect(screen.getByRole("button", { name: "Work" })).toHaveClass("on");
+    expect(screen.queryByTestId("phase-open-recovery-details")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("phase-task-list")).not.toBeInTheDocument();
   });
 
   it("lets a current blocked execution override a stale successful kickoff", async () => {

@@ -3,7 +3,7 @@
 // App.tsx, so the only way to exercise them without editing production code
 // is to render the real, exported <App/> and drive it like a user — seed a
 // session token, mock fetch, open a project from the list.
-import { render, screen, within } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import userEvent, { type UserEvent } from "@testing-library/user-event";
 import { App } from "../App";
 import { setToken } from "../auth";
@@ -17,18 +17,11 @@ export function seedAuth(token = "test-token"): void {
 /** Render <App/> (Projects list first) and click through into the named
  *  project's graph workspace. Caller is responsible for having mocked
  *  GET /api/projects and GET /api/projects/:id/graph beforehand. */
-export async function renderAppAndOpenProject(
-  projectName: string,
-  options: { workspaceTab?: "Overview" | "Work" | "Graph" } = {},
-): Promise<{ user: UserEvent }> {
+export async function renderAppAndOpenProject(projectName: string): Promise<{ user: UserEvent }> {
   const user = userEvent.setup();
   render(<App />);
   await user.click(await screen.findByRole("button", { name: "Show active projects" }));
   const row = await screen.findByRole("button", { name: new RegExp(projectName, "i") });
   await user.click(row);
-  if (options.workspaceTab && options.workspaceTab !== "Overview") {
-    const workspaceNav = await screen.findByRole("navigation", { name: "Workspace sections" });
-    await user.click(within(workspaceNav).getByRole("button", { name: options.workspaceTab }));
-  }
   return { user };
 }

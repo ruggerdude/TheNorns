@@ -460,6 +460,8 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     await user.click(screen.getByRole("button", { name: "Work" }));
     expect(await screen.findByRole("heading", { name: "Coding stopped" })).toBeVisible();
     expect(screen.getByTestId("phase-new-work")).toBeVisible();
+    expect(screen.queryByTestId("phase-task-list")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("phase-open-recovery-details")).not.toBeInTheDocument();
 
     await user.click(await screen.findByTestId("phase-start-quick"));
 

@@ -310,7 +310,6 @@ describe("existing-project planning journey visual contract", () => {
         decided_at: "2026-07-25T12:00:00.000Z",
       },
     });
-    const openRecovery = vi.fn();
     mock = new MockFetch();
     mock.get(runUrl, { body: approvedRun });
     mock.get(`/api/v2/projects/${projectId}/execution-status`, {
@@ -330,14 +329,7 @@ describe("existing-project planning journey visual contract", () => {
     });
     mock.install();
 
-    render(
-      <PhaseTab
-        projectId={projectId}
-        initialRunId="run-visual"
-        onOpenRecoveryDetails={openRecovery}
-        onUnauthorized={vi.fn()}
-      />,
-    );
+    render(<PhaseTab projectId={projectId} initialRunId="run-visual" onUnauthorized={vi.fn()} />);
 
     expect(
       await screen.findByRole("heading", { name: "Coding needs attention" }),
@@ -347,8 +339,7 @@ describe("existing-project planning journey visual contract", () => {
     );
     expect(screen.queryByTestId("phase-retry-execution")).not.toBeInTheDocument();
 
-    await userEvent.click(screen.getByTestId("phase-open-recovery-details"));
-    expect(openRecovery).toHaveBeenCalledWith("foundation");
+    expect(screen.queryByTestId("phase-open-recovery-details")).not.toBeInTheDocument();
   });
 
   it("offers both planned and quick follow-up work after execution closes", async () => {
