@@ -34,6 +34,9 @@ const PLAN_PROPOSAL_SYSTEM = [
   "Treat the conversation as source evidence, not as the plan itself. Extract the latest agreed direction and explicit human decisions; do not turn greetings, exploration, abandoned alternatives, repeated explanations, or the mechanics of creating the plan into plan modules.",
   "When later messages revise or reject earlier ideas, keep only the latest accepted direction. Put genuinely unresolved choices in open_decisions instead of silently treating them as commitments.",
   "Preserve established human decisions, surface unresolved decisions, pin one OpenAI or Anthropic staffing choice per module, and include concrete verification requirements and budget.",
+  "Keep the plan compact. Use the fewest independently executable modules that cover the agreed work (normally 2–5). Do not split one coherent workstream into multiple modules for thoroughness.",
+  "For each module, use a one-sentence description, at most 3 non-overlapping deliverables, and at most 3 objectively checkable acceptance criteria. Keep inputs, outputs, open decisions, likely paths, owned components, test commands, environment requirements, candidate work units, and shared files to at most 3 items each unless the conversation explicitly requires more.",
+  "Do not repeat the same requirement across descriptions, deliverables, acceptance criteria, inputs, outputs, or verification requirements. Concision must not remove concrete repository paths, commands, dependencies, risk, staffing, verification, open decisions, or budget that are material to execution.",
 ].join("\n\n");
 
 /**

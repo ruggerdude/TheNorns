@@ -678,6 +678,11 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     expect(adapter.requests[0]?.system).toContain(
       "Extract the latest agreed direction and explicit human decisions",
     );
+    expect(adapter.requests[0]?.system).toContain(
+      "Use the fewest independently executable modules",
+    );
+    expect(adapter.requests[0]?.system).toContain("at most 3 non-overlapping deliverables");
+    expect(adapter.requests[0]?.system).toContain("Do not repeat the same requirement");
     expect(adapter.requests[0]?.prompt).toContain(
       "anthropic:claude-sonnet-5 as the execution agent",
     );

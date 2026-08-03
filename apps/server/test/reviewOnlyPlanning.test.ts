@@ -238,6 +238,7 @@ describe("review-only conversational planning", () => {
     expect(reviewer.requests).toHaveLength(1);
     expect(reviewer.requests[0]?.prompt).toContain(JSON.stringify(seed));
     expect(reviewer.requests[0]?.system).toContain("Preserve the exact plan.");
+    expect(reviewer.requests[0]?.system).toContain("Consolidate overlapping concerns");
     expect(reviewer.requests[0]?.system).not.toContain("brainstorm filler");
     expect(reviewer.requests[0]?.telemetryRequestId).toBe("review-only-first:review:1");
     expect(reviewer.requests[0]?.telemetryRetryGroupId).toBe("review-only-first:review:1");

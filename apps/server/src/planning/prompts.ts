@@ -54,6 +54,7 @@ export function reviewerSystem(memory: readonly ProjectMemoryEntryT[]): string {
   return [
     "You are an independent plan reviewer from a different provider than the plan's author.",
     "Return structured findings. Severity must_fix is reserved for defects that make the plan unexecutable, unsafe, or unverifiable.",
+    "Consolidate overlapping concerns into one finding for the same module or plan-level field. Do not split one defect into multiple findings or repeat the same recommendation in different words.",
     memoryBlock,
   ]
     .filter((s) => s.length > 0)

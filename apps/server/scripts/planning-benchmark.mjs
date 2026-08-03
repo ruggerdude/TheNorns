@@ -17,6 +17,12 @@ import pg from "pg";
 // Frozen reference for before/after diffing — do not recompute.
 const BASELINE = {
   window_since: "2026-07-30T00:00:00Z",
+  plan_creation: {
+    samples: 5,
+    median_wall_sec: 69.5,
+    range_wall_sec: [63.9, 82.4],
+    note: "production proposal attempts measured before the compact-plan prompt",
+  },
   calls: {
     "structured:conversation_work_plan_contract|claude-opus-4-8": {
       in: 5240,
@@ -134,6 +140,17 @@ const { rows: reviews } = await client.query(
     order by coalesce(started_at, created_at)`,
   [since],
 );
+const { rows: proposals } = await client.query(
+  `select p.id, p.status, p.failure_code, p.provider, p.model,
+          p.input_tokens, p.output_tokens, p.cost_usd,
+          p.started_at, p.settled_at,
+          a.payload #> '{parameters,plan}' as plan
+     from conversation_plan_proposal_attempts p
+     left join conversation_actions a on a.id = p.action_id
+    where ($1::timestamptz is null or p.started_at >= $1::timestamptz)
+    order by p.started_at`,
+  [since],
+);
 await client.end();
 
 // 1. Per request type + model.
@@ -172,7 +189,48 @@ const callStats = [...byType.entries()]
   })
   .sort((a, b) => a.key.localeCompare(b.key));
 
-// 2. Per review: cost of the QC loop and the plan-inflation metric.
+// 2. Plan proposals: exact end-to-end latency plus provider and serialized-plan size.
+const proposalStats = proposals.map((proposal) => ({
+  id: proposal.id,
+  status: proposal.status,
+  failureCode: proposal.failure_code,
+  provider: proposal.provider,
+  model: proposal.model,
+  inputTokens: num(proposal.input_tokens),
+  outputTokens: num(proposal.output_tokens),
+  costUsd: num(proposal.cost_usd),
+  wallClockSec:
+    proposal.started_at && proposal.settled_at
+      ? (new Date(proposal.settled_at) - new Date(proposal.started_at)) / 1000
+      : null,
+  planTokens: proposal.plan ? tokens(proposal.plan) : null,
+  planModules: modules(proposal.plan),
+}));
+const proposalWallTimes = proposalStats
+  .map((proposal) => proposal.wallClockSec)
+  .filter((value) => value !== null);
+const proposalSummary = {
+  attempts: proposalStats.length,
+  succeeded: proposalStats.filter((proposal) => proposal.status === "succeeded").length,
+  failed: proposalStats.filter((proposal) => proposal.status === "failed").length,
+  medianWallClockSec: pct(proposalWallTimes, 50),
+  p90WallClockSec: pct(proposalWallTimes, 90),
+  avgInputTokens: mean(
+    proposalStats.map((proposal) => proposal.inputTokens).filter((value) => value !== null),
+  ),
+  avgOutputTokens: mean(
+    proposalStats.map((proposal) => proposal.outputTokens).filter((value) => value !== null),
+  ),
+  avgPlanTokens: mean(
+    proposalStats.map((proposal) => proposal.planTokens).filter((value) => value !== null),
+  ),
+  avgPlanModules: mean(
+    proposalStats.map((proposal) => proposal.planModules).filter((value) => value !== null),
+  ),
+  baseline: BASELINE.plan_creation,
+};
+
+// 3. Per review: cost of the QC loop and the plan-inflation metric.
 const reviewStats = reviews.map((review) => {
   const group = calls.filter((c) => c.request_id.startsWith(review.usage_request_group_id));
   const seedTokens = tokens(review.seed_plan);
@@ -228,7 +286,7 @@ const reviewStats = reviews.map((review) => {
   };
 });
 
-// 3. QC reliability.
+// 4. QC reliability.
 const completedStatuses = new Set(["converged", "cap_reached"]);
 const failures = new Map();
 for (const review of reviews) {
@@ -257,6 +315,7 @@ const report = {
   since: since?.toISOString() ?? null,
   baseline: BASELINE,
   calls: callStats,
+  proposals: { summary: proposalSummary, attempts: proposalStats },
   reviews: reviewStats,
   reliability,
 };
@@ -299,7 +358,32 @@ if (asJson) {
     ),
   );
 
-  console.log("\n2. PER QC REVIEW — COST AND PLAN INFLATION\n");
+  console.log("\n2. PLAN CREATION — END-TO-END LATENCY AND SIZE\n");
+  console.log(
+    table(
+      proposalStats.map((proposal) => ({
+        proposal: proposal.id.replace("plan_proposal_", "").slice(0, 8),
+        status: proposal.failureCode
+          ? `${proposal.status}/${proposal.failureCode}`.slice(0, 28)
+          : proposal.status,
+        model: proposal.model,
+        wall_s: fmt(proposal.wallClockSec, 1),
+        in: proposal.inputTokens ?? "-",
+        out: proposal.outputTokens ?? "-",
+        plan_tok: proposal.planTokens ?? "-",
+        modules: proposal.planModules ?? "-",
+        usd: fmt(proposal.costUsd, 3),
+      })),
+    ),
+  );
+  console.log(
+    `   attempts ${proposalSummary.attempts} | succeeded ${proposalSummary.succeeded} | failed ${proposalSummary.failed} | ` +
+      `median ${fmt(proposalSummary.medianWallClockSec, 1)}s | p90 ${fmt(proposalSummary.p90WallClockSec, 1)}s | ` +
+      `avg output ${fmt(proposalSummary.avgOutputTokens)} tok | avg plan ${fmt(proposalSummary.avgPlanTokens)} tok / ${fmt(proposalSummary.avgPlanModules, 1)} modules\n` +
+      `   baseline: n=${BASELINE.plan_creation.samples}, median ${BASELINE.plan_creation.median_wall_sec}s, range ${BASELINE.plan_creation.range_wall_sec.join("–")}s\n`,
+  );
+
+  console.log("\n3. PER QC REVIEW — COST AND PLAN INFLATION\n");
   console.log(
     table(
       reviewStats.map((r) => ({
@@ -342,7 +426,7 @@ if (asJson) {
       `(${(ref.revisedTokens / ref.seedTokens).toFixed(1)}x tokens, ${(ref.revisedModules / ref.seedModules).toFixed(1)}x modules in one round)\n`,
   );
 
-  console.log("\n3. QC RELIABILITY\n");
+  console.log("\n4. QC RELIABILITY\n");
   console.log(
     `   reviews ${reliability.reviews} | completed ${reliability.completed} | failed ${reliability.failed} ` +
       `(${fmt(reliability.failureRate * 100, 1)}%) | baseline ${BASELINE.qc.failed}/${BASELINE.qc.reviews} failed\n`,
