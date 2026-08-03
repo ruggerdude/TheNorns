@@ -5,6 +5,7 @@ import {
   DEFAULT_MODEL_REGISTRY,
   buildSelectableModelCatalog,
   conservativeMaxChargeUsd,
+  estimateCostUsd,
   modelAvailabilityFromDebateEnvironment,
   quoteConservativeMaxCharge,
   snapshotModelPricing,
@@ -22,6 +23,33 @@ describe("selectable PM model metering", () => {
           pricing_is_estimate: false,
         });
       }
+    }
+  });
+
+  it("pins DeepSeek pricing and image capabilities to the effective published schedule", () => {
+    expect(DEFAULT_MODEL_REGISTRY["deepseek-v4-flash"]).toMatchObject({
+      provider: "deepseek",
+      supports_images: false,
+      input_per_mtok: 0.14,
+      cache_read_per_mtok: 0.0028,
+      output_per_mtok: 0.28,
+      pricing_version: "deepseek-2026-08-03",
+      pricing_is_estimate: false,
+    });
+    expect(DEFAULT_MODEL_REGISTRY["deepseek-v4-pro"]).toMatchObject({
+      provider: "deepseek",
+      supports_images: false,
+      input_per_mtok: 0.435,
+      cache_read_per_mtok: 0.003625,
+      output_per_mtok: 0.87,
+      pricing_version: "deepseek-2026-08-03",
+      pricing_is_estimate: false,
+    });
+
+    const flash = DEFAULT_MODEL_REGISTRY["deepseek-v4-flash"];
+    expect(flash).toBeDefined();
+    if (flash) {
+      expect(estimateCostUsd(flash, 1_000_000, 1_000_000, 250_000)).toBeCloseTo(0.3857);
     }
   });
 
@@ -99,6 +127,23 @@ describe("selectable PM model metering", () => {
     expect(configured.find((entry) => entry.model === "gpt-5.6-sol")).toMatchObject({
       available: false,
       unavailable_reason: "model_not_in_debate_allowlist",
+    });
+
+    const deepseekConfigured = buildSelectableModelCatalog(
+      modelAvailabilityFromDebateEnvironment({
+        DEEPSEEK_API_KEY: "deepseek-key",
+        [DEBATE_ALLOWED_MODELS_ENV]: "deepseek/deepseek-v4-flash",
+      }),
+    );
+    expect(deepseekConfigured.find((entry) => entry.model === "deepseek-v4-flash")).toMatchObject({
+      provider: "deepseek",
+      available: true,
+      unavailable_reason: null,
+      supports_images: false,
+      pricing: {
+        cache_read_per_mtok: 0.0028,
+        pricing_version: "deepseek-2026-08-03",
+      },
     });
   });
 

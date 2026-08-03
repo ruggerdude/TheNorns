@@ -60,6 +60,10 @@ const canonicalUsage: AiUsageLifecycleEventInputT = {
 };
 
 describe("normalized cache token invariants", () => {
+  it("accepts DeepSeek as a metered API provider", () => {
+    expect(UsageEvent.parse({ ...legacyUsage, provider: "deepseek" }).provider).toBe("deepseek");
+  });
+
   it("accepts provider-normalized cache subsets in legacy and canonical usage", () => {
     expect(UsageEvent.parse(legacyUsage)).toMatchObject({ input_tokens: 120 });
     expect(AiUsageLifecycleEventInput.parse(canonicalUsage)).toMatchObject({

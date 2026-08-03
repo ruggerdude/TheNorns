@@ -62,7 +62,7 @@ describe("project manager model selection", () => {
       const body = (onboardingCall?.body ?? {}) as {
         name: string;
         description: string;
-        pm_provider: "anthropic" | "openai";
+        pm_provider: ProjectSummary["pm_provider"];
         pm_model: Exclude<ProjectSummary["pm_model"], null>;
       };
       return {
@@ -118,11 +118,12 @@ describe("project manager model selection", () => {
     );
   }
 
-  it("offers current Anthropic and OpenAI models and defaults to Sonnet", async () => {
+  it("offers current Anthropic, OpenAI, and DeepSeek models and defaults to Sonnet", async () => {
     const select = await openCreateDialog();
 
     expect(within(select).getByRole("option", { name: "Claude Fable 5" })).toBeInTheDocument();
     expect(within(select).getByRole("option", { name: "GPT-5.6 Sol" })).toBeInTheDocument();
+    expect(within(select).getByRole("option", { name: "DeepSeek V4 Pro" })).toBeInTheDocument();
     expect(select).toHaveValue("claude-sonnet-5");
   });
 
@@ -162,6 +163,22 @@ describe("project manager model selection", () => {
     expect(
       mock.calls.some((call) => call.method === "POST" && call.url.endsWith("/planning-runs")),
     ).toBe(false);
+  });
+
+  it("submits DeepSeek with an Anthropic automatic reviewer", async () => {
+    const select = await openCreateDialog();
+    await userEvent.selectOptions(select, "deepseek-v4-pro");
+
+    expect(screen.queryByTestId("pm-effort")).not.toBeInTheDocument();
+    expect(screen.getByTestId("reviewer-model")).toHaveDisplayValue(
+      "Automatic (cross-provider) · Claude Sonnet 5",
+    );
+    expect(await submit("DeepSeek project")).toMatchObject({
+      body: {
+        pm_provider: "deepseek",
+        pm_model: "deepseek-v4-pro",
+      },
+    });
   });
 
   it("shows the selected PM model on project cards", async () => {

@@ -28,11 +28,16 @@ export const GATEWAY_CREDENTIAL_PATH = "/api/execution/gateway/credentials";
 export interface GatewayCredential {
   token: string;
   expires_at: string;
-  /** Give this to Claude Code as ANTHROPIC_BASE_URL. */
+  /** Give this to Claude Code for an Anthropic run. */
   anthropic_base_url: string;
+  /** Give this to Claude Code for a DeepSeek Anthropic-wire-compatible run. */
+  deepseek_base_url: string;
   /** Give this to Codex as its `baseUrl`. Already ends in `/v1`. */
   openai_base_url: string;
 }
+
+/** The two credential routes supported by provider-native local runtimes. */
+export type RuntimeCredentialMode = "api" | "subscription";
 
 export class GatewayCredentialError extends Error {
   constructor(
@@ -99,6 +104,7 @@ export class ModelGatewayClient {
       typeof responseBody.token !== "string" ||
       typeof responseBody.expires_at !== "string" ||
       typeof responseBody.anthropic_base_url !== "string" ||
+      typeof responseBody.deepseek_base_url !== "string" ||
       typeof responseBody.openai_base_url !== "string"
     ) {
       throw new GatewayCredentialError(
@@ -110,9 +116,23 @@ export class ModelGatewayClient {
       token: responseBody.token,
       expires_at: responseBody.expires_at,
       anthropic_base_url: responseBody.anthropic_base_url,
+      deepseek_base_url: responseBody.deepseek_base_url,
       openai_base_url: responseBody.openai_base_url,
     };
   }
+}
+
+/**
+ * Returns the gateway endpoint for any Anthropic Messages-compatible runtime.
+ *
+ * The explicit provider argument prevents a DeepSeek run from silently using
+ * the Anthropic endpoint merely because both speak the Messages wire format.
+ */
+export function anthropicCompatibleGatewayBaseUrl(
+  credential: GatewayCredential,
+  provider: "anthropic" | "deepseek",
+): string {
+  return provider === "deepseek" ? credential.deepseek_base_url : credential.anthropic_base_url;
 }
 
 /**
@@ -139,8 +159,12 @@ export const PROVIDER_KEY_ENV_VARS = [
   "CLAUDE_CODE_OAUTH_TOKEN",
   "OPENAI_API_KEY",
   "CODEX_API_KEY",
+  "DEEPSEEK_API_KEY",
   "ANTHROPIC_BASE_URL",
   "OPENAI_BASE_URL",
+  "OPENAI_API_BASE",
+  "DEEPSEEK_BASE_URL",
+  "DEEPSEEK_API_BASE",
 ] as const;
 
 /**
@@ -148,9 +172,9 @@ export const PROVIDER_KEY_ENV_VARS = [
  * gateway's own settings applied. Built explicitly rather than by mutation so
  * the runner's own environment is never altered.
  */
-export function gatewayEnvironment(
+export function credentialFreeEnvironment(
   base: NodeJS.ProcessEnv,
-  overrides: Record<string, string>,
+  overrides: Record<string, string> = {},
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(base)) {
@@ -160,3 +184,6 @@ export function gatewayEnvironment(
   }
   return { ...env, ...overrides };
 }
+
+/** @deprecated Prefer `credentialFreeEnvironment`; retained for compatibility. */
+export const gatewayEnvironment = credentialFreeEnvironment;

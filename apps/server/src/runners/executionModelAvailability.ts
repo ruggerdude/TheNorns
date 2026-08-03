@@ -10,9 +10,13 @@ import { RUNNER_ALLOWED_MODELS_ENV, parseRunnerAllowedModels } from "./inference
 type ExecutionEnvironment = Readonly<Record<string, string | undefined>>;
 
 function credentialPresent(provider: ProviderName, environment: ExecutionEnvironment): boolean {
-  return Boolean(
-    (provider === "anthropic" ? environment.ANTHROPIC_API_KEY : environment.OPENAI_API_KEY)?.trim(),
-  );
+  const value =
+    provider === "anthropic"
+      ? environment.ANTHROPIC_API_KEY
+      : provider === "openai"
+        ? environment.OPENAI_API_KEY
+        : environment.DEEPSEEK_API_KEY;
+  return Boolean(value?.trim());
 }
 
 /**
@@ -64,7 +68,12 @@ export function executionModelUnavailableMessage(
     return `Execution agent ${provider}/${model} is not a selectable registered model.`;
   }
   if (entry.unavailable_reason === "provider_api_key_not_configured") {
-    const key = provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
+    const key =
+      provider === "anthropic"
+        ? "ANTHROPIC_API_KEY"
+        : provider === "openai"
+          ? "OPENAI_API_KEY"
+          : "DEEPSEEK_API_KEY";
     return `Execution agent ${provider}/${model} is allowlisted, but ${key} is not configured.`;
   }
   if (entry.unavailable_reason === "runner_model_allowlist_not_configured") {

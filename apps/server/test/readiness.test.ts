@@ -44,6 +44,7 @@ describe("deployment readiness", () => {
           required: false,
           anthropic: false,
           openai: false,
+          deepseek: false,
           cross_provider_ready: false,
         },
         execution_models: {

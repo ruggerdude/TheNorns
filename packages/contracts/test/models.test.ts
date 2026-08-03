@@ -23,6 +23,7 @@ describe("PM model catalog", () => {
     expect(DEFAULT_PM_MODEL).toEqual({
       anthropic: "claude-sonnet-5",
       openai: "gpt-5.6-terra",
+      deepseek: "deepseek-v4-flash",
     });
   });
 });

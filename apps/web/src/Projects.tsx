@@ -4,8 +4,8 @@ import {
   DEFAULT_PM_MODEL,
   OwnedDeviceProjection,
   type OwnedDeviceProjectionT,
-  PM_MODEL_OPTIONS,
   type PmModelT,
+  type PmProviderT,
   type V2QcModeT,
   pmModelOption,
   providerForPmModel,
@@ -14,6 +14,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { GitHubConnection, GitHubIntegrationStatus, SettingsTab } from "./Account";
 import { PortfolioMenu } from "./PortfolioMenu";
 import { AuthenticatedHeaderActions } from "./UserMenu";
+import { PM_MODEL_GROUPS, aiProviderLabel, defaultReviewerProviderFor } from "./aiProviders";
 import { ApiError, type CurrentUser, UnauthorizedError, authHeaders } from "./auth";
 import {
   DISABLED_LOCAL_EXECUTION_CAPABILITIES,
@@ -48,9 +49,9 @@ export interface ProjectSummary {
   id: string;
   name: string;
   description: string;
-  pm_provider: "anthropic" | "openai";
+  pm_provider: PmProviderT;
   pm_model: PmModelT | null;
-  reviewer_provider: "anthropic" | "openai";
+  reviewer_provider: PmProviderT;
   status: "draft" | "planned";
   created_at: string;
   plan_objective: string | null;
@@ -525,7 +526,7 @@ export function Projects({
   const [pmModel, setPmModel] = useState<PmModelT>(DEFAULT_PM_MODEL.anthropic);
   const [pmEffort, setPmEffort] = useState<CodexReasoningEffortT>(DEFAULT_CODEX_REASONING_EFFORT);
   const pmProvider = providerForPmModel(pmModel);
-  const reviewerProviderPreview = pmProvider === "anthropic" ? "openai" : "anthropic";
+  const reviewerProviderPreview = defaultReviewerProviderFor(pmProvider);
   const reviewerPreviewLabel =
     pmModelOption(DEFAULT_PM_MODEL[reviewerProviderPreview])?.label ?? reviewerProviderPreview;
   const [githubStatus, setGitHubStatus] = useState<GitHubIntegrationStatus | null>(null);
@@ -1947,11 +1948,11 @@ export function Projects({
                     <span title="Coordinator">
                       {project.pm_model
                         ? (pmModelOption(project.pm_model)?.label ?? project.pm_model)
-                        : `${project.pm_provider} default`}
+                        : `${aiProviderLabel(project.pm_provider)} default`}
                     </span>
                     <span title="Reviewer">
                       {pmModelOption(DEFAULT_PM_MODEL[project.reviewer_provider])?.label ??
-                        project.reviewer_provider}
+                        aiProviderLabel(project.reviewer_provider)}
                     </span>
                   </div>
                 </a>
@@ -2586,20 +2587,15 @@ export function Projects({
                             value={pmModel}
                             onChange={(event) => setPmModel(event.target.value as PmModelT)}
                           >
-                            <optgroup label="Anthropic">
-                              {PM_MODEL_OPTIONS.anthropic.map((model) => (
-                                <option key={model.id} value={model.id}>
-                                  {model.label}
-                                </option>
-                              ))}
-                            </optgroup>
-                            <optgroup label="OpenAI">
-                              {PM_MODEL_OPTIONS.openai.map((model) => (
-                                <option key={model.id} value={model.id}>
-                                  {model.label}
-                                </option>
-                              ))}
-                            </optgroup>
+                            {PM_MODEL_GROUPS.map((group) => (
+                              <optgroup key={group.provider} label={group.label}>
+                                {group.models.map((model) => (
+                                  <option key={model.id} value={model.id}>
+                                    {model.label}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            ))}
                           </Select>
                         </Field>
                         <Field label="Reviewer model">
@@ -2611,20 +2607,15 @@ export function Projects({
                             <option value="auto">
                               Automatic (cross-provider) · {reviewerPreviewLabel}
                             </option>
-                            <optgroup label="Anthropic">
-                              {PM_MODEL_OPTIONS.anthropic.map((model) => (
-                                <option key={model.id} value={`anthropic:${model.id}`}>
-                                  {model.label}
-                                </option>
-                              ))}
-                            </optgroup>
-                            <optgroup label="OpenAI">
-                              {PM_MODEL_OPTIONS.openai.map((model) => (
-                                <option key={model.id} value={`openai:${model.id}`}>
-                                  {model.label}
-                                </option>
-                              ))}
-                            </optgroup>
+                            {PM_MODEL_GROUPS.map((group) => (
+                              <optgroup key={group.provider} label={group.label}>
+                                {group.models.map((model) => (
+                                  <option key={model.id} value={`${group.provider}:${model.id}`}>
+                                    {model.label}
+                                  </option>
+                                ))}
+                              </optgroup>
+                            ))}
                           </Select>
                         </Field>
                         {pmProvider === "openai" ? (

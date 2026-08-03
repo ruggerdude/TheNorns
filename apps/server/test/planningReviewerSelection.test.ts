@@ -18,7 +18,11 @@ const fullEnv = {
   NORNS_REVIEWER_ANTHROPIC_MODEL: "claude-sonnet-5",
 };
 
-const defaultPmModel = { anthropic: "claude-opus-4-8", openai: "gpt-5.6-luna" };
+const defaultPmModel = {
+  anthropic: "claude-opus-4-8",
+  openai: "gpt-5.6-luna",
+  deepseek: "deepseek-v4-pro",
+};
 
 describe("resolvePlanningParticipants", () => {
   it.each([
@@ -120,7 +124,7 @@ describe("resolvePlanningParticipants", () => {
         pmSelection: { provider: "anthropic", model: null },
         persistedReviewer: null,
         env: {},
-        defaultPmModel: { anthropic: undefined, openai: undefined },
+        defaultPmModel: { anthropic: undefined, openai: undefined, deepseek: undefined },
       }),
     ).toThrowError(PlanningConfigurationError);
     try {
@@ -128,7 +132,7 @@ describe("resolvePlanningParticipants", () => {
         pmSelection: { provider: "anthropic", model: null },
         persistedReviewer: null,
         env: {},
-        defaultPmModel: { anthropic: undefined, openai: undefined },
+        defaultPmModel: { anthropic: undefined, openai: undefined, deepseek: undefined },
       });
       throw new Error("expected resolvePlanningParticipants to throw");
     } catch (error) {

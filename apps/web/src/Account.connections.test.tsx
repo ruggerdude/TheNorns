@@ -443,6 +443,13 @@ describe("workspace connections settings", () => {
             model: "gpt-5.6-sol",
             required_environment: ["OPENAI_API_KEY", "NORNS_OPENAI_MODEL"],
           },
+          {
+            id: "deepseek",
+            name: "DeepSeek",
+            configured: false,
+            model: "deepseek-v4-flash",
+            required_environment: ["DEEPSEEK_API_KEY"],
+          },
         ],
       },
     });
@@ -452,7 +459,10 @@ describe("workspace connections settings", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "Manage providers" }));
     expect(await screen.findByText(/ANTHROPIC_API_KEY/)).toBeInTheDocument();
+    expect(screen.getByText(/DEEPSEEK_API_KEY/)).toBeInTheDocument();
     expect(screen.getByText("gpt-5.6-sol")).toBeInTheDocument();
+    expect(screen.getByText("deepseek-v4-flash")).toBeInTheDocument();
+    expect(screen.getByText(/DeepSeek is API-only/)).toBeInTheDocument();
     expect(screen.getByText("Configured")).toBeInTheDocument();
   });
 });

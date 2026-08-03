@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const PmProvider = z.enum(["anthropic", "openai"]);
+export const PmProvider = z.enum(["anthropic", "openai", "deepseek"]);
 export type PmProviderT = z.infer<typeof PmProvider>;
 
 /**
@@ -22,7 +22,10 @@ export type AnthropicPmModelT = z.infer<typeof AnthropicPmModel>;
 export const OpenAiPmModel = z.enum(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
 export type OpenAiPmModelT = z.infer<typeof OpenAiPmModel>;
 
-export const PmModel = z.union([AnthropicPmModel, OpenAiPmModel]);
+export const DeepSeekPmModel = z.enum(["deepseek-v4-pro", "deepseek-v4-flash"]);
+export type DeepSeekPmModelT = z.infer<typeof DeepSeekPmModel>;
+
+export const PmModel = z.union([AnthropicPmModel, OpenAiPmModel, DeepSeekPmModel]);
 export type PmModelT = z.infer<typeof PmModel>;
 
 export interface PmModelOption {
@@ -75,11 +78,24 @@ export const PM_MODEL_OPTIONS = {
       description: "Cost-efficient planning for simpler, high-volume work.",
     },
   ],
+  deepseek: [
+    {
+      id: "deepseek-v4-pro",
+      label: "DeepSeek V4 Pro",
+      description: "Higher-capability DeepSeek planning for complex work.",
+    },
+    {
+      id: "deepseek-v4-flash",
+      label: "DeepSeek V4 Flash",
+      description: "Fast, cost-efficient DeepSeek planning for routine work.",
+    },
+  ],
 } as const satisfies Record<PmProviderT, readonly PmModelOption[]>;
 
 export const DEFAULT_PM_MODEL = {
   anthropic: "claude-sonnet-5",
   openai: "gpt-5.6-terra",
+  deepseek: "deepseek-v4-flash",
 } as const satisfies Record<PmProviderT, PmModelT>;
 
 /** Deployment fallback for planning participants that have no exact project
@@ -92,7 +108,10 @@ export function isPmModelForProvider(provider: PmProviderT, model: string): mode
 }
 
 export function providerForPmModel(model: PmModelT): PmProviderT {
-  return AnthropicPmModel.safeParse(model).success ? "anthropic" : "openai";
+  for (const provider of PmProvider.options) {
+    if (isPmModelForProvider(provider, model)) return provider;
+  }
+  throw new Error(`model ${model} has no provider`);
 }
 
 export function pmModelOption(model: string): PmModelOption | undefined {

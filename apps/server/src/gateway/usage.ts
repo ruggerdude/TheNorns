@@ -62,7 +62,7 @@ export function emptyUsage(): GatewayTokenUsage {
 export function billableInputTokens(usage: GatewayTokenUsage, provider: GatewayProvider): number {
   // Anthropic reports uncached input and cache categories separately. OpenAI
   // reports input_tokens inclusive of both cache detail fields.
-  return provider === "anthropic"
+  return provider !== "openai"
     ? usage.input_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens
     : usage.input_tokens;
 }
@@ -154,7 +154,7 @@ export class SseEventReassembler {
 // The tap
 // ---------------------------------------------------------------------------
 
-export type GatewayProvider = "anthropic" | "openai";
+export type GatewayProvider = "anthropic" | "openai" | "deepseek";
 
 /**
  * Observes forwarded response bytes and accumulates usage.
@@ -220,12 +220,12 @@ export class GatewayUsageTap {
   // -- provider-specific readers --------------------------------------------
 
   private absorbEvent(event: Record<string, unknown>): void {
-    if (this.provider === "anthropic") this.absorbAnthropicEvent(event);
+    if (this.provider !== "openai") this.absorbAnthropicEvent(event);
     else this.absorbOpenAiEvent(event);
   }
 
   private absorbBody(body: Record<string, unknown>): void {
-    if (this.provider === "anthropic") {
+    if (this.provider !== "openai") {
       // Non-streaming Messages: `usage` sits at the top level of the Message.
       if (this.takeAnthropicUsage(record(body.usage))) this.sawTerminalEvent = true;
       return;

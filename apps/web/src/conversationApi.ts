@@ -449,7 +449,7 @@ export function resumeConversationPlanReview(
 export type QcModeT = V2QcModeT;
 
 export interface PlanningReviewerSettings {
-  provider: "anthropic" | "openai";
+  provider: PmProviderT;
   model: string | null;
   mode: "explicit" | "automatic";
   qc_mode: QcModeT;

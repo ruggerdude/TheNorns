@@ -63,7 +63,7 @@ export class ConversationTurnError extends Error {
 }
 
 function providerName(value: string): ProviderName {
-  if (value === "anthropic" || value === "openai") return value;
+  if (value === "anthropic" || value === "openai" || value === "deepseek") return value;
   throw new ConversationTurnError(
     "provider_not_supported",
     `conversation provider "${value}" is not supported`,
@@ -71,7 +71,8 @@ function providerName(value: string): ProviderName {
 }
 
 function endpointFor(provider: ProviderName): string {
-  return provider === "anthropic" ? "/v1/messages" : "/v1/responses";
+  if (provider === "anthropic") return "/v1/messages";
+  return provider === "openai" ? "/v1/responses" : "/v1/chat/completions";
 }
 
 function observation(usage: UsageEventT, providerRequestId: string): AiUsageObservation {

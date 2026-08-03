@@ -11,7 +11,7 @@ import type { GraphSnapshot } from "../graph/graph.js";
 const Recommendation = z
   .object({
     node_id: z.string().min(1),
-    provider: z.enum(["anthropic", "openai"]),
+    provider: z.enum(["anthropic", "openai", "deepseek"]),
     model: z.string().min(1),
     reasoning_effort: CodexReasoningEffort.nullable(),
     worker_count: z.number().int().min(1).max(3),
@@ -65,23 +65,23 @@ export async function recommendProjectAllocation(options: {
   /**
    * PHASE TAB P1: when set, every node's IMPLEMENTATION provider must come
    * from this list. Reviewers are exempt — the cross-provider review rule
-   * (reviewer from the opposite provider) still applies and would be
+   * (reviewer from a different provider) still applies and would be
    * unsatisfiable if reviewers were constrained to a single-provider list.
    */
   allowedWorkerProviders?: readonly ProviderName[];
 }): Promise<AllocationRecommendationResult> {
   const availableModels = options.models.filter((model) => model.available);
   const providers = new Set(availableModels.map((model) => model.provider));
-  if (!providers.has("anthropic") || !providers.has("openai")) {
+  if (providers.size < 2) {
     throw new AllocationRecommendationError(
       "models_unavailable",
-      "PM staffing requires at least one approved worker model from each provider for cross-provider review.",
+      "PM staffing requires approved models from at least two providers for cross-provider review.",
     );
   }
   const allowedProviders = new Set<ProviderName>(
     options.allowedWorkerProviders && options.allowedWorkerProviders.length > 0
       ? options.allowedWorkerProviders
-      : (["anthropic", "openai"] as const),
+      : (["anthropic", "openai", "deepseek"] as const),
   );
 
   const modelByKey = new Map(
@@ -107,14 +107,14 @@ export async function recommendProjectAllocation(options: {
   const constraintLine =
     allowedProviders.size < 2
       ? [
-          `Implementation-provider constraint: every node's implementation provider MUST be ${[...allowedProviders].join(" or ")}. Reviewers still come from the opposite provider.`,
+          `Implementation-provider constraint: every node's implementation provider MUST be ${[...allowedProviders].join(" or ")}. Reviewers still come from a different provider.`,
         ]
       : [];
   const prompt = [
     `Staff the project "${options.projectName}" for its current workflow graph.`,
     `Objective: ${options.objective}`,
     "Choose the best implementation provider/model, worker count, cross-provider reviewer, and USD budget for every node.",
-    "For every OpenAI implementation model, choose a Codex reasoning_effort from minimal, low, medium, high, or xhigh based on task complexity and risk. Use null for Anthropic implementation models.",
+    "For every OpenAI implementation model, choose a Codex reasoning_effort from minimal, low, medium, high, or xhigh based on task complexity and risk. Use null for non-OpenAI implementation models.",
     "Use only the approved models listed below. Prefer the least expensive model that can reliably handle the work, but spend for capability where complexity or risk warrants it.",
     "Use more than one worker only when parallel_safe is true and the work is genuinely divisible. Never use the implementation provider as the reviewer provider.",
     ...constraintLine,
@@ -172,7 +172,7 @@ export async function recommendProjectAllocation(options: {
         `The project manager selected unavailable implementation model ${recommendation.provider}/${recommendation.model}.`,
       );
     }
-    if (recommendation.provider === "anthropic" && recommendation.reasoning_effort !== null) {
+    if (recommendation.provider !== "openai" && recommendation.reasoning_effort !== null) {
       throw new AllocationRecommendationError(
         "model_unavailable",
         `Node "${recommendation.node_id}" set Codex reasoning effort for a non-OpenAI implementation model.`,

@@ -7,13 +7,13 @@
 // project's data ever flows into it, and none of its state ever flows back.
 import {
   AnthropicAdapter,
-  OpenAiAdapter,
   type ProviderName,
   buildSelectableModelCatalog,
   modelAvailabilityFromDebateEnvironment,
   quoteConservativeMaxCharge,
 } from "@norns/adapters";
 import { UsageEvent } from "@norns/contracts";
+import { createProviderAdapter, providerApiKey } from "./ai/providerAdapter.js";
 // ONBOARDING O4: Actions-hosted execution.
 import {
   ActionsEnrollmentService,
@@ -667,17 +667,14 @@ if (databaseUrl) {
       runtimeTransactions,
       (provider, model) => {
         assertDebateModelConfigured(provider, model);
-        if (provider === "anthropic") {
-          const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
-          if (!apiKey) throw new Error("Anthropic is not configured for debate execution");
-          return canonicalTelemetry.wrapAdapter(new AnthropicAdapter({ apiKey, model }));
+        const selectedProvider = provider as ProviderName;
+        const apiKey = providerApiKey(process.env, selectedProvider)?.trim();
+        if (!apiKey) {
+          throw new Error(`${selectedProvider} is not configured for debate execution`);
         }
-        if (provider === "openai") {
-          const apiKey = process.env.OPENAI_API_KEY?.trim();
-          if (!apiKey) throw new Error("OpenAI is not configured for debate execution");
-          return canonicalTelemetry.wrapAdapter(new OpenAiAdapter({ apiKey, model }));
-        }
-        throw new Error(`unsupported debate provider: ${provider}`);
+        return canonicalTelemetry.wrapAdapter(
+          createProviderAdapter({ provider: selectedProvider, apiKey, model }),
+        );
       },
       {},
     );

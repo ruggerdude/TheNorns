@@ -25,6 +25,10 @@ import type {
 } from "./pendingDeviceCredential.js";
 import { Redactor } from "./redact.js";
 import { LocalRepositoryAccessController } from "./repositoryAccess.js";
+import {
+  type LocalRuntimeAuthCapability,
+  probeLocalRuntimeAuthCapabilities,
+} from "./runtimeAuth.js";
 import { WorkspaceRegistry } from "./workspaceRegistry.js";
 
 export const AGENT_HOST_LOCK_FILENAME = "agent-host.lock";
@@ -740,12 +744,26 @@ function commandVersion(command: string): string | null {
 }
 
 function detectLocalTools(): Pick<AgentHostLocalState, "git_version" | "runtimes"> {
-  const runtimes = [
-    ["Codex", commandVersion("codex")],
-    ["Claude Code", commandVersion("claude")],
-  ]
-    .filter((entry): entry is [string, string] => entry[1] !== null)
-    .map(([name, version]) => `${name} · ${version}`);
+  const authCapabilities = new Map(
+    probeLocalRuntimeAuthCapabilities().map((capability) => [capability.runtime, capability]),
+  );
+  const authLabel = (capability: LocalRuntimeAuthCapability | undefined): string => {
+    if (!capability?.subscription_authenticated) return "subscription login unavailable";
+    return capability.subscription_type
+      ? `${capability.subscription_type} subscription ready`
+      : "ChatGPT subscription ready";
+  };
+  const runtimes: string[] = [];
+  const codexVersion = commandVersion("codex");
+  if (codexVersion) {
+    runtimes.push(`Codex · ${codexVersion} · ${authLabel(authCapabilities.get("codex"))}`);
+  }
+  const claudeVersion = commandVersion("claude");
+  if (claudeVersion) {
+    runtimes.push(
+      `Claude Code · ${claudeVersion} · ${authLabel(authCapabilities.get("claude-code"))}`,
+    );
+  }
   return {
     git_version: commandVersion("git"),
     runtimes,

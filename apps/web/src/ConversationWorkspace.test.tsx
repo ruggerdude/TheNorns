@@ -1405,6 +1405,54 @@ describe("conversation workspace", () => {
     expect(switchBody).toEqual({ model: "claude-opus-4-8" });
   });
 
+  it("keeps a DeepSeek conversation inside the DeepSeek model ecosystem", async () => {
+    const deepseekConversation: V2WorkConversationT = {
+      ...conversation,
+      provider: "deepseek",
+      model: "deepseek-v4-flash",
+    };
+    let switchBody: unknown = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (
+          url.endsWith(`/conversations/${conversationId}`) &&
+          (!init?.method || init.method === "GET")
+        ) {
+          return detailResponse([], null, null, { conversation: deepseekConversation });
+        }
+        if (url.endsWith(`/conversations/${conversationId}/model`) && init?.method === "PATCH") {
+          switchBody = JSON.parse(String(init.body));
+          return Response.json({
+            conversation: { ...deepseekConversation, model: "deepseek-v4-pro" },
+          });
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Chat options" }));
+    const modelSelect = await screen.findByRole("combobox", { name: "Conversation model" });
+    expect(modelSelect).toHaveDisplayValue("DeepSeek · DeepSeek V4 Flash");
+    expect(
+      Array.from((modelSelect as HTMLSelectElement).options).map((option) => option.value),
+    ).toEqual(["deepseek-v4-pro", "deepseek-v4-flash"]);
+    await user.selectOptions(modelSelect, "deepseek-v4-pro");
+    await waitFor(() => expect(modelSelect).toHaveValue("deepseek-v4-pro"));
+    expect(switchBody).toEqual({ model: "deepseek-v4-pro" });
+  });
+
   it("keeps the prior mockup visible in a responsive before-and-after revision comparison", async () => {
     const history = [
       message({

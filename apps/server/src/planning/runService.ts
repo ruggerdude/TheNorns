@@ -26,7 +26,8 @@ export type PlanningRunStatus =
   | "rejected";
 
 /** PHASE TAB P1: which implementation providers allocation staffing may use. */
-export type WorkerProviderSelection = "anthropic" | "openai" | "both";
+/** `both` is retained on the wire for compatibility and means all providers. */
+export type WorkerProviderSelection = "anthropic" | "openai" | "deepseek" | "both";
 export type PlanningRunMode = "planned" | "quick" | "review_only";
 
 /**
@@ -47,6 +48,7 @@ export interface PlanningParticipantSelection {
   provider: ProviderName;
   model: string;
   reasoning_effort?: CodexReasoningEffortT | undefined;
+  credential_mode?: "api" | "subscription" | undefined;
 }
 
 /** Statuses a human decision may be recorded against. */
@@ -95,6 +97,7 @@ export interface ApprovedStaffingEntryDto {
   provider: ProviderName;
   model: string;
   reasoning_effort?: CodexReasoningEffortT | null | undefined;
+  credential_mode?: "api" | "subscription" | undefined;
 }
 
 /** PHASE TAB P1: the latest human decision recorded on a run. */
@@ -168,6 +171,7 @@ interface PlanningRunRow {
   agent_provider: ProviderName | null;
   agent_model: string | null;
   agent_reasoning_effort: CodexReasoningEffortT | null;
+  agent_credential_mode: "api" | "subscription";
   status: PlanningRunStatus;
   round: number;
   max_rounds: number;
@@ -215,6 +219,7 @@ function rowToDto(row: PlanningRunRow): PlanningRunDto {
             provider: row.agent_provider,
             model: row.agent_model,
             ...(row.agent_reasoning_effort ? { reasoning_effort: row.agent_reasoning_effort } : {}),
+            credential_mode: row.agent_credential_mode ?? "api",
           }
         : null,
     status: row.status,
@@ -350,10 +355,11 @@ export class PlanningRunService {
            id, project_id, status, round, max_rounds, objective, transcript,
            result, total_cost_usd, error, created_at, updated_at, attachment_ids,
            worker_providers, mode, requested_by, initiated_by_user_id, pm_provider, pm_model,
-           pm_reasoning_effort, agent_provider, agent_model, agent_reasoning_effort
+           pm_reasoning_effort, agent_provider, agent_model, agent_reasoning_effort,
+           agent_credential_mode
          ) VALUES (
            $1,$2,'queued',0,$3,$4,'[]'::jsonb,NULL,0,NULL,$5,$5,$6::jsonb,$7,
-           $8,$9,$9,$10,$11,$12,$13,$14,$15
+           $8,$9,$9,$10,$11,$12,$13,$14,$15,$16
          )`,
         [
           id,
@@ -371,6 +377,7 @@ export class PlanningRunService {
           input.agent?.provider ?? null,
           input.agent?.model ?? null,
           input.agent?.reasoning_effort ?? null,
+          input.agent?.credential_mode ?? "api",
         ],
       );
       const row = await this.loadRow(tx, projectId, id);

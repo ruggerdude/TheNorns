@@ -9,6 +9,7 @@ import { MockFetch } from "./test/mockFetch";
 const models: AiModelOption[] = [
   { id: "claude-sonnet-5", label: "Claude Sonnet 5", provider: "anthropic", configured: true },
   { id: "gpt-5.6-terra", label: "GPT-5.6 Terra", provider: "openai", configured: true },
+  { id: "deepseek-v4-pro", label: "DeepSeek V4 Pro", provider: "deepseek", configured: true },
 ];
 
 function debate(overrides: Partial<DebateDto> = {}): DebateDto {
@@ -90,6 +91,11 @@ describe("debate frontend", () => {
       catalogModels({
         providers: [
           { id: "openai", configured: true, models: [{ id: "gpt-5.6-terra", label: "Terra" }] },
+          {
+            id: "deepseek",
+            configured: true,
+            models: [{ id: "deepseek-v4-pro", label: "DeepSeek V4 Pro" }],
+          },
         ],
         models: [{ id: "claude-sonnet-5", provider: "anthropic", configured: true }],
       }),
@@ -105,6 +111,13 @@ describe("debate frontend", () => {
         id: "gpt-5.6-terra",
         label: "Terra",
         provider: "openai",
+        configured: true,
+        description: undefined,
+      },
+      {
+        id: "deepseek-v4-pro",
+        label: "DeepSeek V4 Pro",
+        provider: "deepseek",
         configured: true,
         description: undefined,
       },
@@ -138,14 +151,15 @@ describe("debate frontend", () => {
     await user.type(instructions[0] as HTMLTextAreaElement, "Demand a tested rollback.");
     await user.type(instructions[1] as HTMLTextAreaElement, "Defend a safe rollout.");
     await user.selectOptions(selectedModels[0] as HTMLSelectElement, "claude-sonnet-5");
-    await user.selectOptions(providers[1] as HTMLSelectElement, "openai");
-    await user.selectOptions(selectedModels[1] as HTMLSelectElement, "gpt-5.6-terra");
+    expect(providers[1]).toHaveTextContent("DeepSeek");
+    await user.selectOptions(providers[1] as HTMLSelectElement, "deepseek");
+    await user.selectOptions(selectedModels[1] as HTMLSelectElement, "deepseek-v4-pro");
 
     await user.click(screen.getByRole("button", { name: "Create debate" }));
     await waitFor(() => expect(create).toHaveBeenCalledOnce());
     expect(create.mock.calls[0]?.[0].configuration.actors).toMatchObject([
       { role_label: "Rollback skeptic", model: "claude-sonnet-5", provider: "anthropic" },
-      { role_label: "Delivery advocate", model: "gpt-5.6-terra", provider: "openai" },
+      { role_label: "Delivery advocate", model: "deepseek-v4-pro", provider: "deepseek" },
     ]);
   });
 

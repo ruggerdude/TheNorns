@@ -376,6 +376,13 @@ async function startFixture(
     authHeaders: (apiKey) =>
       provider === "anthropic" ? { "x-api-key": apiKey } : { authorization: `Bearer ${apiKey}` },
   });
+  const deepSeekSurface: GatewaySurface = {
+    provider: "deepseek",
+    origin: upstream.origin,
+    paths: new Set(["/v1/messages", "/v1/messages/count_tokens", "/v1/models"]),
+    meteredPaths: new Set(["/v1/messages"]),
+    authHeaders: (apiKey) => ({ authorization: `Bearer ${apiKey}` }),
+  };
 
   const gateway = new ProviderGateway({
     runs,
@@ -389,7 +396,11 @@ async function startFixture(
     ],
     apiKey: (provider) => (provider === "anthropic" ? PROVIDER_KEY_ANTHROPIC : PROVIDER_KEY_OPENAI),
     audit: (actor, action, detail) => audit.push({ actor, action, detail }),
-    surfaces: { anthropic: surface("anthropic"), openai: surface("openai") },
+    surfaces: {
+      anthropic: surface("anthropic"),
+      openai: surface("openai"),
+      deepseek: deepSeekSurface,
+    },
   });
 
   const server = await buildServer({

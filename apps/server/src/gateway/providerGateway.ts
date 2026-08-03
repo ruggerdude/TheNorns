@@ -126,9 +126,20 @@ export const OPENAI_SURFACE: GatewaySurface = {
   authHeaders: (apiKey) => ({ authorization: `Bearer ${apiKey}` }),
 };
 
+export const DEEPSEEK_SURFACE: GatewaySurface = {
+  provider: "deepseek",
+  // DeepSeek's Anthropic-compatible endpoint lets the existing Claude Code
+  // runtime execute DeepSeek models without translating tool or stream events.
+  origin: "https://api.deepseek.com/anthropic",
+  paths: new Set(["/v1/messages", "/v1/messages/count_tokens", "/v1/models"]),
+  meteredPaths: new Set(["/v1/messages"]),
+  authHeaders: (apiKey) => ({ authorization: `Bearer ${apiKey}` }),
+};
+
 export const SURFACES: Readonly<Record<GatewayProvider, GatewaySurface>> = {
   anthropic: ANTHROPIC_SURFACE,
   openai: OPENAI_SURFACE,
+  deepseek: DEEPSEEK_SURFACE,
 };
 
 // ---------------------------------------------------------------------------
@@ -271,7 +282,7 @@ export function refusalBody(
   code: GatewayRefusalCode,
   message: string,
 ): string {
-  if (provider === "anthropic") {
+  if (provider !== "openai") {
     return JSON.stringify({
       type: "error",
       error: { type: "norns_gateway_error", code, message },
@@ -1158,9 +1169,14 @@ export class ProviderGateway {
       });
       return;
     }
+    const cacheReadTokens = Math.min(inputTokens, usage.cache_read_input_tokens);
+    const ordinaryInputTokens = inputTokens - cacheReadTokens;
+    const cacheReadRate = pricing.cache_read_per_mtok ?? pricing.input_per_mtok;
     const costUsd =
       Math.ceil(
-        inputTokens * pricing.input_per_mtok + usage.output_tokens * pricing.output_per_mtok,
+        ordinaryInputTokens * pricing.input_per_mtok +
+          cacheReadTokens * cacheReadRate +
+          usage.output_tokens * pricing.output_per_mtok,
       ) / 1_000_000;
 
     // POST-HOC RECONCILIATION, STATED PLAINLY. The hold was a ceiling computed
@@ -1179,16 +1195,10 @@ export class ProviderGateway {
       cacheReadTokens: usage.cache_read_input_tokens,
       cacheWriteTokens: usage.cache_creation_input_tokens,
       costUsd,
-      // Cache categories are exact, but the current execution registry does
-      // not yet carry cache-specific rates; the dollar value is conservative.
-      costClassification:
-        usage.cache_read_input_tokens > 0 || usage.cache_creation_input_tokens > 0
-          ? "estimated"
-          : "actual",
+      costClassification: "actual",
       pricingVersion: pricing.pricing_version,
       usageSource: "provider_api",
-      confidence:
-        usage.cache_read_input_tokens > 0 || usage.cache_creation_input_tokens > 0 ? 0.9 : 1,
+      confidence: 1,
       providerRequestId,
     });
     await this.finishTelemetry(

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PmProvider } from "../models.js";
 import { PlanContract, PlanModule, PlanRisk, moduleSlug, validatePlan } from "../plan.js";
 import { FindingResponse, ReviewFinding } from "../review.js";
 import { UsageEvent } from "../usage.js";
@@ -1794,14 +1795,14 @@ export const V2WorkPlanStaffingChoice = z
   .object({
     module_id: V2EntityId,
     agent_role: V2NonEmptyString,
-    provider: z.enum(["anthropic", "openai"]),
+    provider: PmProvider,
     model: V2NonEmptyString,
   })
   .strict();
 
 export const V2PlanExecutionAgent = z
   .object({
-    provider: z.enum(["anthropic", "openai"]),
+    provider: PmProvider,
     model: V2NonEmptyString,
   })
   .strict();
@@ -1813,7 +1814,7 @@ export const V2PlanReviewPreference = z.discriminatedUnion("mode", [
       mode: z.literal("qc"),
       reviewer: z
         .object({
-          provider: z.enum(["anthropic", "openai"]),
+          provider: PmProvider,
           model: V2NonEmptyString,
         })
         .strict(),
@@ -2279,14 +2280,14 @@ export const V2ConversationPlanReviewRound = z
     reviewed_plan_content_hash: V2Sha256Hex,
     reviewer: z
       .object({
-        provider: z.enum(["anthropic", "openai"]),
+        provider: PmProvider,
         model: V2NonEmptyString,
         findings: z.array(ReviewFinding),
       })
       .strict(),
     pm: z
       .object({
-        provider: z.enum(["anthropic", "openai"]),
+        provider: PmProvider,
         model: V2NonEmptyString,
         dispositions: z.array(FindingResponse),
         revised_plan_content_hash: V2Sha256Hex,
@@ -2349,7 +2350,7 @@ export const V2PlanningLiveProgress = z
     ]),
     round: z.number().int().positive().nullable(),
     attempt: z.number().int().positive(),
-    provider: z.enum(["anthropic", "openai"]).nullable(),
+    provider: PmProvider.nullable(),
     model: V2NonEmptyString.nullable(),
     completed_items: nonNegativeInteger.default(0),
     total_items: nonNegativeInteger.default(0),
@@ -2376,9 +2377,9 @@ export const V2ConversationPlanReview = z
     planning_run_id: V2EntityId,
     initiated_by_user_id: V2EntityId,
     attempt_number: z.number().int().positive(),
-    pm_provider: z.enum(["anthropic", "openai"]),
+    pm_provider: PmProvider,
     pm_model: V2NonEmptyString,
-    reviewer_provider: z.enum(["anthropic", "openai"]),
+    reviewer_provider: PmProvider,
     reviewer_model: V2NonEmptyString,
     review_mode: z.enum(["qc", "waived"]).optional(),
     revision_format: V2QcRevisionFormat.default("legacy_full"),

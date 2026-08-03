@@ -490,6 +490,12 @@ export const V2DispatchCommand = z
     provider: V2NonEmptyString,
     model: V2NonEmptyString,
     reasoning_effort: CodexReasoningEffort.optional(),
+    /**
+     * Selects the runtime's auth source independently from provider and cost
+     * classification. Optional preserves legacy dispatch bytes; runners treat
+     * absence as `api`.
+     */
+    credential_mode: z.enum(["api", "subscription"]).optional(),
     context_refs: z.array(V2ContentAddressedReference).min(1),
     /**
      * Present for conversation-first execution. These fields bind the

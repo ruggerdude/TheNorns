@@ -2,6 +2,7 @@ import {
   type CodexReasoningEffortT,
   DEFAULT_CODEX_REASONING_EFFORT,
   PM_MODEL_OPTIONS,
+  type PmProviderT,
 } from "@norns/contracts";
 // PHASE TAB (P2): one flow from "describe the goal" to "watch execution".
 //   a. Goal input (textarea + image attachments)
@@ -14,6 +15,7 @@ import {
 // integrator); this file renders and holds state only.
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AttachmentInput } from "./AttachmentInput";
+import { AI_PROVIDERS, AI_PROVIDER_LABELS } from "./aiProviders";
 import "./PhaseTab.css";
 import { UnauthorizedError } from "./auth";
 import {
@@ -50,16 +52,14 @@ const RUN_IDLE_POLL_MS = 15_000;
 const EXECUTION_ACTIVE_POLL_MS = 5_000;
 const EXECUTION_IDLE_POLL_MS = 15_000;
 
-type Provider = "anthropic" | "openai";
+type Provider = PmProviderT;
+type CredentialMode = "api" | "subscription";
 
 function providersFor(workerProviders: WorkerProviders): Provider[] {
-  return workerProviders === "both" ? ["anthropic", "openai"] : [workerProviders];
+  return workerProviders === "both" ? [...AI_PROVIDERS] : [workerProviders];
 }
 
-const PROVIDER_GROUP_LABEL: Record<Provider, string> = {
-  anthropic: "Anthropic",
-  openai: "OpenAI",
-};
+const PROVIDER_GROUP_LABEL = AI_PROVIDER_LABELS;
 
 const CODEX_EFFORT_OPTIONS: readonly {
   value: CodexReasoningEffortT;
@@ -72,7 +72,7 @@ const CODEX_EFFORT_OPTIONS: readonly {
   { value: "xhigh", label: "Extra high" },
 ];
 
-const PM_PARTICIPANT_OPTIONS = (Object.keys(PM_MODEL_OPTIONS) as Provider[]).flatMap((provider) =>
+const PM_PARTICIPANT_OPTIONS = AI_PROVIDERS.flatMap((provider) =>
   PM_MODEL_OPTIONS[provider].map((model) => ({
     value: `${provider}:${model.id}`,
     label: model.label,
@@ -117,6 +117,7 @@ function participantFor(
   value: string,
   options: readonly ParticipantOption[],
   reasoningEffort?: CodexReasoningEffortT,
+  credentialMode?: CredentialMode,
 ): PhaseParticipantSelection | undefined {
   const option = options.find((candidate) => candidate.value === value);
   return option
@@ -125,6 +126,9 @@ function participantFor(
         model: option.model,
         ...(option.provider === "openai" && reasoningEffort
           ? { reasoning_effort: reasoningEffort }
+          : {}),
+        ...(credentialMode
+          ? { credential_mode: option.provider === "deepseek" ? "api" : credentialMode }
           : {}),
       }
     : undefined;
@@ -311,6 +315,7 @@ function LegacyPhaseTab({
   const [agentEffort, setAgentEffort] = useState<CodexReasoningEffortT>(
     DEFAULT_CODEX_REASONING_EFFORT,
   );
+  const [agentCredentialMode, setAgentCredentialMode] = useState<CredentialMode>("api");
   const [customizeTeam, setCustomizeTeam] = useState(false);
   const [executionModels, setExecutionModels] = useState<ExecutionModelCapability[] | null>(null);
   const [executionCapabilityError, setExecutionCapabilityError] = useState<string | null>(null);
@@ -323,13 +328,16 @@ function LegacyPhaseTab({
   const [recovering, setRecovering] = useState(!composerRequested && !initialRunId);
   // The worker_providers the active run was started with — model dropdowns in
   // the decision panel are filtered to these.
-  const [activeProviders, setActiveProviders] = useState<Provider[]>(["anthropic", "openai"]);
+  const [activeProviders, setActiveProviders] = useState<Provider[]>([...AI_PROVIDERS]);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // d — decision panel
   const [staffingDrafts, setStaffingDrafts] = useState<Record<string, string>>({});
   const [staffingEffortDrafts, setStaffingEffortDrafts] = useState<
     Record<string, CodexReasoningEffortT>
+  >({});
+  const [staffingCredentialModeDrafts, setStaffingCredentialModeDrafts] = useState<
+    Record<string, CredentialMode>
   >({});
   const [modifyOpen, setModifyOpen] = useState(false);
   const [direction, setDirection] = useState("");
@@ -380,7 +388,9 @@ function LegacyPhaseTab({
   const executionParticipantOptions = useMemo<ParticipantOption[]>(
     () =>
       (executionModels ?? [])
-        .filter((model) => model.available)
+        .filter(
+          (model) => model.available || model.credential_modes?.includes("subscription") === true,
+        )
         .map((model) => ({
           value: `${model.provider}:${model.id}`,
           label: model.label,
@@ -428,7 +438,12 @@ function LegacyPhaseTab({
     setError(null);
     try {
       const pm = participantFor(pmSelection, PM_PARTICIPANT_OPTIONS, pmEffort);
-      const agent = participantFor(agentSelection, executionParticipantOptions, agentEffort);
+      const agent = participantFor(
+        agentSelection,
+        executionParticipantOptions,
+        agentEffort,
+        agentCredentialMode,
+      );
       const workerProviders = agent?.provider ?? agents;
       const created = await startPhasePlanningRun(projectId, {
         objective: goal.trim(),
@@ -444,6 +459,7 @@ function LegacyPhaseTab({
       setRun(null);
       setStaffingDrafts({});
       setStaffingEffortDrafts({});
+      setStaffingCredentialModeDrafts({});
       setModifyOpen(false);
       setDirection("");
       setConfirmingReject(false);
@@ -467,6 +483,7 @@ function LegacyPhaseTab({
     pmEffort,
     agentSelection,
     agentEffort,
+    agentCredentialMode,
     executionParticipantOptions,
     projectId,
     fail,
@@ -540,6 +557,8 @@ function LegacyPhaseTab({
     staffingValue(phase).split(":", 1)[0] as Provider;
   const staffingEffortValue = (phase: PhasePlanStaffedPhase): CodexReasoningEffortT =>
     staffingEffortDrafts[phase.node_id] ?? phase.reasoning_effort ?? DEFAULT_CODEX_REASONING_EFFORT;
+  const staffingCredentialModeValue = (phase: PhasePlanStaffedPhase): CredentialMode =>
+    staffingCredentialModeDrafts[phase.node_id] ?? phase.credential_mode ?? "api";
 
   const decide = useCallback(
     async (body: Parameters<typeof postPlanningRunDecision>[2]) => {
@@ -603,6 +622,9 @@ function LegacyPhaseTab({
         provider: provider as Provider,
         model: modelParts.join(":"),
         reasoning_effort: provider === "openai" ? staffingEffortValue(phase) : null,
+        ...(provider !== "deepseek" && staffingCredentialModeValue(phase) === "subscription"
+          ? { credential_mode: "subscription" as const }
+          : {}),
       };
     });
     return decide({ decision: "approve", staffing });
@@ -619,6 +641,8 @@ function LegacyPhaseTab({
       setError(null);
       setStaffingDrafts({});
       setStaffingEffortDrafts({});
+      setStaffingCredentialModeDrafts({});
+      setAgentCredentialMode("api");
       setModifyOpen(false);
       setDirection("");
       setConfirmingReject(false);
@@ -832,12 +856,18 @@ function LegacyPhaseTab({
                       value="anthropic"
                       disabled={!availableExecutionProviders.has("anthropic")}
                     >
-                      Claude
+                      Anthropic
                     </option>
                     <option value="openai" disabled={!availableExecutionProviders.has("openai")}>
-                      ChatGPT
+                      OpenAI
                     </option>
-                    <option value="both">Both</option>
+                    <option
+                      value="deepseek"
+                      disabled={!availableExecutionProviders.has("deepseek")}
+                    >
+                      DeepSeek
+                    </option>
+                    <option value="both">All providers</option>
                   </Select>
                 </Field>
                 <Field label="Review rounds">
@@ -890,7 +920,7 @@ function LegacyPhaseTab({
                     onChange={(event) => setPmSelection(event.target.value)}
                   >
                     <option value="">Project default</option>
-                    {(Object.keys(PM_MODEL_OPTIONS) as Provider[]).map((provider) => (
+                    {AI_PROVIDERS.map((provider) => (
                       <optgroup key={provider} label={PROVIDER_GROUP_LABEL[provider]}>
                         {PM_MODEL_OPTIONS[provider].map((model) => (
                           <option key={model.id} value={`${provider}:${model.id}`}>
@@ -922,10 +952,13 @@ function LegacyPhaseTab({
                     data-testid="phase-agent"
                     value={agentSelection}
                     disabled={starting || executionModels === null}
-                    onChange={(event) => setAgentSelection(event.target.value)}
+                    onChange={(event) => {
+                      setAgentSelection(event.target.value);
+                      setAgentCredentialMode("api");
+                    }}
                   >
                     <option value="">Recommended model for each task</option>
-                    {(Object.keys(PM_MODEL_OPTIONS) as Provider[]).map((provider) => (
+                    {AI_PROVIDERS.map((provider) => (
                       <optgroup key={provider} label={PROVIDER_GROUP_LABEL[provider]}>
                         {executionParticipantOptions
                           .filter((option) => option.provider === provider)
@@ -957,6 +990,28 @@ function LegacyPhaseTab({
                     </Select>
                   </Field>
                 ) : null}
+                {agentSelection ? (
+                  participantFor(agentSelection, executionParticipantOptions)?.provider ===
+                  "deepseek" ? (
+                    <Field label="Agent credential">
+                      <span className="muted">API credential only</span>
+                    </Field>
+                  ) : (
+                    <Field label="Agent credential">
+                      <Select
+                        data-testid="phase-agent-credential"
+                        value={agentCredentialMode}
+                        disabled={starting}
+                        onChange={(event) =>
+                          setAgentCredentialMode(event.target.value as CredentialMode)
+                        }
+                      >
+                        <option value="api">API credential</option>
+                        <option value="subscription">Subscription sign-in</option>
+                      </Select>
+                    </Field>
+                  )
+                ) : null}
               </div>
             ) : null}
 
@@ -983,7 +1038,7 @@ function LegacyPhaseTab({
             ) : executionModels !== null && executionParticipantOptions.length === 0 ? (
               <Alert testId="phase-execution-models-unavailable">
                 No execution agents are available. Configure the runner model allowlist and a
-                provider API key before starting work.
+                provider API key or verified local subscription sign-in before starting work.
               </Alert>
             ) : null}
             <Button
@@ -1276,6 +1331,25 @@ function LegacyPhaseTab({
                               ))}
                             </Select>
                           ) : null}
+                          {staffingProvider(phase) !== "deepseek" ? (
+                            <Select
+                              aria-label={`${phase.name ?? phase.node_id} credential mode`}
+                              data-testid={`phase-staffing-credential-${phase.node_id}`}
+                              value={staffingCredentialModeValue(phase)}
+                              disabled={decisionBusy}
+                              onChange={(event) =>
+                                setStaffingCredentialModeDrafts((current) => ({
+                                  ...current,
+                                  [phase.node_id]: event.target.value as CredentialMode,
+                                }))
+                              }
+                            >
+                              <option value="api">API credential</option>
+                              <option value="subscription">Subscription sign-in</option>
+                            </Select>
+                          ) : (
+                            <span className="muted">API credential only</span>
+                          )}
                         </div>
                       </Field>
                     ))}

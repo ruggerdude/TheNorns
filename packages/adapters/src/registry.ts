@@ -12,7 +12,11 @@ export interface ModelEntry {
   selectable: boolean;
   /** Debate turns require provider-neutral schema validation. */
   supports_structured_output: boolean;
+  /** Whether requests to this model may contain image parts. Omitted legacy entries support them. */
+  supports_images?: boolean;
   input_per_mtok: number;
+  /** Published cache-hit input price; omitted legacy entries use the regular input rate. */
+  cache_read_per_mtok?: number;
   output_per_mtok: number;
   pricing_version: string;
   /** true when pricing is a config guess rather than a published rate */
@@ -26,7 +30,9 @@ export const DEFAULT_MODEL_REGISTRY: Record<string, ModelEntry> = {
     label: "Claude Fable 5",
     selectable: true,
     supports_structured_output: true,
+    supports_images: true,
     input_per_mtok: 10,
+    cache_read_per_mtok: 10,
     output_per_mtok: 50,
     pricing_version: "anthropic-2026-07",
     pricing_is_estimate: false,
@@ -36,7 +42,9 @@ export const DEFAULT_MODEL_REGISTRY: Record<string, ModelEntry> = {
     label: "Claude Opus 4.8",
     selectable: true,
     supports_structured_output: true,
+    supports_images: true,
     input_per_mtok: 5,
+    cache_read_per_mtok: 5,
     output_per_mtok: 25,
     pricing_version: "anthropic-2026-07",
     pricing_is_estimate: false,
@@ -46,7 +54,9 @@ export const DEFAULT_MODEL_REGISTRY: Record<string, ModelEntry> = {
     label: "Claude Sonnet 5",
     selectable: true,
     supports_structured_output: true,
+    supports_images: true,
     input_per_mtok: 2,
+    cache_read_per_mtok: 2,
     output_per_mtok: 10,
     pricing_version: "anthropic-2026-07-intro",
     pricing_is_estimate: false,
@@ -56,7 +66,9 @@ export const DEFAULT_MODEL_REGISTRY: Record<string, ModelEntry> = {
     label: "Claude Haiku 4.5",
     selectable: true,
     supports_structured_output: true,
+    supports_images: true,
     input_per_mtok: 1,
+    cache_read_per_mtok: 1,
     output_per_mtok: 5,
     pricing_version: "anthropic-2026-07",
     pricing_is_estimate: false,
@@ -66,7 +78,9 @@ export const DEFAULT_MODEL_REGISTRY: Record<string, ModelEntry> = {
     label: "Claude Haiku 4.5 (alias)",
     selectable: false,
     supports_structured_output: true,
+    supports_images: true,
     input_per_mtok: 1,
+    cache_read_per_mtok: 1,
     output_per_mtok: 5,
     pricing_version: "anthropic-2026-07",
     pricing_is_estimate: false,
@@ -77,7 +91,9 @@ export const DEFAULT_MODEL_REGISTRY: Record<string, ModelEntry> = {
     label: "GPT-5.6 Sol",
     selectable: true,
     supports_structured_output: true,
+    supports_images: true,
     input_per_mtok: 5,
+    cache_read_per_mtok: 5,
     output_per_mtok: 30,
     pricing_version: "openai-2026-07",
     pricing_is_estimate: false,
@@ -87,7 +103,9 @@ export const DEFAULT_MODEL_REGISTRY: Record<string, ModelEntry> = {
     label: "GPT-5.6 Terra",
     selectable: true,
     supports_structured_output: true,
+    supports_images: true,
     input_per_mtok: 2.5,
+    cache_read_per_mtok: 2.5,
     output_per_mtok: 15,
     pricing_version: "openai-2026-07",
     pricing_is_estimate: false,
@@ -97,7 +115,9 @@ export const DEFAULT_MODEL_REGISTRY: Record<string, ModelEntry> = {
     label: "GPT-5.6 Luna",
     selectable: true,
     supports_structured_output: true,
+    supports_images: true,
     input_per_mtok: 1,
+    cache_read_per_mtok: 1,
     output_per_mtok: 6,
     pricing_version: "openai-2026-07",
     pricing_is_estimate: false,
@@ -108,7 +128,9 @@ export const DEFAULT_MODEL_REGISTRY: Record<string, ModelEntry> = {
     label: "OpenAI deployment default",
     selectable: false,
     supports_structured_output: true,
+    supports_images: true,
     input_per_mtok: 10,
+    cache_read_per_mtok: 10,
     output_per_mtok: 40,
     pricing_version: "openai-config-placeholder",
     pricing_is_estimate: true,
@@ -119,7 +141,9 @@ export const DEFAULT_MODEL_REGISTRY: Record<string, ModelEntry> = {
     label: "Mock Anthropic",
     selectable: false,
     supports_structured_output: true,
+    supports_images: true,
     input_per_mtok: 2,
+    cache_read_per_mtok: 2,
     output_per_mtok: 10,
     pricing_version: "mock-1",
     pricing_is_estimate: true,
@@ -129,10 +153,37 @@ export const DEFAULT_MODEL_REGISTRY: Record<string, ModelEntry> = {
     label: "Mock OpenAI",
     selectable: false,
     supports_structured_output: true,
+    supports_images: true,
     input_per_mtok: 2,
+    cache_read_per_mtok: 2,
     output_per_mtok: 10,
     pricing_version: "mock-1",
     pricing_is_estimate: true,
+  },
+  // DeepSeek published rates, effective 2026-08-03.
+  "deepseek-v4-pro": {
+    provider: "deepseek",
+    label: "DeepSeek V4 Pro",
+    selectable: true,
+    supports_structured_output: true,
+    supports_images: false,
+    input_per_mtok: 0.435,
+    cache_read_per_mtok: 0.003625,
+    output_per_mtok: 0.87,
+    pricing_version: "deepseek-2026-08-03",
+    pricing_is_estimate: false,
+  },
+  "deepseek-v4-flash": {
+    provider: "deepseek",
+    label: "DeepSeek V4 Flash",
+    selectable: true,
+    supports_structured_output: true,
+    supports_images: false,
+    input_per_mtok: 0.14,
+    cache_read_per_mtok: 0.0028,
+    output_per_mtok: 0.28,
+    pricing_version: "deepseek-2026-08-03",
+    pricing_is_estimate: false,
   },
 };
 
@@ -165,13 +216,21 @@ export const DEBATE_ALLOWED_MODELS_ENV = "NORNS_DEBATE_ALLOWED_MODELS";
 
 type DebateEnvironment = Readonly<Record<string, string | undefined>>;
 
+const PROVIDER_API_KEY_ENV = {
+  anthropic: "ANTHROPIC_API_KEY",
+  openai: "OPENAI_API_KEY",
+  deepseek: "DEEPSEEK_API_KEY",
+} as const satisfies Record<ProviderName, string>;
+
+function isProviderName(value: string): value is ProviderName {
+  return Object.hasOwn(PROVIDER_API_KEY_ENV, value);
+}
+
 function deploymentCredentialPresent(
   provider: ProviderName,
   environment: DebateEnvironment,
 ): boolean {
-  return Boolean(
-    (provider === "anthropic" ? environment.ANTHROPIC_API_KEY : environment.OPENAI_API_KEY)?.trim(),
-  );
+  return Boolean(environment[PROVIDER_API_KEY_ENV[provider]]?.trim());
 }
 
 function parseDebateAllowedSelections(
@@ -192,8 +251,8 @@ function parseDebateAllowedSelections(
     }
     const provider = entry.slice(0, separator);
     const model = entry.slice(separator + 1);
-    if ((provider !== "anthropic" && provider !== "openai") || !model.trim()) return null;
-    const selection = { provider: provider as ProviderName, model: model.trim() };
+    if (!isProviderName(provider) || !model.trim()) return null;
+    const selection = { provider, model: model.trim() };
     const key = selectionKey(selection.provider, selection.model);
     if (selections.has(key)) return null;
     selections.set(key, selection);
@@ -230,6 +289,7 @@ export function modelAvailabilityFromDebateEnvironment(
 
 export interface ModelPricingSnapshot extends ModelSelection {
   input_per_mtok: number;
+  cache_read_per_mtok: number;
   output_per_mtok: number;
   pricing_version: string;
   pricing_is_estimate: boolean;
@@ -240,6 +300,7 @@ export interface SelectableModelCatalogEntry extends ModelSelection {
   available: boolean;
   unavailable_reason: string | null;
   supports_structured_output: boolean;
+  supports_images: boolean;
   pricing: ModelPricingSnapshot;
 }
 
@@ -283,11 +344,14 @@ export function snapshotModelPricing(
 ): ModelPricingSnapshot {
   const entry = requireModelEntry(provider, model, registry);
   assertPrice("input_per_mtok", entry.input_per_mtok);
+  const cacheReadPrice = entry.cache_read_per_mtok ?? entry.input_per_mtok;
+  assertPrice("cache_read_per_mtok", cacheReadPrice);
   assertPrice("output_per_mtok", entry.output_per_mtok);
   return Object.freeze({
     provider,
     model,
     input_per_mtok: entry.input_per_mtok,
+    cache_read_per_mtok: cacheReadPrice,
     output_per_mtok: entry.output_per_mtok,
     pricing_version: entry.pricing_version,
     pricing_is_estimate: entry.pricing_is_estimate,
@@ -371,6 +435,7 @@ export function buildSelectableModelCatalog(
         available: unavailableReason === null,
         unavailable_reason: unavailableReason,
         supports_structured_output: entry.supports_structured_output,
+        supports_images: entry.supports_images !== false,
         pricing: snapshotModelPricing(entry.provider, model, registry),
       };
     })
@@ -386,9 +451,13 @@ export function estimateCostUsd(
   entry: ModelEntry,
   inputTokens: number,
   outputTokens: number,
+  cacheReadTokens = 0,
 ): number {
+  const uncachedInputTokens = inputTokens - cacheReadTokens;
+  const cacheReadPrice = entry.cache_read_per_mtok ?? entry.input_per_mtok;
   return (
-    (inputTokens / 1_000_000) * entry.input_per_mtok +
+    (uncachedInputTokens / 1_000_000) * entry.input_per_mtok +
+    (cacheReadTokens / 1_000_000) * cacheReadPrice +
     (outputTokens / 1_000_000) * entry.output_per_mtok
   );
 }
@@ -421,7 +490,7 @@ export function makeUsageEvent(
     output_tokens: outputTokens,
     cache_read_tokens: cache.readTokens ?? 0,
     cache_write_tokens: cache.writeTokens ?? 0,
-    estimated_cost_usd: estimateCostUsd(entry, inputTokens, outputTokens),
+    estimated_cost_usd: estimateCostUsd(entry, inputTokens, outputTokens, cache.readTokens),
     actual_cost_usd: null, // reconciled post-hoc where the provider exposes it
     usage_source: source,
     pricing_version: entry.pricing_version,

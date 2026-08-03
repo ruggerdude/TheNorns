@@ -119,7 +119,7 @@ export function inspectGatewayRequest(
   // request itself is still forwarded exactly as written, so the provider is
   // free to generate more and the run's ledger records what it actually cost.
   const declared =
-    provider === "anthropic"
+    provider !== "openai"
       ? positiveInt(parsed.max_tokens)
       : (positiveInt(parsed.max_output_tokens) ?? positiveInt(parsed.max_tokens));
 

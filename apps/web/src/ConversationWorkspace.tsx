@@ -88,6 +88,12 @@ import {
   PmUpdateControls,
 } from "./ExecutionConversationControls";
 import { QcWorkspace } from "./QcWorkspace";
+import {
+  AI_PROVIDERS,
+  aiProviderLabel,
+  asAiProvider,
+  defaultReviewerProviderFor,
+} from "./aiProviders";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 import {
   type ConversationDetail,
@@ -2913,13 +2919,13 @@ function PlanHandoffDialog({
   onSubmit,
 }: {
   busy: boolean;
-  pmProvider: "anthropic" | "openai";
+  pmProvider: PmProviderT;
   onCancel: () => void;
   onSubmit: (handoff: V2PlanHandoffPreferenceT) => void;
 }): React.ReactElement {
   const [reviewMode, setReviewMode] = useState<"qc" | "skip_qc">("qc");
   const [rounds, setRounds] = useState(3);
-  const reviewerProvider = pmProvider === "anthropic" ? "openai" : "anthropic";
+  const reviewerProvider = defaultReviewerProviderFor(pmProvider);
   const reviewerOptions = PM_MODEL_OPTIONS[reviewerProvider];
   const [reviewerModel, setReviewerModel] = useState<string>(DEFAULT_PM_MODEL[reviewerProvider]);
   const [executionModels, setExecutionModels] = useState<ExecutionModelCapability[] | null>(null);
@@ -4617,6 +4623,7 @@ function ConversationThread({
   const isPlanning = detail.conversation.kind === "planning";
   const isExecution = detail.conversation.kind === "execution_pm";
   const isReadOnly = detail.conversation.status !== "active";
+  const conversationProvider = asAiProvider(detail.conversation.provider) ?? "anthropic";
   const hasEnteredQc = isPlanning && detail.plan_reviews.length > 0;
   const linkedExecutionConversationId = isPlanning
     ? (detail.handoff?.target_conversation_id ??
@@ -4754,17 +4761,14 @@ function ConversationThread({
                         busyActionId !== null ||
                         isReadOnly
                       }
-                      title={`${detail.conversation.provider === "anthropic" ? "Anthropic" : "OpenAI"} ecosystem is locked for this conversation`}
+                      title={`${aiProviderLabel(conversationProvider)} ecosystem is locked for this conversation`}
                       onChange={(event) =>
                         void changeConversationModel(event.target.value as PmModelT)
                       }
                     >
-                      {PM_MODEL_OPTIONS[
-                        detail.conversation.provider === "openai" ? "openai" : "anthropic"
-                      ].map((model) => (
+                      {PM_MODEL_OPTIONS[conversationProvider].map((model) => (
                         <option key={model.id} value={model.id}>
-                          {detail.conversation.provider === "anthropic" ? "Anthropic" : "OpenAI"} ·{" "}
-                          {model.label}
+                          {aiProviderLabel(conversationProvider)} · {model.label}
                         </option>
                       ))}
                     </Select>
@@ -5072,9 +5076,7 @@ function ConversationThread({
                           conversationId={detail.conversation.id}
                           isExecution={isExecution}
                           isPlanning={isPlanning}
-                          pmProvider={
-                            detail.conversation.provider === "openai" ? "openai" : "anthropic"
-                          }
+                          pmProvider={conversationProvider}
                           planIntentEnabled={planIntentEnabled}
                           planIntentBusy={proposalBusy || busyActionId !== null}
                           onUseAsPlan={(message, handoff) => {
@@ -5278,8 +5280,8 @@ function NewWorkForm({
               onChange={(event) => setModel(event.target.value as PmModelT)}
             >
               {defaultPin === null ? <option value="">Loading model…</option> : null}
-              {(["anthropic", "openai"] as const).map((provider) => (
-                <optgroup key={provider} label={provider === "anthropic" ? "Anthropic" : "OpenAI"}>
+              {AI_PROVIDERS.map((provider) => (
+                <optgroup key={provider} label={aiProviderLabel(provider)}>
                   {conversationModelOptions
                     .filter((option) => option.provider === provider)
                     .map((option) => (

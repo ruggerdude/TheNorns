@@ -12,7 +12,7 @@ export const AllocationStrategy = z.enum(["quality", "balanced", "cost"]);
 export type AllocationStrategyT = z.infer<typeof AllocationStrategy>;
 
 export const NodeAssignment = z.object({
-  provider: z.enum(["anthropic", "openai"]),
+  provider: z.enum(["anthropic", "openai", "deepseek"]),
   model: z.string().min(1),
   reasoning_effort: CodexReasoningEffort.nullable().default(null),
   role: z.literal("implementation"),

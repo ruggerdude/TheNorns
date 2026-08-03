@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PmProvider } from "../models.js";
 import {
   V2Actor,
   V2ActorType,
@@ -382,9 +383,9 @@ export const V2ProjectPlanningPreference = z
   .object({
     schema_version: schemaVersion,
     project_id: V2EntityId,
-    pm_provider: z.enum(["anthropic", "openai"]),
+    pm_provider: PmProvider,
     pm_model: V2NonEmptyString.nullable(),
-    reviewer_provider: z.enum(["anthropic", "openai"]),
+    reviewer_provider: PmProvider,
     source: z.enum(["native", "legacy_snapshot"]),
     created_at: V2IsoDateTime,
     updated_at: V2IsoDateTime,

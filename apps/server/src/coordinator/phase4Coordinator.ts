@@ -156,6 +156,7 @@ interface SchedulingRow {
   runtime: string;
   model: string;
   reasoning_effort: CodexReasoningEffortT | null;
+  credential_mode: "api" | "subscription";
   repository_binding_id: string | null;
   runner_repository_id: string | null;
   repository_binding_type: "local_runner" | "github" | null;
@@ -231,6 +232,8 @@ export class Phase4Coordinator {
                 p.status AS phase_status, p.approved_budget_usd,
                 a.status AS assignment_status, a.budget_limit_usd, a.agent_profile_id,
                 profile.provider, profile.runtime, profile.model, profile.reasoning_effort,
+                CASE WHEN profile.cost_metadata->>'billing_mode' = 'subscription'
+                  THEN 'subscription' ELSE 'api' END AS credential_mode,
                 project.primary_repository_binding_id AS repository_binding_id,
                 project.max_concurrent_tasks, profile.max_concurrent_runs,
                 profile.active_workload,
@@ -743,6 +746,7 @@ export class Phase4Coordinator {
         runtime: resolveDispatchRuntime(row.runtime, row.provider),
         provider: row.provider,
         model: row.model,
+        credential_mode: row.credential_mode,
         ...(row.reasoning_effort ? { reasoning_effort: row.reasoning_effort } : {}),
         context_refs: contextRefs,
         ...(taskPackageDispatch

@@ -2372,8 +2372,14 @@ export class Phase4EventProcessor {
     },
     occurredAt: string,
   ): Promise<void> {
-    const profile = await sql.query<{ provider: string; model: string }>(
-      `SELECT profile.provider, profile.model
+    const profile = await sql.query<{
+      provider: string;
+      model: string;
+      credential_mode: "api" | "subscription";
+    }>(
+      `SELECT profile.provider, profile.model,
+              CASE WHEN profile.cost_metadata->>'billing_mode' = 'subscription'
+                THEN 'subscription' ELSE 'api' END AS credential_mode
        FROM agent_assignments assignment
        JOIN agent_profiles profile ON profile.id = assignment.agent_profile_id
        WHERE assignment.id = $1`,
@@ -2408,6 +2414,8 @@ export class Phase4EventProcessor {
 
     const requestId = `runtime-report:${scope.id}:${commandId}`;
     const endpoint = `runner-runtime:${runtime.runtime}`;
+    const costClassification =
+      selection.credential_mode === "subscription" ? "subscription_consumption" : "unavailable";
     const common = [
       requestId,
       occurredAt,
@@ -2445,9 +2453,15 @@ export class Phase4EventProcessor {
        ) VALUES (
          $1,$2,2,'usage_observed','in_progress',$3,$4,$5,$6,
          'runtime_aggregate_report',0,$7,$8,$9,$10,$11,'runtime_report',0.6,
-         $12,$13,0,0,'unavailable'
+         $12,$13,0,0,$14
        )`,
-      [`${requestId}:usage`, ...common, Number(totals.input_tokens), Number(totals.output_tokens)],
+      [
+        `${requestId}:usage`,
+        ...common,
+        Number(totals.input_tokens),
+        Number(totals.output_tokens),
+        costClassification,
+      ],
     );
     const completed = runtime.outcome === "completed" || runtime.outcome === "waiting_for_human";
     await sql.query(

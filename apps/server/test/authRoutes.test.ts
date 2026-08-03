@@ -119,6 +119,7 @@ describe("GET /api/integrations/ai/status", () => {
           name: "Anthropic",
           configured: true,
           model: "claude-sonnet-5",
+          credential_modes: ["api", "subscription"],
           required_environment: ["ANTHROPIC_API_KEY"],
         },
         {
@@ -126,7 +127,16 @@ describe("GET /api/integrations/ai/status", () => {
           name: "OpenAI",
           configured: false,
           model: "gpt-5.6-sol",
+          credential_modes: ["api", "subscription"],
           required_environment: ["OPENAI_API_KEY", "NORNS_OPENAI_MODEL"],
+        },
+        {
+          id: "deepseek",
+          name: "DeepSeek",
+          configured: false,
+          model: "deepseek-v4-flash",
+          credential_modes: ["api"],
+          required_environment: ["DEEPSEEK_API_KEY"],
         },
       ],
     });

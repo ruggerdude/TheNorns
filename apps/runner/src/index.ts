@@ -191,10 +191,20 @@ export {
   GatewayCredentialError,
   ModelGatewayClient,
   PROVIDER_KEY_ENV_VARS,
+  anthropicCompatibleGatewayBaseUrl,
+  credentialFreeEnvironment,
   gatewayEnvironment,
   type GatewayCredential,
   type GatewayCredentialProvider,
+  type RuntimeCredentialMode,
 } from "./modelGateway.js";
+export {
+  probeClaudeSubscriptionAuth,
+  probeCodexSubscriptionAuth,
+  probeLocalRuntimeAuthCapabilities,
+  type LocalRuntimeAuthCapability,
+  type LocalSubscriptionAuthMode,
+} from "./runtimeAuth.js";
 export { CodexRuntime } from "./runtimes/codex.js";
 export {
   RUNNER_VISUAL_EVIDENCE_MANIFEST,

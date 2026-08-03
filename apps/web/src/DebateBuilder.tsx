@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { AiModelOption, DebateActor, DebateDto, DebatePolicy } from "./Debates";
+import { AI_PROVIDER_OPTIONS } from "./aiProviders";
 import { Alert, Badge, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 import "./WorkflowSurfaces.css";
 
@@ -139,8 +140,11 @@ function ActorEditor({
               onChange({ provider, model: modelFor(provider, models) });
             }}
           >
-            <option value="anthropic">Anthropic</option>
-            <option value="openai">OpenAI</option>
+            {AI_PROVIDER_OPTIONS.map((provider) => (
+              <option key={provider.value} value={provider.value}>
+                {provider.label}
+              </option>
+            ))}
           </Select>
         </Field>
         <Field label="Exact model">

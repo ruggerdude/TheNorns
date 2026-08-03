@@ -24,7 +24,7 @@
 //   4. GET /api/v2/projects/:id/execution-status (project-scoped, no runId)
 //        -> { project_id, phases: [{ phase_id, name, state,
 //        percent_complete, est_completion, notes }] }.
-import type { CodexReasoningEffortT } from "@norns/contracts";
+import type { CodexReasoningEffortT, PmProviderT } from "@norns/contracts";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 
 // ---------------------------------------------------------------------------
@@ -64,20 +64,22 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 // Types (mirroring apps/server/src/planning/runService.ts DTOs)
 // ---------------------------------------------------------------------------
 
-export type WorkerProviders = "anthropic" | "openai" | "both";
+export type WorkerProviders = PmProviderT | "both";
 export type PhaseRunMode = "planned" | "quick";
 export type PhaseParticipantSelection = {
-  provider: "anthropic" | "openai";
+  provider: PmProviderT;
   model: string;
   reasoning_effort?: CodexReasoningEffortT;
+  credential_mode?: "api" | "subscription";
 };
 
 export interface ExecutionModelCapability {
   id: string;
-  provider: "anthropic" | "openai";
+  provider: PmProviderT;
   label: string;
   available: boolean;
   unavailable_reason: string | null;
+  credential_modes?: Array<"api" | "subscription">;
 }
 
 export interface ExecutionModelCapabilities {
@@ -140,9 +142,10 @@ export interface PhasePlanModule {
 /** One allocation recommendation (result.staffing_proposal.recommendations[]). */
 export interface PhaseStaffingRecommendation {
   node_id: string;
-  provider: "anthropic" | "openai";
+  provider: PmProviderT;
   model: string;
   reasoning_effort?: CodexReasoningEffortT | null;
+  credential_mode?: "api" | "subscription";
   worker_count: number;
   reviewer_model?: string;
   budget_usd?: number;
@@ -216,9 +219,10 @@ export interface PhasePlanStaffedPhase {
   node_id: string;
   name?: string;
   description?: string | null;
-  provider: "anthropic" | "openai";
+  provider: PmProviderT;
   model: string;
   reasoning_effort: CodexReasoningEffortT | null;
+  credential_mode: "api" | "subscription" | null;
   worker_count: number;
   rationale?: string;
 }
@@ -242,6 +246,7 @@ export function planPhasesFromRun(run: PhasePlanningRunDto): PhasePlanStaffedPha
       provider: rec.provider,
       model: rec.model,
       reasoning_effort: rec.reasoning_effort ?? null,
+      credential_mode: rec.credential_mode ?? null,
       worker_count: rec.worker_count,
       rationale: rec.rationale,
     };
@@ -250,9 +255,10 @@ export function planPhasesFromRun(run: PhasePlanningRunDto): PhasePlanStaffedPha
 
 export interface PlanningRunStaffingOverride {
   node_id: string;
-  provider: "anthropic" | "openai";
+  provider: PmProviderT;
   model: string;
   reasoning_effort?: CodexReasoningEffortT | null;
+  credential_mode?: "api" | "subscription";
 }
 
 export interface PlanningRunDecisionBody {

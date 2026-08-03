@@ -103,9 +103,10 @@ export interface ProjectStoreSnapshot {
   }[];
 }
 
-/** Cross-provider review is the standing policy: reviewer is always the PM's opposite. */
+/** Deterministic cross-provider default. Explicit project reviewer settings still win. */
 export function reviewerFor(pmProvider: ProviderName): ProviderName {
-  return pmProvider === "anthropic" ? "openai" : "anthropic";
+  if (pmProvider === "anthropic") return "openai";
+  return "anthropic";
 }
 
 function resolvePmModel(provider: ProviderName, model?: string): PmModelT {

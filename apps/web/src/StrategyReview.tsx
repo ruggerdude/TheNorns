@@ -4,7 +4,9 @@
 // legacy graph-based PlanReview.tsx (which renders the pre-FRONT-DOOR
 // `runPlanning`/`/plan/load` acceptance-criteria flow); that flow stays
 // untouched for existing projects mid-way through it.
+import type { PmProviderT } from "@norns/contracts";
 import { useMemo, useState } from "react";
+import { PM_MODEL_GROUPS, aiProviderLabel } from "./aiProviders";
 import { Alert, Badge, Button, Select } from "./ui";
 import "./WorkflowSurfaces.css";
 
@@ -32,9 +34,9 @@ export interface StrategyReviewStaffing {
   task_local_id: string;
   task_title: string;
   required_roles: string[];
-  provider: string | null;
+  provider: PmProviderT | null;
   model: string | null;
-  reviewer_provider: string | null;
+  reviewer_provider: PmProviderT | null;
   reviewer_model: string | null;
   budget_limit_usd: number;
   rationale: string;
@@ -90,9 +92,9 @@ export interface StrategyReviewDto {
 
 export interface StaffingEdit {
   assignment_id: string;
-  provider?: string;
+  provider?: PmProviderT;
   model?: string;
-  reviewer_provider?: string;
+  reviewer_provider?: PmProviderT;
   reviewer_model?: string;
   budget_limit_usd?: number;
 }
@@ -100,14 +102,14 @@ export interface StaffingEdit {
 /** A short, curated set of models the staffing table lets a human pick from
  *  — deliberately small; the freeform rationale/budget stay editable via the
  *  underlying PATCH regardless of what this list offers. */
-const MODEL_CHOICES: Array<{ provider: string; model: string; label: string }> = [
-  { provider: "anthropic", model: "claude-sonnet-5", label: "Claude Sonnet 5" },
-  { provider: "anthropic", model: "claude-opus-4-8", label: "Claude Opus 4.8" },
-  { provider: "anthropic", model: "claude-fable-5", label: "Claude Fable 5" },
-  { provider: "openai", model: "gpt-5.6-sol", label: "GPT-5.6 Sol" },
-  { provider: "openai", model: "gpt-5.6-terra", label: "GPT-5.6 Terra" },
-  { provider: "openai", model: "gpt-5.6-luna", label: "GPT-5.6 Luna" },
-];
+const MODEL_CHOICES: Array<{ provider: PmProviderT; model: string; label: string }> =
+  PM_MODEL_GROUPS.flatMap((group) =>
+    group.models.map((model) => ({
+      provider: group.provider,
+      model: model.id,
+      label: model.label,
+    })),
+  );
 
 function modelKey(provider: string | null, model: string | null): string {
   return provider && model ? `${provider}:${model}` : "";
@@ -262,7 +264,8 @@ export function StrategyReview({
                       }}
                     >
                       <option value="">
-                        {row.provider ?? "unassigned"} · {row.model ?? "—"}
+                        {row.provider ? aiProviderLabel(row.provider) : "unassigned"} ·{" "}
+                        {row.model ?? "—"}
                       </option>
                       {MODEL_CHOICES.map((choice) => (
                         <option
@@ -305,7 +308,8 @@ export function StrategyReview({
                       }}
                     >
                       <option value="">
-                        {row.reviewer_provider ?? "none"} · {row.reviewer_model ?? "—"}
+                        {row.reviewer_provider ? aiProviderLabel(row.reviewer_provider) : "none"} ·{" "}
+                        {row.reviewer_model ?? "—"}
                       </option>
                       {MODEL_CHOICES.map((choice) => (
                         <option

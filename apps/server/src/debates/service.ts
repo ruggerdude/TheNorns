@@ -85,7 +85,7 @@ interface DebateActorRow {
   role_label: string;
   display_name: string;
   instructions: string;
-  provider: "anthropic" | "openai";
+  provider: "anthropic" | "openai" | "deepseek";
   model: string;
   runtime: "provider_api" | "codex" | "claude-code";
   position: number;

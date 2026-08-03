@@ -16,6 +16,8 @@ import {
   PlanModule,
   type PlanModuleT,
   type PmModelT,
+  PmProvider,
+  type PmProviderT,
 } from "@norns/contracts";
 import { z } from "zod";
 import type { MockResponseInit } from "./mockFetch";
@@ -23,7 +25,7 @@ import type { MockResponseInit } from "./mockFetch";
 // ---- allocation / assignment -------------------------------------------------
 
 const NodeAssignment = z.object({
-  provider: z.enum(["anthropic", "openai"]),
+  provider: PmProvider,
   model: z.string().min(1),
   role: z.literal("implementation"),
   worker_count: z.number().int().min(1).max(3),
@@ -370,9 +372,9 @@ export interface ProjectSummaryFixture {
   id: string;
   name: string;
   description: string;
-  pm_provider: "anthropic" | "openai";
+  pm_provider: PmProviderT;
   pm_model: PmModelT;
-  reviewer_provider: "anthropic" | "openai";
+  reviewer_provider: PmProviderT;
   status: "draft" | "planned";
   created_at: string;
   plan_objective: string | null;

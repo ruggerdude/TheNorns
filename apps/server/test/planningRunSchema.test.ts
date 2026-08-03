@@ -129,10 +129,12 @@ describe.sequential("planning_runs schema", () => {
     await pg.query(
       `INSERT INTO planning_runs (
          id, project_id, status, round, max_rounds, objective, mode,
-         requested_by, pm_provider, pm_model, agent_provider, agent_model
+         requested_by, pm_provider, pm_model, agent_provider, agent_model,
+         agent_credential_mode
        ) VALUES (
          'run-quick', 'project-1', 'queued', 0, 1, 'Fix the copy', 'quick',
-         'admin-1', 'openai', 'gpt-5.6-terra', 'anthropic', 'claude-sonnet-5'
+         'admin-1', 'openai', 'gpt-5.6-terra', 'anthropic', 'claude-sonnet-5',
+         'subscription'
        )`,
     );
     const row = await pg.query<{
@@ -141,9 +143,11 @@ describe.sequential("planning_runs schema", () => {
       pm_model: string;
       agent_provider: string;
       agent_model: string;
+      agent_credential_mode: string;
       requested_by: string;
     }>(
-      `SELECT mode, requested_by, pm_provider, pm_model, agent_provider, agent_model
+      `SELECT mode, requested_by, pm_provider, pm_model, agent_provider, agent_model,
+              agent_credential_mode
          FROM planning_runs WHERE id = 'run-quick'`,
     );
     expect(row.rows[0]).toEqual({
@@ -153,7 +157,14 @@ describe.sequential("planning_runs schema", () => {
       pm_model: "gpt-5.6-terra",
       agent_provider: "anthropic",
       agent_model: "claude-sonnet-5",
+      agent_credential_mode: "subscription",
     });
+
+    await expect(
+      pg.query(
+        "UPDATE planning_runs SET agent_credential_mode = 'automatic' WHERE id = 'run-quick'",
+      ),
+    ).rejects.toThrow();
 
     await pg.query(
       `INSERT INTO planning_runs (id, project_id, status, round, max_rounds, objective)

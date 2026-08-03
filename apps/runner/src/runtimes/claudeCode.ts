@@ -9,8 +9,9 @@
 // while the relay authorizes, meters and budget-checks every call and the real
 // key never leaves the server.
 //
-// WITHOUT a gateway it behaves exactly as before, so a laptop runner with its
-// own key is unaffected.
+// Subscription mode deliberately omits the gateway settings and strips every
+// provider environment override, leaving Claude Code to read only its official
+// persisted Claude account login.
 //
 // EXECUTION E11 — STREAMING INPUT MODE, ON PURPOSE.
 //
@@ -36,7 +37,13 @@
 // between minting and spawning. A mint failure still throws before any
 // subprocess exists, and a run cancelled before it starts never mints at all.
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { type GatewayCredentialProvider, gatewayEnvironment } from "../modelGateway.js";
+import {
+  type GatewayCredentialProvider,
+  type RuntimeCredentialMode,
+  anthropicCompatibleGatewayBaseUrl,
+  credentialFreeEnvironment,
+} from "../modelGateway.js";
+import { type LocalRuntimeAuthCapability, probeClaudeSubscriptionAuth } from "../runtimeAuth.js";
 import type { CodingRuntime, RuntimeRunRequest, RuntimeRunResult, RuntimeUsage } from "./types.js";
 
 /**
@@ -159,17 +166,25 @@ export class ClaudeCodeRuntime implements CodingRuntime {
   constructor(
     private readonly options: {
       model?: string;
+      /** Provider whose Anthropic-compatible gateway endpoint this run uses. */
+      provider?: "anthropic" | "deepseek";
       resumeSessionId?: string;
       /**
-       * EXECUTION E9 — resolves the per-run gateway credential, lazily. Absent
-       * means "use whatever credentials this process already has", which is
-       * the laptop case.
+       * `api` uses the Norns per-run gateway. `subscription` uses only the
+       * official Claude login persisted on this machine.
+       */
+      credentialMode?: RuntimeCredentialMode;
+      /**
+       * EXECUTION E9 — resolves the per-run gateway credential lazily in API
+       * mode. It is intentionally ignored in subscription mode.
        */
       gateway?: GatewayCredentialProvider;
       /** Injectable for tests. Defaults to `process.env`. */
       baseEnv?: NodeJS.ProcessEnv;
       /** Injectable SDK boundary for focused policy tests. */
       queryImpl?: typeof query;
+      /** Injectable local-login probe for deterministic routing tests. */
+      subscriptionAuthProbe?: () => LocalRuntimeAuthCapability;
     } = {},
   ) {}
 
@@ -207,10 +222,38 @@ export class ClaudeCodeRuntime implements CodingRuntime {
       // so a credential is never held for longer than the turn that uses it.
       // A mint failure fails the run rather than silently falling through to
       // whatever key might be lying around in the environment.
-      const credential = this.options.gateway ? await this.options.gateway() : null;
+      const explicitCredentialMode = this.options.credentialMode;
+      const credentialMode = explicitCredentialMode ?? "api";
+      if (explicitCredentialMode === "api" && !this.options.gateway) {
+        throw new Error("Claude Code API mode requires a Norns gateway");
+      }
+      if (credentialMode === "subscription") {
+        if (this.options.provider === "deepseek") {
+          throw new Error("DeepSeek does not support subscription execution");
+        }
+        const auth =
+          this.options.subscriptionAuthProbe?.() ??
+          probeClaudeSubscriptionAuth(this.options.baseEnv ?? process.env);
+        if (
+          auth.runtime !== "claude-code" ||
+          !auth.subscription_authenticated ||
+          auth.subscription_auth_mode !== "claude.ai" ||
+          auth.subscription_type === null
+        ) {
+          throw new Error("Claude subscription login is unavailable");
+        }
+      }
+      // Never call the mint provider for subscription execution. The child
+      // receives no API key, OAuth-token override, or provider base URL, so
+      // Claude Code must use its official persisted local login.
+      const credential =
+        credentialMode === "api" && this.options.gateway ? await this.options.gateway() : null;
       const env = credential
-        ? gatewayEnvironment(this.options.baseEnv ?? process.env, {
-            ANTHROPIC_BASE_URL: credential.anthropic_base_url,
+        ? credentialFreeEnvironment(this.options.baseEnv ?? process.env, {
+            ANTHROPIC_BASE_URL: anthropicCompatibleGatewayBaseUrl(
+              credential,
+              this.options.provider ?? "anthropic",
+            ),
             // The SDK sends this as `Authorization: Bearer <token>`, which is
             // exactly what the gateway reads. ANTHROPIC_API_KEY is deliberately
             // NOT set: `gatewayEnvironment` strips it, because a surviving real
@@ -219,7 +262,7 @@ export class ClaudeCodeRuntime implements CodingRuntime {
             ANTHROPIC_AUTH_TOKEN: credential.token,
             ...(request.humanWaitPath ? { NORNS_HUMAN_WAIT_PATH: request.humanWaitPath } : {}),
           })
-        : gatewayEnvironment(this.options.baseEnv ?? process.env, {
+        : credentialFreeEnvironment(this.options.baseEnv ?? process.env, {
             ...(request.humanWaitPath ? { NORNS_HUMAN_WAIT_PATH: request.humanWaitPath } : {}),
           });
       // The first message IS the prompt that used to be passed as a string.

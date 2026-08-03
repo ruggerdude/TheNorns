@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DebateActor, DebateDto } from "./Debates";
+import { aiProviderLabel } from "./aiProviders";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 import { Alert, Badge, Button, Field, Select, Spinner, TextArea } from "./ui";
 import "./WorkflowSurfaces.css";
@@ -514,8 +515,8 @@ export function DebateRun({
                     </div>
                     {event.actor_snapshot ? (
                       <p className="debate-event-attribution">
-                        {event.actor_snapshot.provider} · {event.actor_snapshot.model} ·{" "}
-                        {event.actor_snapshot.role_label}
+                        {aiProviderLabel(event.actor_snapshot.provider)} ·{" "}
+                        {event.actor_snapshot.model} · {event.actor_snapshot.role_label}
                       </p>
                     ) : null}
                     {content ? <p className="debate-event-content">{content}</p> : null}
@@ -638,7 +639,7 @@ export function DebateRun({
                     {actor.kind} · {actor.role_label}
                   </span>
                   <span>
-                    {actor.provider} · {actor.model}
+                    {aiProviderLabel(actor.provider)} · {actor.model}
                   </span>
                   <small>
                     ${actor.budget_limit_usd.toFixed(2)} cap · {actor.max_turns} turns

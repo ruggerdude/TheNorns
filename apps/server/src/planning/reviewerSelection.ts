@@ -25,16 +25,30 @@ export const PLANNING_MODEL_PROFILE_ENV = "NORNS_PLANNING_MODEL_PROFILE";
 export const DEFAULT_PLANNING_MODEL_PROFILE: PlanningModelProfileT = "balanced";
 
 const PLANNING_PROFILE_MODELS = {
-  quality: { anthropic: "claude-fable-5", openai: "gpt-5.6-sol" },
-  balanced: { anthropic: "claude-sonnet-5", openai: "gpt-5.6-terra" },
-  fast: { anthropic: "claude-haiku-4-5-20251001", openai: "gpt-5.6-luna" },
+  quality: {
+    anthropic: "claude-fable-5",
+    openai: "gpt-5.6-sol",
+    deepseek: "deepseek-v4-pro",
+  },
+  balanced: {
+    anthropic: "claude-sonnet-5",
+    openai: "gpt-5.6-terra",
+    deepseek: "deepseek-v4-pro",
+  },
+  fast: {
+    anthropic: "claude-haiku-4-5-20251001",
+    openai: "gpt-5.6-luna",
+    deepseek: "deepseek-v4-flash",
+  },
 } as const satisfies Record<PlanningModelProfileT, Record<ProviderName, PmModelT>>;
 
 export interface PlanningModelEnvironment {
   ANTHROPIC_API_KEY?: string;
   OPENAI_API_KEY?: string;
+  DEEPSEEK_API_KEY?: string;
   NORNS_PM_MODEL?: string;
   NORNS_OPENAI_MODEL?: string;
+  NORNS_DEEPSEEK_MODEL?: string;
   NORNS_REVIEWER_ANTHROPIC_MODEL?: string;
   NORNS_PLANNING_MODEL_PROFILE?: string;
 }
@@ -93,7 +107,7 @@ export function resolvePlanningParticipants(input: {
   persistedReviewer: PersistedReviewerSelection | null;
   env: PlanningModelEnvironment;
   /** Deployment default PM model per provider (mirrors DEFAULT_PM_MODEL). */
-  defaultPmModel: Record<"anthropic" | "openai", string | undefined>;
+  defaultPmModel: Record<ProviderName, string | undefined>;
   /** Validated deployment fallback. Exact project and environment selections
    * continue to win over this profile. */
   profile?: PlanningModelProfileT;
@@ -103,35 +117,45 @@ export function resolvePlanningParticipants(input: {
    * the exact pre-existing behavior (missing env surfaces as a
    * PlanningConfigurationError).
    */
-  defaultReviewerModel?: Partial<Record<"anthropic" | "openai", string>>;
+  defaultReviewerModel?: Partial<Record<ProviderName, string>>;
 }): ResolvedPlanningParticipants {
   const { pmSelection, persistedReviewer, env, defaultPmModel, defaultReviewerModel } = input;
   const profile = input.profile;
   const reviewerProvider =
     persistedReviewer?.provider ?? defaultReviewerProviderFor(pmSelection.provider);
+  const configuredModel = (provider: ProviderName): string | undefined => {
+    if (provider === "anthropic") return env.NORNS_PM_MODEL;
+    if (provider === "openai") return env.NORNS_OPENAI_MODEL;
+    return env.NORNS_DEEPSEEK_MODEL;
+  };
+  const configuredKey = (provider: ProviderName): string | undefined => {
+    if (provider === "anthropic") return env.ANTHROPIC_API_KEY;
+    if (provider === "openai") return env.OPENAI_API_KEY;
+    return env.DEEPSEEK_API_KEY;
+  };
+  const keyName = (provider: ProviderName): string => {
+    if (provider === "anthropic") return "ANTHROPIC_API_KEY";
+    if (provider === "openai") return "OPENAI_API_KEY";
+    return "DEEPSEEK_API_KEY";
+  };
   const pmModel =
     pmSelection.model ??
-    (pmSelection.provider === "anthropic"
-      ? (env.NORNS_PM_MODEL ??
-        (profile ? planningModelForProvider(profile, "anthropic") : defaultPmModel.anthropic))
-      : (env.NORNS_OPENAI_MODEL ??
-        (profile ? planningModelForProvider(profile, "openai") : defaultPmModel.openai)));
+    configuredModel(pmSelection.provider) ??
+    (profile ? planningModelForProvider(profile, pmSelection.provider) : undefined) ??
+    defaultPmModel[pmSelection.provider];
   const reviewerModel =
     persistedReviewer?.model ??
-    (reviewerProvider === "openai"
-      ? (env.NORNS_OPENAI_MODEL ??
-        (profile ? planningModelForProvider(profile, "openai") : defaultReviewerModel?.openai))
-      : (env.NORNS_REVIEWER_ANTHROPIC_MODEL ??
-        env.NORNS_PM_MODEL ??
-        (profile
-          ? planningModelForProvider(profile, "anthropic")
-          : (defaultReviewerModel?.anthropic ?? defaultPmModel.anthropic))));
+    (reviewerProvider === "anthropic" ? env.NORNS_REVIEWER_ANTHROPIC_MODEL : undefined) ??
+    configuredModel(reviewerProvider) ??
+    (profile ? planningModelForProvider(profile, reviewerProvider) : undefined) ??
+    defaultReviewerModel?.[reviewerProvider] ??
+    defaultPmModel[reviewerProvider];
 
   const missing = [
-    !env.ANTHROPIC_API_KEY && "ANTHROPIC_API_KEY",
-    !env.OPENAI_API_KEY && "OPENAI_API_KEY",
-    !pmModel && "NORNS_OPENAI_MODEL",
-    reviewerProvider === "openai" && !reviewerModel && "NORNS_OPENAI_MODEL",
+    !configuredKey(pmSelection.provider) && keyName(pmSelection.provider),
+    !configuredKey(reviewerProvider) && keyName(reviewerProvider),
+    !pmModel && `${pmSelection.provider} model`,
+    !reviewerModel && `${reviewerProvider} reviewer model`,
   ].filter(
     (value, index, values): value is string =>
       typeof value === "string" && values.indexOf(value) === index,

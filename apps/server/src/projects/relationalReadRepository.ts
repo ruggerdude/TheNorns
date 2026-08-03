@@ -171,7 +171,9 @@ function assignmentFromRow(row: RelationalTaskRow): NodeAssignmentT | null {
   const metadata = record(row.assignment_source_metadata);
   const source = metadata.legacy_source;
   if (source !== "auto" && source !== "override") return null;
-  if (row.provider !== "anthropic" && row.provider !== "openai") return null;
+  if (row.provider !== "anthropic" && row.provider !== "openai" && row.provider !== "deepseek") {
+    return null;
+  }
   if (row.model === null || row.reviewer_model === null || row.rationale === null) return null;
   const workerCount = Number(metadata.legacy_worker_count);
   const budget = Number(row.budget_limit_usd);

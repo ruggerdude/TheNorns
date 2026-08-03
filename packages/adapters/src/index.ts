@@ -47,5 +47,13 @@ export {
   snapshotModelPricing,
 } from "./registry.js";
 export { AnthropicAdapter, type AnthropicAdapterOptions } from "./anthropic.js";
+export {
+  DeepSeekAdapter,
+  type DeepSeekAdapterOptions,
+  type DeepSeekChatCompletion,
+  type DeepSeekChatCompletionChunk,
+  type DeepSeekChatRequest,
+  type DeepSeekClientBoundary,
+} from "./deepseek.js";
 export { OpenAiAdapter, type OpenAiAdapterOptions } from "./openai.js";
 export { FakeAdapter, FakeStructuredStream, type RecordedRequest } from "./fake.js";

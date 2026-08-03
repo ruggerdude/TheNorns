@@ -456,7 +456,8 @@ export class AiInvocationTelemetry {
 }
 
 function endpointFor(provider: string): string {
-  return provider === "anthropic" ? "/v1/messages" : "/v1/responses";
+  if (provider === "anthropic") return "/v1/messages";
+  return provider === "openai" ? "/v1/responses" : "/v1/chat/completions";
 }
 
 function observation(usage: UsageEventT, providerRequestId?: string): AiUsageObservation {

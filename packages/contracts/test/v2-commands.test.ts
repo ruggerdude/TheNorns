@@ -305,6 +305,19 @@ describe("V2 immutable dispatch identity", () => {
     expect(V2DispatchCommand.parse(dispatch).execution_mode).toBeUndefined();
   });
 
+  it("selects API or subscription credentials without rewriting legacy dispatches", () => {
+    expect(V2DispatchCommand.parse({ ...dispatch, credential_mode: "api" }).credential_mode).toBe(
+      "api",
+    );
+    expect(
+      V2DispatchCommand.parse({ ...dispatch, credential_mode: "subscription" }).credential_mode,
+    ).toBe("subscription");
+    expect(V2DispatchCommand.parse(dispatch).credential_mode).toBeUndefined();
+    expect(
+      V2DispatchCommand.safeParse({ ...dispatch, credential_mode: "provider_default" }).success,
+    ).toBe(false);
+  });
+
   it("binds a task package id/hash to one exact dispatched context ref", () => {
     const packageRef = dispatch.context_refs[0];
     expect(

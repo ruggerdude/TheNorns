@@ -8,6 +8,7 @@ import {
   V2ConversationUsage,
   V2CreateConversationPlanningExcerptInput,
   V2PlanHandoffPreference,
+  V2PlanningLiveProgress,
   V2QcRevisionFormat,
   V2QcTargetedRevision,
   V2SendPlanToQcParameters,
@@ -75,6 +76,30 @@ const plan = {
 };
 
 describe("V2 conversation contracts", () => {
+  it("accepts DeepSeek in current planning and live-progress provider fields", () => {
+    expect(
+      V2PlanHandoffPreference.safeParse({
+        execution_agent: { provider: "deepseek", model: "deepseek-v4-flash" },
+        review: {
+          mode: "qc",
+          reviewer: { provider: "anthropic", model: "claude-sonnet-5" },
+          rounds: 2,
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      V2PlanningLiveProgress.safeParse({
+        stage: "generating",
+        round: null,
+        attempt: 1,
+        provider: "deepseek",
+        model: "deepseek-v4-flash",
+        started_at: at,
+        checkpoint_at: at,
+      }).success,
+    ).toBe(true);
+  });
+
   it("stores only visible message parts and makes user submission identity explicit", () => {
     const base = {
       schema_version: 2,

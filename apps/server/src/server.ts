@@ -14,11 +14,9 @@ import fastifyStatic from "@fastify/static";
 import websocket from "@fastify/websocket";
 import {
   AdapterError,
-  AnthropicAdapter,
   type ConversationLlmAdapter,
   DEFAULT_MODEL_REGISTRY,
   type LlmAdapter,
-  OpenAiAdapter,
   type ProviderName,
   buildSelectableModelCatalog,
   modelAvailabilityFromDebateEnvironment,
@@ -34,6 +32,7 @@ import {
   DEVICE_CANCELLATION_EVIDENCE_WSS_SIGNATURE_PURPOSE,
   DEVICE_CONTEXT_RETRIEVAL_HTTP_SIGNATURE_PURPOSE,
   DEVICE_VISUAL_EVIDENCE_UPLOAD_HTTP_SIGNATURE_PURPOSE,
+  DeepSeekPmModel,
   type EventEnvelopeT,
   LEGACY_RUNNER_WSS_AUTH_SIGNATURE_PURPOSE,
   LocalExecutionCapabilitiesProjection,
@@ -68,6 +67,12 @@ import {
 } from "@norns/contracts";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import { z } from "zod";
+import {
+  configuredProviderModel,
+  createProviderAdapter,
+  providerApiKey,
+  providerApiKeyEnvironmentName,
+} from "./ai/providerAdapter.js";
 import {
   ALLOWED_IMAGE_MIMES,
   ATTACHMENT_CAPS,
@@ -842,10 +847,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     model: string,
     reasoningEffort?: CodexReasoningEffortT,
   ): LlmAdapter => {
-    const apiKey =
-      provider === "anthropic"
-        ? integrationEnvironment.ANTHROPIC_API_KEY
-        : integrationEnvironment.OPENAI_API_KEY;
+    const apiKey = providerApiKey(integrationEnvironment, provider);
     if (!apiKey?.trim()) {
       throw new AllocationRecommendationError(
         "models_unavailable",
@@ -858,13 +860,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       );
     }
     return instrumentAdapter(
-      provider === "anthropic"
-        ? new AnthropicAdapter({ apiKey, model })
-        : new OpenAiAdapter({
-            apiKey,
-            model,
-            ...(reasoningEffort ? { reasoningEffort } : {}),
-          }),
+      createProviderAdapter({
+        provider,
+        model,
+        apiKey,
+        ...(reasoningEffort ? { reasoningEffort } : {}),
+      }),
     );
   };
 
@@ -897,19 +898,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             // The raw key never leaves this closure: the adapter holds it, the
             // proxy holds the adapter, and nothing that touches a runner frame
             // can read it back out.
-            const apiKey =
-              provider === "anthropic"
-                ? integrationEnvironment.ANTHROPIC_API_KEY
-                : integrationEnvironment.OPENAI_API_KEY;
+            const apiKey = providerApiKey(integrationEnvironment, provider);
             if (!apiKey?.trim()) return null;
             if (options.createPlanningAdapter) {
               return instrumentAdapter(options.createPlanningAdapter(provider, model, apiKey));
             }
-            return instrumentAdapter(
-              provider === "anthropic"
-                ? new AnthropicAdapter({ apiKey, model })
-                : new OpenAiAdapter({ apiKey, model }),
-            );
+            return instrumentAdapter(createProviderAdapter({ provider, model, apiKey }));
           },
           audit: (actor, action, detail) => stores.audit(actor, action, detail, now()),
         })
@@ -982,10 +976,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           // the outbound request's auth header. It is never audited, never put
           // in a refusal body, and never returned on any error path.
           apiKey: (provider) => {
-            const key =
-              provider === "anthropic"
-                ? integrationEnvironment.ANTHROPIC_API_KEY
-                : integrationEnvironment.OPENAI_API_KEY;
+            const key = providerApiKey(integrationEnvironment, provider);
             return key?.trim() ? key.trim() : null;
           },
           audit: (actor, action, detail) => stores.audit(actor, action, detail, now()),
@@ -3036,6 +3027,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     const openAiReady = modelReadiness.some(
       (model) => model.provider === "openai" && model.available,
     );
+    const deepSeekReady = modelReadiness.some(
+      (model) => model.provider === "deepseek" && model.available,
+    );
     const compositionReadiness = options.relationalComposition?.readiness() ?? null;
     const ready =
       databaseStatus !== "unavailable" &&
@@ -3078,7 +3072,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           required: false,
           anthropic: anthropicReady,
           openai: openAiReady,
-          cross_provider_ready: anthropicReady && openAiReady,
+          deepseek: deepSeekReady,
+          cross_provider_ready:
+            [anthropicReady, openAiReady, deepSeekReady].filter(Boolean).length >= 2,
         },
         execution_models: {
           required: false,
@@ -3229,9 +3225,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     if (!user) return reply.code(401).send({ error: "unauthorized" });
     const anthropicConfigured = Boolean(integrationEnvironment.ANTHROPIC_API_KEY?.trim());
     const openaiConfigured = Boolean(integrationEnvironment.OPENAI_API_KEY?.trim());
+    const deepseekConfigured = Boolean(integrationEnvironment.DEEPSEEK_API_KEY?.trim());
     const availableExecutionModels = configuredExecutionModels();
     reply.header("Cache-Control", "no-store").send({
-      cross_provider_ready: anthropicConfigured && openaiConfigured,
+      cross_provider_ready:
+        [anthropicConfigured, openaiConfigured, deepseekConfigured].filter(Boolean).length >= 2,
       execution_ready: availableExecutionModels.length > 0,
       execution_models: availableExecutionModels.map((entry) => ({
         provider: entry.provider,
@@ -3244,6 +3242,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           name: "Anthropic",
           configured: anthropicConfigured,
           model: integrationEnvironment.NORNS_PM_MODEL ?? DEFAULT_PM_MODEL.anthropic,
+          credential_modes: ["api", "subscription"],
           required_environment: ["ANTHROPIC_API_KEY"],
         },
         {
@@ -3251,7 +3250,16 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           name: "OpenAI",
           configured: openaiConfigured,
           model: integrationEnvironment.NORNS_OPENAI_MODEL ?? DEFAULT_PM_MODEL.openai,
+          credential_modes: ["api", "subscription"],
           required_environment: ["OPENAI_API_KEY", "NORNS_OPENAI_MODEL"],
+        },
+        {
+          id: "deepseek",
+          name: "DeepSeek",
+          configured: deepseekConfigured,
+          model: integrationEnvironment.NORNS_DEEPSEEK_MODEL ?? DEFAULT_PM_MODEL.deepseek,
+          credential_modes: ["api"],
+          required_environment: ["DEEPSEEK_API_KEY"],
         },
       ],
     });
@@ -3269,6 +3277,16 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         label: model.label,
         available: model.available,
         unavailable_reason: model.unavailable_reason,
+        credential_modes:
+          model.provider === "deepseek"
+            ? model.available
+              ? (["api"] as const)
+              : ([] as const)
+            : model.available
+              ? (["api", "subscription"] as const)
+              : model.unavailable_reason === "provider_api_key_not_configured"
+                ? (["subscription"] as const)
+                : ([] as const),
       })),
     });
   });
@@ -3303,7 +3321,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         display_name: z.string().trim().min(1).max(200),
         role_label: z.string().trim().min(1).max(200),
         instructions: z.string().trim().min(1).max(100_000),
-        provider: z.enum(["anthropic", "openai"]),
+        provider: z.enum(["anthropic", "openai", "deepseek"]),
         model: z.string().trim().min(1).max(500),
         runtime: z.literal("provider_api").default("provider_api"),
         enabled: z.boolean().default(true),
@@ -4024,10 +4042,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       attachmentService,
       canonicalTelemetry,
       (provider, model): ConversationLlmAdapter => {
-        const apiKey =
-          provider === "anthropic"
-            ? integrationEnvironment.ANTHROPIC_API_KEY
-            : integrationEnvironment.OPENAI_API_KEY;
+        const apiKey = providerApiKey(integrationEnvironment, provider);
         if (!apiKey?.trim()) {
           throw new ConversationTurnError(
             "models_unavailable",
@@ -4037,9 +4052,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }
         const adapter =
           options.createPlanningAdapter?.(provider, model, apiKey) ??
-          (provider === "anthropic"
-            ? new AnthropicAdapter({ apiKey, model })
-            : new OpenAiAdapter({ apiKey, model }));
+          createProviderAdapter({ provider, model, apiKey });
         if (!adapter.streamConversation) {
           throw new ConversationTurnError(
             "streaming_unavailable",
@@ -4078,9 +4091,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           provider: selected.provider,
           model:
             selected.model ??
-            (selected.provider === "anthropic"
-              ? (integrationEnvironment.NORNS_PM_MODEL ?? DEFAULT_PM_MODEL.anthropic)
-              : (integrationEnvironment.NORNS_OPENAI_MODEL ?? DEFAULT_PM_MODEL.openai)),
+            configuredProviderModel(integrationEnvironment, selected.provider) ??
+            DEFAULT_PM_MODEL[selected.provider],
         };
       },
     });
@@ -4443,6 +4455,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           pm_provider: z.literal("openai"),
           pm_model: OpenAiPmModel.default(DEFAULT_PM_MODEL.openai),
         }),
+        z.object({
+          ...CreateProjectFields,
+          pm_provider: z.literal("deepseek"),
+          pm_model: DeepSeekPmModel.default(DEFAULT_PM_MODEL.deepseek),
+        }),
       ])
       .superRefine((value, context) => {
         // Raw filesystem paths are never a web API input. Local projects are
@@ -4653,6 +4670,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         z.object({
           pm_provider: z.literal("openai"),
           pm_model: OpenAiPmModel.default(DEFAULT_PM_MODEL.openai),
+        }),
+        z.object({
+          pm_provider: z.literal("deepseek"),
+          pm_model: DeepSeekPmModel.default(DEFAULT_PM_MODEL.deepseek),
         }),
       ]);
 
@@ -5421,6 +5442,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           verification_policy_ref: z.string().min(1).default("verification"),
           pm_provider: z.literal("openai"),
           pm_model: OpenAiPmModel.default(DEFAULT_PM_MODEL.openai),
+        }),
+        z.object({
+          name: z.string().trim().min(1),
+          description: z.string().trim().min(1),
+          selection_token: z.string().min(1),
+          verification_policy_ref: z.string().min(1).default("verification"),
+          pm_provider: z.literal("deepseek"),
+          pm_model: DeepSeekPmModel.default(DEFAULT_PM_MODEL.deepseek),
         }),
       ]);
 
@@ -6380,9 +6409,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         ]);
         const pmModel =
           pmSelection.model ??
-          (pmSelection.provider === "anthropic"
-            ? (integrationEnvironment.NORNS_PM_MODEL ?? DEFAULT_PM_MODEL.anthropic)
-            : (integrationEnvironment.NORNS_OPENAI_MODEL ?? DEFAULT_PM_MODEL.openai));
+          configuredProviderModel(integrationEnvironment, pmSelection.provider) ??
+          DEFAULT_PM_MODEL[pmSelection.provider];
         const pm = buildPlanningAdapter(pmSelection.provider, pmModel);
         stores.audit(
           "operator",
@@ -6435,7 +6463,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     });
 
     const OverrideBody = z.object({
-      provider: z.enum(["anthropic", "openai"]).optional(),
+      provider: z.enum(["anthropic", "openai", "deepseek"]).optional(),
       model: z.string().min(1).optional(),
       worker_count: z.number().int().min(1).max(3).optional(),
       reviewer_model: z.string().min(1).optional(),
@@ -6490,25 +6518,24 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       const body = PlanRequest.safeParse(req.body);
       if (!body.success) return reply.code(400).send({ error: "bad_request" });
 
-      const anthropicKey = integrationEnvironment.ANTHROPIC_API_KEY;
-      const openaiKey = integrationEnvironment.OPENAI_API_KEY;
       const reviewerProvider = reviewerFor(pmSelection.provider);
       const pmModel =
         pmSelection.model ??
-        (pmSelection.provider === "anthropic"
-          ? (integrationEnvironment.NORNS_PM_MODEL ?? DEFAULT_PM_MODEL.anthropic)
-          : integrationEnvironment.NORNS_OPENAI_MODEL);
+        configuredProviderModel(integrationEnvironment, pmSelection.provider) ??
+        DEFAULT_PM_MODEL[pmSelection.provider];
       const reviewerModel =
-        reviewerProvider === "openai"
-          ? integrationEnvironment.NORNS_OPENAI_MODEL
-          : (integrationEnvironment.NORNS_REVIEWER_ANTHROPIC_MODEL ??
-            integrationEnvironment.NORNS_PM_MODEL ??
-            DEFAULT_PM_MODEL.anthropic);
+        (reviewerProvider === "anthropic"
+          ? integrationEnvironment.NORNS_REVIEWER_ANTHROPIC_MODEL
+          : undefined) ??
+        configuredProviderModel(integrationEnvironment, reviewerProvider) ??
+        DEFAULT_PM_MODEL[reviewerProvider];
       const missing = [
-        !anthropicKey && "ANTHROPIC_API_KEY",
-        !openaiKey && "OPENAI_API_KEY",
-        !pmModel && "NORNS_OPENAI_MODEL",
-        reviewerProvider === "openai" && !reviewerModel && "NORNS_OPENAI_MODEL",
+        !providerApiKey(integrationEnvironment, pmSelection.provider) &&
+          providerApiKeyEnvironmentName(pmSelection.provider),
+        !providerApiKey(integrationEnvironment, reviewerProvider) &&
+          providerApiKeyEnvironmentName(reviewerProvider),
+        !pmModel && `${pmSelection.provider} model`,
+        !reviewerModel && `${reviewerProvider} reviewer model`,
       ].filter(
         (v, index, values): v is string => typeof v === "string" && values.indexOf(v) === index,
       );
@@ -6632,11 +6659,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         if (run?.mode === "quick") {
           const pmModel =
             pmSelection.model ??
-            (pmSelection.provider === "anthropic"
-              ? (integrationEnvironment.NORNS_PM_MODEL ??
-                planningModelForProvider(planningModelProfile, "anthropic"))
-              : (integrationEnvironment.NORNS_OPENAI_MODEL ??
-                planningModelForProvider(planningModelProfile, "openai")));
+            configuredProviderModel(integrationEnvironment, pmSelection.provider) ??
+            planningModelForProvider(planningModelProfile, pmSelection.provider);
           return {
             pm: {
               provider: pmSelection.provider,
@@ -6662,6 +6686,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           defaultPmModel: {
             anthropic: PLANNING_RUN_DEFAULT_PM_MODEL,
             openai: DEFAULT_PM_MODEL.openai,
+            deepseek: DEFAULT_PM_MODEL.deepseek,
           },
           defaultReviewerModel: { openai: PLANNING_RUN_DEFAULT_REVIEWER_MODEL },
         });
@@ -6868,9 +6893,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
 
       const PlanningParticipantBody = z
         .object({
-          provider: z.enum(["anthropic", "openai"]),
+          provider: z.enum(["anthropic", "openai", "deepseek"]),
           model: z.string().trim().min(1).max(200),
           reasoning_effort: CodexReasoningEffort.optional(),
+          credential_mode: z.enum(["api", "subscription"]).optional(),
         })
         .strict()
         .superRefine((participant, context) => {
@@ -6879,6 +6905,16 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               code: z.ZodIssueCode.custom,
               path: ["reasoning_effort"],
               message: "reasoning effort is available only for OpenAI/Codex models",
+            });
+          }
+          if (
+            participant.provider === "deepseek" &&
+            participant.credential_mode === "subscription"
+          ) {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              path: ["credential_mode"],
+              message: "DeepSeek supports API credentials only",
             });
           }
         });
@@ -6896,7 +6932,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           agent: PlanningParticipantBody.optional(),
           // PHASE TAB P1: which implementation providers allocation staffing
           // may use. Default "both".
-          worker_providers: z.enum(["anthropic", "openai", "both"]).optional(),
+          worker_providers: z.enum(["anthropic", "openai", "deepseek", "both"]).optional(),
           // FRONT DOOR P4: objective attachment ids, persisted on the run and
           // injected into the PM's and reviewer's round-1 messages.
           attachment_ids: z.array(z.string().trim().min(1)).max(50).optional(),
@@ -6910,6 +6946,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         const { id } = req.params as { id: string };
         const body = CreatePlanningRunBody.safeParse(req.body);
         if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        if (body.data.pm?.credential_mode === "subscription") {
+          return reply.code(400).send({
+            error: "bad_request",
+            message: "project-manager calls run on the server and require API credentials",
+          });
+        }
         const mode = body.data.mode ?? "planned";
         if (mode === "planned" && body.data.review_rounds === 0) {
           return reply.code(400).send({
@@ -6969,11 +7011,22 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               model.provider === body.data.worker_providers,
           );
           if (body.data.agent) {
-            const problem = executionModelUnavailableMessage(
+            const executionCatalog = executionModelCatalog();
+            let problem = executionModelUnavailableMessage(
               body.data.agent.provider,
               body.data.agent.model,
-              executionModelCatalog(),
+              executionCatalog,
             );
+            if (body.data.agent.credential_mode === "subscription") {
+              const selection = executionCatalog.find(
+                (candidate) =>
+                  candidate.provider === body.data.agent?.provider &&
+                  candidate.model === body.data.agent?.model,
+              );
+              if (selection?.unavailable_reason === "provider_api_key_not_configured") {
+                problem = null;
+              }
+            }
             if (problem) {
               return reply.code(422).send({
                 error: "agent_model_unavailable",
@@ -7156,9 +7209,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               z
                 .object({
                   node_id: z.string().trim().min(1),
-                  provider: z.enum(["anthropic", "openai"]),
+                  provider: z.enum(["anthropic", "openai", "deepseek"]),
                   model: z.string().trim().min(1).max(200),
                   reasoning_effort: CodexReasoningEffort.nullable().optional(),
+                  credential_mode: z.enum(["api", "subscription"]).optional(),
                 })
                 .strict()
                 .superRefine((entry, context) => {
@@ -7190,11 +7244,22 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         if (entry.provider !== "openai" && entry.reasoning_effort != null) {
           return `reasoning effort is available only for OpenAI/Codex models (node "${entry.node_id}")`;
         }
-        return executionModelUnavailableMessage(
+        if (entry.provider === "deepseek" && entry.credential_mode === "subscription") {
+          return `DeepSeek supports API credentials only (node "${entry.node_id}")`;
+        }
+        const executionCatalog = executionModelCatalog();
+        const unavailable = executionModelUnavailableMessage(
           entry.provider,
           entry.model,
-          executionModelCatalog(),
+          executionCatalog,
         );
+        if (entry.credential_mode === "subscription") {
+          const selection = executionCatalog.find(
+            (candidate) => candidate.provider === entry.provider && candidate.model === entry.model,
+          );
+          if (selection?.unavailable_reason === "provider_api_key_not_configured") return null;
+        }
+        return unavailable;
       };
 
       app.post("/api/v2/projects/:id/planning-runs/:runId/decision", async (req, reply) => {
@@ -7335,7 +7400,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       // ---------------------------------------------------------------
       const PlanningReviewerBody = z
         .object({
-          provider: z.enum(["anthropic", "openai"]).optional(),
+          provider: z.enum(["anthropic", "openai", "deepseek"]).optional(),
           model: z.string().trim().min(1).max(200).optional(),
           qc_mode: z.enum(QC_MODES).optional(),
           allow_unadjudicated_rebuttals: z.boolean().optional(),

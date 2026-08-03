@@ -13,6 +13,7 @@ import { V2_CONVERSATION_ACTION_INTERACTION_CLASS } from "@norns/contracts";
 import { useEffect, useState } from "react";
 import { ConversationPlanDraftCard } from "./ConversationPlanCard";
 import { QC_MODE_OPTIONS } from "./Projects";
+import { aiProviderLabel } from "./aiProviders";
 import { type QcModeT, fetchPlanningReviewerSettings } from "./conversationApi";
 import { Badge, Button, Select } from "./ui";
 
@@ -630,7 +631,7 @@ export function ConversationActionCard({
         <p>
           {reviewPreference.mode === "skip_qc"
             ? "QC was explicitly skipped for this exact plan."
-            : `QC agent: ${reviewPreference.reviewer.provider} · ${reviewPreference.reviewer.model} · ${reviewPreference.rounds} round${reviewPreference.rounds === 1 ? "" : "s"}`}
+            : `QC agent: ${aiProviderLabel(reviewPreference.reviewer.provider)} · ${reviewPreference.reviewer.model} · ${reviewPreference.rounds} round${reviewPreference.rounds === 1 ? "" : "s"}`}
         </p>
       ) : null}
       {eligibleForKickoffControl ? (

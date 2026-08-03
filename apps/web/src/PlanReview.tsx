@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { aiProviderLabel } from "./aiProviders";
 import { Badge, Button, Field, Input, Select } from "./ui";
 import "./WorkflowSurfaces.css";
 
@@ -147,14 +148,14 @@ export function PlanReview({
           <section className="agent-identity-card" aria-label="Planning Project Manager">
             <span className="eyebrow">Planning Project Manager</span>
             <strong>{result.policy.pm_model ?? `${result.policy.pm_provider} default`}</strong>
-            <span>{result.policy.pm_provider} · plan author and reviser</span>
+            <span>{aiProviderLabel(result.policy.pm_provider)} · plan author and reviser</span>
           </section>
           <section className="agent-identity-card" aria-label="Independent Planning Reviewer">
             <span className="eyebrow">Independent Planning Reviewer</span>
             <strong>
               {result.policy.reviewer_model ?? `${result.policy.reviewer_provider} default`}
             </strong>
-            <span>{result.policy.reviewer_provider} · independent QC</span>
+            <span>{aiProviderLabel(result.policy.reviewer_provider)} · independent QC</span>
           </section>
         </div>
       ) : null}

@@ -126,7 +126,7 @@ export interface ReviewOnlyProgressEvent {
   stage: "preparing" | "reviewing" | "revising" | "repairing" | "validating" | "saving";
   round: number;
   attempt: number;
-  provider: "anthropic" | "openai";
+  provider: "anthropic" | "openai" | "deepseek";
   model: string;
   completedItems: number;
   totalItems: number;

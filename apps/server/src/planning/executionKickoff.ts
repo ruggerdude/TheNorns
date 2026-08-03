@@ -511,7 +511,8 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
       if (
         current.provider === entry.provider &&
         current.model === entry.model &&
-        current.reasoning_effort === (entry.reasoning_effort ?? null)
+        current.reasoning_effort === (entry.reasoning_effort ?? null) &&
+        current.credential_mode === (entry.credential_mode ?? "api")
       ) {
         continue;
       }
@@ -520,6 +521,7 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
         provider: entry.provider,
         model: entry.model,
         reasoning_effort: entry.reasoning_effort ?? null,
+        credential_mode: entry.credential_mode ?? "api",
       });
     }
     return edits;

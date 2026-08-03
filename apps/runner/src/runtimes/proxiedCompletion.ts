@@ -27,7 +27,7 @@ import type { CodingRuntime, RuntimeRunRequest, RuntimeRunResult, RuntimeUsage }
 export const PROXIED_COMPLETION_OUTPUT = "NORNS_OUTPUT.md";
 
 export interface ProxiedCompletionRuntimeOptions {
-  provider: "anthropic" | "openai";
+  provider: "anthropic" | "openai" | "deepseek";
   model: string;
   /** The run and task this runtime is executing, for server-side authorization. */
   runId: string;

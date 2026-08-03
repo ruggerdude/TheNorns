@@ -171,6 +171,20 @@ function workspaceMocks(project: ProjectSummary = projectAlpha): MockFetch {
           available: true,
           unavailable_reason: null,
         },
+        {
+          id: "deepseek-v4-pro",
+          provider: "deepseek",
+          label: "DeepSeek V4 Pro",
+          available: true,
+          unavailable_reason: null,
+        },
+        {
+          id: "deepseek-v4-flash",
+          provider: "deepseek",
+          label: "DeepSeek V4 Flash",
+          available: true,
+          unavailable_reason: null,
+        },
       ],
     },
   });
@@ -226,6 +240,7 @@ describe("PHASE TAB (P2)", () => {
 
     await user.click(screen.getByTestId("phase-mode-planned"));
     expect(screen.getByTestId("phase-agents")).toHaveValue("both");
+    expect(screen.getByTestId("phase-agents")).toHaveTextContent("DeepSeek");
     expect(screen.getByTestId("phase-rounds")).toHaveValue("2");
     expect(screen.getByTestId("phase-identity-line")).toHaveTextContent(
       "PM: Project default · Agent: Recommended model for each task · Reviewer: Automatic cross-provider",
@@ -255,6 +270,13 @@ describe("PHASE TAB (P2)", () => {
             available: true,
             unavailable_reason: null,
           },
+          {
+            id: "deepseek-v4-flash",
+            provider: "deepseek",
+            label: "DeepSeek V4 Flash",
+            available: true,
+            unavailable_reason: null,
+          },
         ],
       },
     });
@@ -277,6 +299,13 @@ describe("PHASE TAB (P2)", () => {
     expect(screen.getByTestId("phase-agent-effort")).toHaveValue("medium");
     await user.selectOptions(screen.getByTestId("phase-agent-effort"), "xhigh");
     expect(screen.getByTestId("phase-agent-effort")).toHaveValue("xhigh");
+    expect(screen.getByTestId("phase-agent-credential")).toHaveValue("api");
+    await user.selectOptions(screen.getByTestId("phase-agent-credential"), "subscription");
+    await user.selectOptions(agent, "deepseek:deepseek-v4-flash");
+    expect(screen.queryByTestId("phase-agent-credential")).not.toBeInTheDocument();
+    expect(screen.getByText("API credential only")).toBeInTheDocument();
+    await user.selectOptions(agent, "openai:gpt-5.6-terra");
+    expect(screen.getByTestId("phase-agent-credential")).toHaveValue("api");
   });
 
   it("runs a quick change without a reviewer and honors optional PM and agent identities", async () => {
@@ -363,6 +392,8 @@ describe("PHASE TAB (P2)", () => {
       screen.getByTestId("phase-agent"),
       "anthropic:claude-haiku-4-5-20251001",
     );
+    expect(screen.getByTestId("phase-agent-credential")).toHaveValue("api");
+    await user.selectOptions(screen.getByTestId("phase-agent-credential"), "subscription");
     await user.click(screen.getByTestId("phase-start"));
 
     expect(await screen.findByTestId("phase-execution-panel")).toBeInTheDocument();
@@ -374,7 +405,11 @@ describe("PHASE TAB (P2)", () => {
       review_rounds: 0,
       worker_providers: "anthropic",
       pm: { provider: "openai", model: "gpt-5.6-terra", reasoning_effort: "medium" },
-      agent: { provider: "anthropic", model: "claude-haiku-4-5-20251001" },
+      agent: {
+        provider: "anthropic",
+        model: "claude-haiku-4-5-20251001",
+        credential_mode: "subscription",
+      },
     });
     expect(postCalls(mock, "/decision")[0]?.body).toEqual({ decision: "approve" });
     expect(screen.getByTestId("phase-execution-team")).toHaveTextContent("Claude Haiku 4.5");
@@ -704,6 +739,10 @@ describe("PHASE TAB (P2)", () => {
 
     await user.selectOptions(screen.getByTestId("phase-staffing-p1"), "openai:gpt-5.6-sol");
     await user.selectOptions(screen.getByTestId("phase-staffing-effort-p1"), "xhigh");
+    await user.selectOptions(screen.getByTestId("phase-staffing-credential-p1"), "subscription");
+    await user.selectOptions(screen.getByTestId("phase-staffing-p2"), "deepseek:deepseek-v4-flash");
+    expect(screen.queryByTestId("phase-staffing-credential-p2")).not.toBeInTheDocument();
+    expect(screen.getByText("API credential only")).toBeInTheDocument();
     await user.click(screen.getByTestId("phase-approve"));
 
     await waitFor(() => expect(postCalls(mock, "/decision")).toHaveLength(1));
@@ -715,12 +754,13 @@ describe("PHASE TAB (P2)", () => {
           provider: "openai",
           model: "gpt-5.6-sol",
           reasoning_effort: "xhigh",
+          credential_mode: "subscription",
         },
         {
           node_id: "p2",
-          provider: "openai",
-          model: "gpt-5.6-terra",
-          reasoning_effort: "high",
+          provider: "deepseek",
+          model: "deepseek-v4-flash",
+          reasoning_effort: null,
         },
       ],
     });

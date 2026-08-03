@@ -513,7 +513,11 @@ export class ConversationService {
           `conversation "${conversationId}" is ${conversation.status}`,
         );
       }
-      if (conversation.provider !== "anthropic" && conversation.provider !== "openai") {
+      if (
+        conversation.provider !== "anthropic" &&
+        conversation.provider !== "openai" &&
+        conversation.provider !== "deepseek"
+      ) {
         throw new ConversationPersistenceError(
           "model_ecosystem_mismatch",
           `conversation provider "${conversation.provider}" does not support model switching`,

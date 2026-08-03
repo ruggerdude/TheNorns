@@ -34,7 +34,9 @@ export type RunnerRuntimeName = (typeof RUNNER_RUNTIMES)[number];
  */
 export function agenticRuntimeForProvider(provider: string): RunnerRuntimeName | null {
   const normalized = provider.trim().toLowerCase();
-  if (normalized === "anthropic" || normalized === "claude") return "claude-code";
+  if (normalized === "anthropic" || normalized === "claude" || normalized === "deepseek") {
+    return "claude-code";
+  }
   if (normalized === "openai") return "codex";
   return null;
 }

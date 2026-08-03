@@ -201,7 +201,7 @@ describe("live planning — guard + load (no keys required)", () => {
       expect(body.error).toBe("live_planning_unavailable");
       expect(body.message).toContain("ANTHROPIC_API_KEY");
       expect(body.message).toContain("OPENAI_API_KEY");
-      expect(body.message).toContain("NORNS_OPENAI_MODEL");
+      expect(body.message).not.toContain("NORNS_OPENAI_MODEL");
     } finally {
       for (const [key, value] of Object.entries(saved)) {
         if (value === undefined) Reflect.deleteProperty(process.env, key);

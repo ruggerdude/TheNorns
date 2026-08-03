@@ -4,7 +4,7 @@ import type { UsageEventT } from "@norns/contracts";
 import type { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
-export type ProviderName = "anthropic" | "openai";
+export type ProviderName = "anthropic" | "openai" | "deepseek";
 
 // ---- FRONT DOOR P4: multi-part message content ---------------------------
 // Provider-neutral message content. A message's user content is either a plain
@@ -231,6 +231,7 @@ export function structuredOutputInstruction<T>(schema: z.ZodType<T>, schemaName:
 export type AdapterErrorKind =
   | "rate_limit"
   | "auth"
+  | "insufficient_funds"
   | "invalid_request"
   | "overloaded"
   | "server"
@@ -282,6 +283,7 @@ export function boundedImageParts(images: readonly ImagePart[] | undefined): rea
 /** Shared status-code mapping for both providers' HTTP errors. */
 export function kindForStatus(status: number): AdapterErrorKind {
   if (status === 401 || status === 403) return "auth";
+  if (status === 402) return "insufficient_funds";
   if (status === 429) return "rate_limit";
   if (status === 529) return "overloaded";
   if (status >= 500) return "server";

@@ -2049,11 +2049,11 @@ export const projectPlanningPreferences = pgTable(
   (table) => [
     check(
       "project_planning_preferences_pm_provider_check",
-      sql`${table.pmProvider} IN ('anthropic', 'openai')`,
+      sql`${table.pmProvider} IN ('anthropic', 'openai', 'deepseek')`,
     ),
     check(
       "project_planning_preferences_reviewer_provider_check",
-      sql`${table.reviewerProvider} IN ('anthropic', 'openai')
+      sql`${table.reviewerProvider} IN ('anthropic', 'openai', 'deepseek')
         AND ${table.reviewerProvider} <> ${table.pmProvider}`,
     ),
     check(
@@ -5131,8 +5131,8 @@ export const conversationPlanReviews = pgTable(
     ),
     check(
       "conversation_plan_reviews_provider_policy_check",
-      sql`${table.pmProvider} IN ('anthropic','openai')
-        AND ${table.reviewerProvider} IN ('anthropic','openai')
+      sql`${table.pmProvider} IN ('anthropic','openai','deepseek')
+        AND ${table.reviewerProvider} IN ('anthropic','openai','deepseek')
         AND ${table.pmProvider} <> ${table.reviewerProvider}
         AND length(trim(${table.pmModel})) > 0
         AND length(trim(${table.reviewerModel})) > 0`,

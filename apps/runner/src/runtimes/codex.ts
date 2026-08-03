@@ -11,10 +11,16 @@ import type { CodexReasoningEffortT } from "@norns/contracts";
 // pointing Codex at Norns is exactly: pass the gateway's `/v1` base URL and
 // the per-run credential, and let it speak the ordinary Responses API.
 //
-// WITHOUT a gateway it behaves exactly as before (NORN-027), so a laptop
-// runner with its own key is unaffected.
+// Subscription mode deliberately omits the gateway SDK options and strips
+// every provider environment override, leaving Codex to read only its official
+// persisted ChatGPT login.
 import { Codex, type CodexOptions } from "@openai/codex-sdk";
-import { type GatewayCredentialProvider, gatewayEnvironment } from "../modelGateway.js";
+import {
+  type GatewayCredentialProvider,
+  type RuntimeCredentialMode,
+  credentialFreeEnvironment,
+} from "../modelGateway.js";
+import { type LocalRuntimeAuthCapability, probeCodexSubscriptionAuth } from "../runtimeAuth.js";
 import type { CodingRuntime, RuntimeRunRequest, RuntimeRunResult, RuntimeUsage } from "./types.js";
 
 type CodexClient = Pick<Codex, "resumeThread" | "startThread">;
@@ -43,12 +49,19 @@ export class CodexRuntime implements CodingRuntime {
       model?: string;
       reasoningEffort?: CodexReasoningEffortT;
       resumeThreadId?: string;
+      /**
+       * `api` uses the Norns per-run gateway. `subscription` uses only the
+       * official Codex login persisted on this machine.
+       */
+      credentialMode?: RuntimeCredentialMode;
       /** EXECUTION E9 — resolves the per-run gateway credential, lazily. */
       gateway?: GatewayCredentialProvider;
       /** Injectable for tests. Defaults to `process.env`. */
       baseEnv?: NodeJS.ProcessEnv;
       /** Injectable client seam for verifying SDK option propagation without spawning Codex. */
       createClient?: CodexClientFactory;
+      /** Injectable local-login probe for deterministic routing tests. */
+      subscriptionAuthProbe?: () => LocalRuntimeAuthCapability;
     } = {},
   ) {}
 
@@ -59,11 +72,31 @@ export class CodexRuntime implements CodingRuntime {
       usage_source: "runtime_report",
     };
     try {
-      // EXECUTION E9 — minted immediately before the turn, never held.
-      const credential = this.options.gateway ? await this.options.gateway() : null;
+      const explicitCredentialMode = this.options.credentialMode;
+      const credentialMode = explicitCredentialMode ?? "api";
+      if (explicitCredentialMode === "api" && !this.options.gateway) {
+        throw new Error("Codex API mode requires a Norns gateway");
+      }
+      if (credentialMode === "subscription") {
+        const auth =
+          this.options.subscriptionAuthProbe?.() ??
+          probeCodexSubscriptionAuth(this.options.baseEnv ?? process.env);
+        if (
+          auth.runtime !== "codex" ||
+          !auth.subscription_authenticated ||
+          auth.subscription_auth_mode !== "chatgpt"
+        ) {
+          throw new Error("Codex ChatGPT subscription login is unavailable");
+        }
+      }
+      // Subscription mode must never even call the mint provider. Besides
+      // avoiding an unnecessary secret, that makes the billing route an
+      // explicit invariant rather than a consequence of callback presence.
+      const credential =
+        credentialMode === "api" && this.options.gateway ? await this.options.gateway() : null;
       const createClient: CodexClientFactory =
         this.options.createClient ?? ((options) => new Codex(options));
-      const runtimeEnv = gatewayEnvironment(this.options.baseEnv ?? process.env, {
+      const runtimeEnv = credentialFreeEnvironment(this.options.baseEnv ?? process.env, {
         ...(request.humanWaitPath ? { NORNS_HUMAN_WAIT_PATH: request.humanWaitPath } : {}),
       });
       const codex = credential

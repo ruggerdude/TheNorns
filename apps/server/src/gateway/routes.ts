@@ -75,8 +75,13 @@ export function openAiGatewayBaseUrl(origin: string): string {
   return `${origin.replace(/\/+$/, "")}${GATEWAY_ROUTE_PREFIX}/openai/v1`;
 }
 
+/** Where an Anthropic-wire-compatible DeepSeek runtime sends Messages calls. */
+export function deepSeekGatewayBaseUrl(origin: string): string {
+  return `${origin.replace(/\/+$/, "")}${GATEWAY_ROUTE_PREFIX}/deepseek`;
+}
+
 function isGatewayProvider(value: string): value is GatewayProvider {
-  return value === "anthropic" || value === "openai";
+  return value === "anthropic" || value === "openai" || value === "deepseek";
 }
 
 export interface GatewayRouteDependencies {
@@ -191,6 +196,7 @@ export async function registerGatewayRoutes(
               expires_at: decision.minted.expires_at,
               anthropic_base_url: anthropicGatewayBaseUrl(deps.publicOrigin),
               openai_base_url: openAiGatewayBaseUrl(deps.publicOrigin),
+              deepseek_base_url: deepSeekGatewayBaseUrl(deps.publicOrigin),
             });
         } catch (error) {
           if (error instanceof DeviceActionAuthorizationError) {
@@ -298,6 +304,7 @@ export async function registerGatewayRoutes(
           expires_at: minted.expires_at,
           anthropic_base_url: anthropicGatewayBaseUrl(deps.publicOrigin),
           openai_base_url: openAiGatewayBaseUrl(deps.publicOrigin),
+          deepseek_base_url: deepSeekGatewayBaseUrl(deps.publicOrigin),
         });
     },
   );

@@ -58,18 +58,18 @@ function sha256(value: string): string {
 /** Cross-provider default: the reviewer runs on the opposite provider. */
 function crossProvider(provider: string): string {
   if (provider === "anthropic") return "openai";
-  if (provider === "openai") return "anthropic";
-  return provider;
+  return "anthropic";
 }
 
 function deterministicProfileId(
   provider: string,
   model: string,
   reasoningEffort: CodexReasoningEffortT | null = null,
+  credentialMode: "api" | "subscription" = "api",
 ): string {
   const identity = reasoningEffort
-    ? [provider, provider, model, reasoningEffort]
-    : [provider, provider, model];
+    ? [provider, provider, model, reasoningEffort, credentialMode]
+    : [provider, provider, model, credentialMode];
   return `agent-profile:${sha256(JSON.stringify(identity)).slice(0, 32)}`;
 }
 
@@ -111,6 +111,7 @@ export interface StaffingAssignmentEdit {
   provider?: string | undefined;
   model?: string | undefined;
   reasoning_effort?: CodexReasoningEffortT | null | undefined;
+  credential_mode?: "api" | "subscription" | undefined;
   /** Set the reviewer provider/model. Both are required together to resolve a
    *  reviewer profile; omit `reviewer_model` (or set clear_reviewer) to drop
    *  the reviewer. */
@@ -172,6 +173,7 @@ export interface StrategyReviewStaffingDto {
   provider: string | null;
   model: string | null;
   reasoning_effort: CodexReasoningEffortT | null;
+  credential_mode: "api" | "subscription";
   reviewer_provider: string | null;
   reviewer_model: string | null;
   budget_limit_usd: number;
@@ -266,6 +268,7 @@ interface StaffingRecommendation {
   provider: string;
   model: string;
   reasoning_effort: CodexReasoningEffortT | null;
+  credential_mode: "api" | "subscription";
   reviewer_model: string;
   budget_usd: number;
   rationale: string;
@@ -275,6 +278,7 @@ interface ResolvedProfile {
   provider: string;
   model: string;
   reasoning_effort: CodexReasoningEffortT | null;
+  credential_mode: "api" | "subscription";
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -315,6 +319,7 @@ function readStaffingRecommendations(result: unknown): Map<string, StaffingRecom
         CodexReasoningEffort.safeParse(record.reasoning_effort).success
           ? (record.reasoning_effort as CodexReasoningEffortT)
           : null,
+      credential_mode: record.credential_mode === "subscription" ? "subscription" : "api",
       reviewer_model: typeof record.reviewer_model === "string" ? record.reviewer_model : "",
       budget_usd: typeof record.budget_usd === "number" ? record.budget_usd : 0,
       rationale: typeof record.rationale === "string" ? record.rationale : "",
@@ -487,11 +492,13 @@ export class StrategyBridgeService {
               ? edit.reasoning_effort
               : (currentPair?.reasoning_effort ?? null)
             : null;
-        const profileId = deterministicProfileId(provider, model, reasoningEffort);
+        const credentialMode = edit.credential_mode ?? currentPair?.credential_mode ?? "api";
+        const profileId = deterministicProfileId(provider, model, reasoningEffort, credentialMode);
         requiredProfiles.set(profileId, {
           provider,
           model,
           reasoning_effort: reasoningEffort,
+          credential_mode: credentialMode,
         });
 
         let reviewerProfileId = assignment.reviewer_agent_profile_id;
@@ -504,6 +511,7 @@ export class StrategyBridgeService {
             provider: reviewerProvider,
             model: edit.reviewer_model,
             reasoning_effort: null,
+            credential_mode: "api",
           });
         }
 
@@ -748,11 +756,13 @@ export class StrategyBridgeService {
           recommendation.provider,
           recommendation.model,
           recommendation.reasoning_effort,
+          recommendation.credential_mode,
         );
         requiredProfiles.set(providerModelId, {
           provider: recommendation.provider,
           model: recommendation.model,
           reasoning_effort: recommendation.reasoning_effort,
+          credential_mode: recommendation.credential_mode,
         });
         let reviewerProfileId: string | null = null;
         if (recommendation.reviewer_model) {
@@ -765,6 +775,7 @@ export class StrategyBridgeService {
             provider: reviewerProvider,
             model: recommendation.reviewer_model,
             reasoning_effort: null,
+            credential_mode: "api",
           });
         }
         return {
@@ -957,7 +968,7 @@ export class StrategyBridgeService {
             JSON.stringify(["implementation", "review"]),
             DEFAULT_CONTEXT_LIMIT_TOKENS,
             JSON.stringify({
-              billing_mode: "unknown",
+              billing_mode: pair.credential_mode,
               input_usd_per_million: null,
               output_usd_per_million: null,
             }),
@@ -988,6 +999,7 @@ export class StrategyBridgeService {
         provider: impl?.provider ?? null,
         model: impl?.model ?? null,
         reasoning_effort: impl?.reasoning_effort ?? null,
+        credential_mode: impl?.credential_mode ?? "api",
         reviewer_provider: reviewer?.provider ?? null,
         reviewer_model: reviewer?.model ?? null,
         budget_limit_usd: assignment.budget_limit_usd,
@@ -1017,8 +1029,9 @@ export class StrategyBridgeService {
         provider: string;
         model: string;
         reasoning_effort: CodexReasoningEffortT | null;
+        cost_metadata: unknown;
       }>(
-        "SELECT id, provider, model, reasoning_effort FROM agent_profiles WHERE id = ANY($1::text[])",
+        "SELECT id, provider, model, reasoning_effort, cost_metadata FROM agent_profiles WHERE id = ANY($1::text[])",
         [ids],
       );
       return new Map(
@@ -1028,6 +1041,10 @@ export class StrategyBridgeService {
             provider: row.provider,
             model: row.model,
             reasoning_effort: row.reasoning_effort,
+            credential_mode:
+              asRecord(row.cost_metadata).billing_mode === "subscription"
+                ? ("subscription" as const)
+                : ("api" as const),
           },
         ]),
       );
@@ -1118,10 +1135,20 @@ function fallbackImplementer(transcript: unknown[]): ResolvedProfile {
       typeof entry.provider === "string" &&
       typeof entry.model === "string"
     ) {
-      return { provider: entry.provider, model: entry.model, reasoning_effort: null };
+      return {
+        provider: entry.provider,
+        model: entry.model,
+        reasoning_effort: null,
+        credential_mode: "api",
+      };
     }
   }
-  return { provider: "anthropic", model: "unstaffed", reasoning_effort: null };
+  return {
+    provider: "anthropic",
+    model: "unstaffed",
+    reasoning_effort: null,
+    credential_mode: "api",
+  };
 }
 
 function successMeasures(plan: PlanContractT): string[] {

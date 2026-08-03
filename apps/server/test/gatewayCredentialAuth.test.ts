@@ -40,6 +40,7 @@ import {
   ProviderGateway,
   SqlGatewayCredentialStore,
   anthropicGatewayBaseUrl,
+  deepSeekGatewayBaseUrl,
   openAiGatewayBaseUrl,
 } from "../src/gateway/index.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
@@ -463,6 +464,7 @@ describe.sequential("EXECUTION E9 gateway credential mint route", () => {
       }),
     );
     const minted = await client.mint(stack.runId);
+    expect(minted.deepseek_base_url).toBe(deepSeekGatewayBaseUrl("https://norns.example"));
     const resolved = await stack.credentials.resolve(minted.token);
     expect(resolved).toMatchObject({
       ok: true,
@@ -543,6 +545,13 @@ describe.sequential("EXECUTION E9 gateway credential mint route", () => {
       meteredPaths: new Set(),
       authHeaders: (key) => ({ authorization: `Bearer ${key}` }),
     };
+    const deepSeekSurface: GatewaySurface = {
+      provider: "deepseek",
+      origin: "https://provider.invalid",
+      paths: new Set(["/v1/models"]),
+      meteredPaths: new Set(),
+      authHeaders: (key) => ({ authorization: `Bearer ${key}` }),
+    };
     const gateway = new ProviderGateway({
       runs,
       credentials: stack.credentials,
@@ -555,7 +564,11 @@ describe.sequential("EXECUTION E9 gateway credential mint route", () => {
         markProviderStarted();
         return providerHeaders;
       }) as typeof fetch,
-      surfaces: { anthropic: anthropicSurface, openai: openAiSurface },
+      surfaces: {
+        anthropic: anthropicSurface,
+        openai: openAiSurface,
+        deepseek: deepSeekSurface,
+      },
     });
 
     const forwarding = gateway.forward({

@@ -14,6 +14,7 @@ import {
 } from "@norns/contracts";
 import type { LiveRunRegistry } from "./liveRuns.js";
 import { ManagedProcessTree, managedProcessDetached } from "./managedProcessTree.js";
+import type { RuntimeCredentialMode } from "./modelGateway.js";
 import { PublicationError, type PublicationResult, type RunnerPublisher } from "./publication.js";
 import {
   type HumanWaitEnvelopeT,
@@ -665,7 +666,14 @@ export interface RunnerRuntimeContext {
   runId: string;
   taskId: string;
   maxOutputTokens: number;
+  /** Provider selected by the dispatch; used for provider-specific gateway URLs. */
+  provider?: string;
   reasoningEffort?: CodexReasoningEffortT;
+  /**
+   * Selected auth source. Dispatch wiring defaults an absent contract field to
+   * `api` for compatibility; runtimes still receive the resolved mode.
+   */
+  credentialMode?: RuntimeCredentialMode;
   /**
    * EXECUTION E11 — the runtime session a previous job left behind, when the
    * coordinator is resuming rather than starting fresh.
@@ -770,12 +778,26 @@ export class V2RunnerExecutor {
       : this.repositories.sensitivePaths(command.repository_binding_id);
     const runtimeProvider = this.runtimes.get(command.runtime);
     if (!runtimeProvider) throw new Error(`runtime ${command.runtime} is unavailable`);
+    // `credential_mode` is an additive dispatch field. The cast keeps this
+    // runner compatible while the shared command contract rolls out; once the
+    // field is present there, its schema supplies the same validation.
+    const requestedCredentialMode = (command as { credential_mode?: unknown }).credential_mode;
+    const credentialMode: RuntimeCredentialMode =
+      requestedCredentialMode === undefined || requestedCredentialMode === "api"
+        ? "api"
+        : requestedCredentialMode === "subscription"
+          ? "subscription"
+          : (() => {
+              throw new Error("dispatch credential_mode is unsupported");
+            })();
     const runtime =
       typeof runtimeProvider === "function"
         ? runtimeProvider(command.model, {
             runId: command.run_id,
             taskId: command.task_id,
             maxOutputTokens: command.max_output_tokens,
+            provider: command.provider,
+            credentialMode,
             ...(command.reasoning_effort ? { reasoningEffort: command.reasoning_effort } : {}),
             ...(command.continuation?.resume_session_id
               ? { resumeSessionId: command.continuation.resume_session_id }

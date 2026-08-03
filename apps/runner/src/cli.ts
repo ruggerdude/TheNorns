@@ -207,36 +207,58 @@ function createV2Executor(
       // run reuses one credential rather than accumulating rows.
       [
         "codex",
-        (model: string, context) =>
-          new CodexRuntime({
+        (model: string, context) => {
+          const credentialMode = context.credentialMode ?? "api";
+          return new CodexRuntime({
             model,
+            credentialMode,
             ...(context.reasoningEffort ? { reasoningEffort: context.reasoningEffort } : {}),
             ...(context.resumeSessionId ? { resumeThreadId: context.resumeSessionId } : {}),
-            ...gateway(context.runId),
-          }),
+            ...(credentialMode === "api" ? gateway(context.runId) : {}),
+          });
+        },
       ],
       [
         "claude-code",
-        (model: string, context) =>
-          new ClaudeCodeRuntime({
+        (model: string, context) => {
+          const credentialMode = context.credentialMode ?? "api";
+          const provider = context.provider ?? "anthropic";
+          if (provider !== "anthropic" && provider !== "deepseek") {
+            throw new Error(`claude-code provider ${provider} is unsupported`);
+          }
+          return new ClaudeCodeRuntime({
             model,
+            provider,
+            credentialMode,
             ...(context.resumeSessionId ? { resumeSessionId: context.resumeSessionId } : {}),
-            ...gateway(context.runId),
-          }),
+            ...(credentialMode === "api" ? gateway(context.runId) : {}),
+          });
+        },
       ],
       // EXECUTION E3 — credential-free. Gets its model access from the relay,
       // where the call is authorized against the run and charged to the
       // project's budget before it is made.
       [
         "proxied-completion",
-        (model: string, context) =>
-          new ProxiedCompletionRuntime(inference, {
-            provider: model.startsWith("gpt") || model.startsWith("o") ? "openai" : "anthropic",
+        (model: string, context) => {
+          const provider =
+            context.provider === "anthropic" ||
+            context.provider === "openai" ||
+            context.provider === "deepseek"
+              ? context.provider
+              : model.startsWith("deepseek")
+                ? "deepseek"
+                : model.startsWith("gpt") || model.startsWith("o")
+                  ? "openai"
+                  : "anthropic";
+          return new ProxiedCompletionRuntime(inference, {
+            provider,
             model,
             runId: context.runId,
             taskId: context.taskId,
             maxTokens: context.maxOutputTokens,
-          }),
+          });
+        },
       ],
     ]),
     new CommandPolicyVerifier(policies),

@@ -1,3 +1,4 @@
+import type { PmProviderT } from "@norns/contracts";
 import { useCallback, useEffect, useState } from "react";
 import { DebateBuilder, type DebateDraft } from "./DebateBuilder";
 import { DebateRun } from "./DebateRun";
@@ -8,7 +9,7 @@ import "./WorkflowSurfaces.css";
 export interface AiModelOption {
   id: string;
   label: string;
-  provider: "anthropic" | "openai";
+  provider: PmProviderT;
   description?: string;
   configured?: boolean;
 }
@@ -19,7 +20,7 @@ export interface DebateActor {
   display_name: string;
   role_label: string;
   instructions: string;
-  provider: "anthropic" | "openai";
+  provider: PmProviderT;
   model: string;
   runtime?: "provider_api" | "codex" | "claude-code";
   enabled: boolean;
@@ -77,13 +78,13 @@ interface ModelCatalogResponse {
   models?: Array<{
     id: string;
     label?: string;
-    provider: "anthropic" | "openai";
+    provider: PmProviderT;
     description?: string;
     configured?: boolean;
     available?: boolean;
   }>;
   providers?: Array<{
-    id: "anthropic" | "openai";
+    id: PmProviderT;
     configured?: boolean;
     models?: Array<{
       id: string;

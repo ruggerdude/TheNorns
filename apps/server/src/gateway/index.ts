@@ -18,6 +18,7 @@ export {
 } from "./credentials.js";
 export {
   ANTHROPIC_SURFACE,
+  DEEPSEEK_SURFACE,
   GATEWAY_REFUSAL_HEADER,
   OPENAI_SURFACE,
   ProviderGateway,
@@ -49,6 +50,7 @@ export {
   GATEWAY_CREDENTIAL_ROUTE,
   GATEWAY_ROUTE_PREFIX,
   anthropicGatewayBaseUrl,
+  deepSeekGatewayBaseUrl,
   openAiGatewayBaseUrl,
   registerGatewayRoutes,
   type GatewayRouteDependencies,

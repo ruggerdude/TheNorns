@@ -14,7 +14,7 @@ export const UsageSource = z.enum([
 ]);
 export type UsageSourceT = z.infer<typeof UsageSource>;
 
-export const Provider = z.enum(["anthropic", "openai"]);
+export const Provider = z.enum(["anthropic", "openai", "deepseek"]);
 
 export const UsageEvent = z
   .object({

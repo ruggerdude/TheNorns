@@ -512,6 +512,11 @@ export const QC_ROUTINE_ROUND_DEFAULT_MIGRATION_URL = new URL(
   "../../../drizzle/0079_qc_routine_round_default.sql",
   import.meta.url,
 );
+export const DEEPSEEK_PROVIDER_MIGRATION_NAME = "0080_deepseek_provider";
+export const DEEPSEEK_PROVIDER_MIGRATION_URL = new URL(
+  "../../../drizzle/0080_deepseek_provider.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -859,6 +864,10 @@ export async function loadQcFindingTriageMigrationSql(): Promise<string> {
 
 export async function loadQcRoutineRoundDefaultMigrationSql(): Promise<string> {
   return readFile(QC_ROUTINE_ROUND_DEFAULT_MIGRATION_URL, "utf8");
+}
+
+export async function loadDeepSeekProviderMigrationSql(): Promise<string> {
+  return readFile(DEEPSEEK_PROVIDER_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1348,6 +1357,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: QC_ROUTINE_ROUND_DEFAULT_MIGRATION_NAME,
       sql: await loadQcRoutineRoundDefaultMigrationSql(),
+    },
+    {
+      name: DEEPSEEK_PROVIDER_MIGRATION_NAME,
+      sql: await loadDeepSeekProviderMigrationSql(),
     },
   ];
 }

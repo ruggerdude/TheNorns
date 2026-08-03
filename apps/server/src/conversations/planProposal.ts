@@ -113,7 +113,7 @@ export interface ConversationPlanProposalOptions {
 }
 
 function provider(value: string): ProviderName {
-  if (value === "anthropic" || value === "openai") return value;
+  if (value === "anthropic" || value === "openai" || value === "deepseek") return value;
   throw new ConversationPlanWorkflowError(
     "invalid_plan_state",
     `unsupported pinned conversation provider "${value}"`,

@@ -182,6 +182,7 @@ interface ClaimedPlanningRunRow {
   agent_provider: ProviderName | null;
   agent_model: string | null;
   agent_reasoning_effort: CodexReasoningEffortT | null;
+  agent_credential_mode: "api" | "subscription";
   objective: string;
   max_rounds: number;
   lease_token: string;
@@ -470,7 +471,7 @@ export class PlanningRunWorker {
              planning_runs.mode, planning_runs.requested_by,
              planning_runs.pm_provider, planning_runs.pm_model, planning_runs.pm_reasoning_effort,
              planning_runs.agent_provider, planning_runs.agent_model,
-             planning_runs.agent_reasoning_effort`
+             planning_runs.agent_reasoning_effort, planning_runs.agent_credential_mode`
         : `WITH next_run AS (
              SELECT id FROM planning_runs WHERE status = 'queued'
              ORDER BY created_at ASC FOR UPDATE SKIP LOCKED LIMIT 1
@@ -490,7 +491,7 @@ export class PlanningRunWorker {
              planning_runs.mode, planning_runs.requested_by,
              planning_runs.pm_provider, planning_runs.pm_model, planning_runs.pm_reasoning_effort,
              planning_runs.agent_provider, planning_runs.agent_model,
-             planning_runs.agent_reasoning_effort`;
+             planning_runs.agent_reasoning_effort, planning_runs.agent_credential_mode`;
       const params = runId
         ? [leaseToken, leasedUntil, now.toISOString(), runId, reviewLeasedUntil]
         : [leaseToken, leasedUntil, now.toISOString(), reviewLeasedUntil];
@@ -612,6 +613,7 @@ export class PlanningRunWorker {
               provider: claim.agent_provider,
               model: claim.agent_model,
               reasoning_effort: claim.agent_reasoning_effort,
+              credential_mode: claim.agent_credential_mode,
               worker_count: 1,
               budget_usd: 25,
               rationale: "Agent explicitly selected for this quick change.",
@@ -675,6 +677,7 @@ export class PlanningRunWorker {
             provider: claim.agent_provider,
             model: claim.agent_model,
             reasoning_effort: claim.agent_reasoning_effort,
+            credential_mode: claim.agent_credential_mode,
             worker_count: 1,
             budget_usd: 25,
             rationale: "Agent explicitly selected for this run.",

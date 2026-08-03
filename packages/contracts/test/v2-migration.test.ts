@@ -6,6 +6,7 @@ import {
   V2MigrationReconciliationFinding,
   V2MigrationStep,
   V2PersistenceRoute,
+  V2ProjectPlanningPreference,
   V2RepositoryBindingCandidate,
   V2ShadowReadComparison,
 } from "../src/v2/index.js";
@@ -16,6 +17,21 @@ const HASH = "a".repeat(64);
 const OTHER_HASH = "b".repeat(64);
 
 describe("V2 preservation migration contracts", () => {
+  it("accepts DeepSeek in native planning preferences", () => {
+    expect(
+      V2ProjectPlanningPreference.safeParse({
+        schema_version: 2,
+        project_id: "project-1",
+        pm_provider: "deepseek",
+        pm_model: "deepseek-v4-pro",
+        reviewer_provider: "openai",
+        source: "native",
+        created_at: NOW,
+        updated_at: NOW,
+      }).success,
+    ).toBe(true);
+  });
+
   it("pins a unique, content-addressed recovery manifest", () => {
     const manifest = {
       schema_version: 2,

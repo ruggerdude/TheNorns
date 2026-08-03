@@ -181,7 +181,7 @@ describe("FRONT DOOR P1: planning run -> phase -> strategy review", () => {
     expect(await screen.findByTestId("staffing-table")).toHaveTextContent(/Reranking pass/i);
   });
 
-  it("edits staffing (agent model) via PATCH and approves the strategy", async () => {
+  it("edits staffing to a DeepSeek model via PATCH and approves the strategy", async () => {
     setup();
     mock.patch(`/api/v2/projects/${projectAlpha.id}/phases/phase-new/strategy/staffing`, {
       body: baseStrategyReview({
@@ -190,8 +190,8 @@ describe("FRONT DOOR P1: planning run -> phase -> strategy review", () => {
           staffing: [
             {
               ...(baseStrategyReview().strategy.staffing[0] as Record<string, unknown>),
-              provider: "openai",
-              model: "gpt-5.6-terra",
+              provider: "deepseek",
+              model: "deepseek-v4-pro",
             },
           ],
         },
@@ -219,7 +219,7 @@ describe("FRONT DOOR P1: planning run -> phase -> strategy review", () => {
 
     await user.selectOptions(
       screen.getByRole("combobox", { name: /agent model for reranking pass/i }),
-      "openai:gpt-5.6-terra",
+      "deepseek:deepseek-v4-pro",
     );
 
     await waitFor(() =>
@@ -231,7 +231,13 @@ describe("FRONT DOOR P1: planning run -> phase -> strategy review", () => {
         ),
       ).toMatchObject({
         body: {
-          assignments: [{ assignment_id: "assign-1", provider: "openai", model: "gpt-5.6-terra" }],
+          assignments: [
+            {
+              assignment_id: "assign-1",
+              provider: "deepseek",
+              model: "deepseek-v4-pro",
+            },
+          ],
         },
       }),
     );

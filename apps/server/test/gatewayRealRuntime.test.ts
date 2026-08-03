@@ -44,6 +44,7 @@ import {
   InMemoryGatewayCredentialStore,
   ProviderGateway,
   anthropicGatewayBaseUrl,
+  deepSeekGatewayBaseUrl,
   openAiGatewayBaseUrl,
 } from "../src/gateway/index.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
@@ -275,6 +276,13 @@ async function startStack(): Promise<Stack> {
     authHeaders: (apiKey) =>
       provider === "anthropic" ? { "x-api-key": apiKey } : { authorization: `Bearer ${apiKey}` },
   });
+  const deepSeekSurface: GatewaySurface = {
+    provider: "deepseek",
+    origin: upstreamOrigin,
+    paths: new Set(["/v1/messages", "/v1/messages/count_tokens", "/v1/models"]),
+    meteredPaths: new Set(["/v1/messages"]),
+    authHeaders: (apiKey) => ({ authorization: `Bearer ${apiKey}` }),
+  };
 
   const server = await buildServer({
     stores: new RelayStores(),
@@ -288,7 +296,11 @@ async function startStack(): Promise<Stack> {
       meter: new SqlInferenceMeter(transactions),
       allowedModels: [`anthropic/${MODEL}`],
       apiKey: () => PROVIDER_KEY,
-      surfaces: { anthropic: surface("anthropic"), openai: surface("openai") },
+      surfaces: {
+        anthropic: surface("anthropic"),
+        openai: surface("openai"),
+        deepseek: deepSeekSurface,
+      },
     }),
   });
   const origin = await listen(server);
@@ -343,6 +355,7 @@ describe.sequential("EXECUTION E9 — a real Claude Code process through the gat
           token: stack.token,
           expires_at: new Date(Date.now() + 600_000).toISOString(),
           anthropic_base_url: anthropicGatewayBaseUrl(stack.origin),
+          deepseek_base_url: deepSeekGatewayBaseUrl(stack.origin),
           openai_base_url: openAiGatewayBaseUrl(stack.origin),
         }),
       });

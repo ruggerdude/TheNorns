@@ -1,4 +1,8 @@
-import { OwnedDeviceProjection, type OwnedDeviceProjectionT } from "@norns/contracts";
+import {
+  OwnedDeviceProjection,
+  type OwnedDeviceProjectionT,
+  type PmProviderT,
+} from "@norns/contracts";
 import { Suspense, lazy, useCallback, useEffect, useState } from "react";
 import "./UtilitySurfaces.css";
 import { ArchivedProjectsSettings, GlobalRulesSettings } from "./WorkspaceManagementSettings";
@@ -41,10 +45,11 @@ export interface GitHubIntegrationStatus {
 interface AiIntegrationStatus {
   cross_provider_ready: boolean;
   providers: Array<{
-    id: "anthropic" | "openai";
+    id: PmProviderT;
     name: string;
     configured: boolean;
     model: string;
+    credential_modes?: Array<"api" | "subscription">;
     required_environment: string[];
   }>;
 }
@@ -873,7 +878,11 @@ export function Account({
                     <span className="connection-icon">MP</span>
                     <div>
                       <h4>Model providers</h4>
-                      <p>OpenAI and Anthropic execution credentials</p>
+                      <p>Anthropic, OpenAI, and DeepSeek execution credentials</p>
+                      <p>
+                        Anthropic and OpenAI can also use subscription sign-in for execution;
+                        DeepSeek is API-only.
+                      </p>
                     </div>
                   </div>
                   <div className="connection-card-controls">
