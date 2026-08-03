@@ -3679,14 +3679,18 @@ button:disabled {
 }
 .computer-project-picker {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.9fr);
+  grid-template-columns: minmax(240px, 0.75fr) minmax(360px, 1.25fr);
   align-items: stretch;
-  gap: 0.8rem;
+  overflow: hidden;
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 8%, transparent);
 }
 .computer-choice-list {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
-  gap: 0.55rem;
+  min-width: 0;
 }
 .computer-choice-list > label {
   display: flex;
@@ -3694,17 +3698,19 @@ button:disabled {
   gap: 0.65rem;
   min-width: 0;
   padding: 0.7rem 0.8rem;
-  border: 1px solid var(--line);
-  border-radius: 11px;
-  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
   color: var(--text);
   text-align: left;
   cursor: pointer;
 }
+.computer-choice-list > label:not(:last-child) {
+  border-right: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+}
 .computer-choice-list > label.is-selected {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 8%, transparent);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  box-shadow: none;
 }
 .computer-choice-list input {
   position: absolute;
@@ -3739,9 +3745,10 @@ button:disabled {
   justify-content: space-between;
   gap: 1rem;
   padding: 0.78rem 0.85rem;
-  border: 1px dashed color-mix(in srgb, var(--accent) 34%, var(--line));
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--accent) 4%, var(--surface));
+  border: 0;
+  border-left: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+  border-radius: 0;
+  background: color-mix(in srgb, var(--surface) 44%, transparent);
 }
 .computer-project-picker > .alert {
   grid-column: 1 / -1;
@@ -3889,6 +3896,10 @@ button:disabled {
   }
   .computer-project-picker {
     grid-template-columns: 1fr;
+  }
+  .folder-destination {
+    border-top: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+    border-left: 0;
   }
   .github-repository-summary {
     grid-template-columns: 1fr auto;
