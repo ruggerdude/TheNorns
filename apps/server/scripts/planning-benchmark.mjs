@@ -288,9 +288,13 @@ const reviewStats = reviews.map((review) => {
 
 // 4. QC reliability.
 const completedStatuses = new Set(["converged", "cap_reached"]);
+const failedStatuses = new Set(["failed", "cancelled"]);
+const failedReviews = reviews.filter((review) => failedStatuses.has(review.status));
+const pendingReviews = reviews.filter(
+  (review) => !completedStatuses.has(review.status) && !failedStatuses.has(review.status),
+);
 const failures = new Map();
-for (const review of reviews) {
-  if (completedStatuses.has(review.status)) continue;
+for (const review of failedReviews) {
   const code = review.failure_code ?? review.status;
   failures.set(code, (failures.get(code) ?? 0) + 1);
 }
@@ -302,10 +306,9 @@ for (const call of calls.filter((c) => c.failed)) {
 const reliability = {
   reviews: reviews.length,
   completed: reviews.filter((r) => completedStatuses.has(r.status)).length,
-  failed: reviews.filter((r) => !completedStatuses.has(r.status)).length,
-  failureRate: reviews.length
-    ? reviews.filter((r) => !completedStatuses.has(r.status)).length / reviews.length
-    : null,
+  failed: failedReviews.length,
+  pending: pendingReviews.length,
+  failureRate: reviews.length ? failedReviews.length / reviews.length : null,
   byFailureCode: Object.fromEntries(failures),
   byTelemetryError: Object.fromEntries(telemetryFailures),
   baseline: BASELINE.qc,
@@ -428,7 +431,7 @@ if (asJson) {
 
   console.log("\n4. QC RELIABILITY\n");
   console.log(
-    `   reviews ${reliability.reviews} | completed ${reliability.completed} | failed ${reliability.failed} ` +
+    `   reviews ${reliability.reviews} | completed ${reliability.completed} | failed ${reliability.failed} | pending ${reliability.pending} ` +
       `(${fmt(reliability.failureRate * 100, 1)}%) | baseline ${BASELINE.qc.failed}/${BASELINE.qc.reviews} failed\n`,
   );
   console.log(
