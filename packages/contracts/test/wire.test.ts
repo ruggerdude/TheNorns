@@ -209,12 +209,24 @@ describe("runner workspace wire", () => {
 
   it("accepts a secure GitHub clone request and returns only opaque repository handles", () => {
     expect(
+      RunnerWorkspaceResponse.safeParse({
+        request_id: "workspace:destination",
+        operation: "choose_clone_parent",
+        status: "ok",
+        clone_destination: {
+          clone_destination_id: "local:destination",
+          label: "Projects",
+        },
+      }).success,
+    ).toBe(true);
+    expect(
       RunnerWorkspaceRequest.safeParse({
         request_id: "workspace:clone",
         operation: "clone",
         clone_url: "https://github.com/octocat/fresh-app.git",
         repository_name: "fresh-app",
         clone_token: "short-lived-repository-token",
+        clone_destination_id: "local:destination",
       }).success,
     ).toBe(true);
     expect(

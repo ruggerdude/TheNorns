@@ -129,6 +129,7 @@ export const RunnerWorkspaceRequest = z
       "browse",
       "validate",
       "choose",
+      "choose_clone_parent",
       "clone",
       "inspect",
       "delete",
@@ -139,6 +140,7 @@ export const RunnerWorkspaceRequest = z
     clone_url: githubCloneUrl.optional(),
     repository_name: safeDisplayLabel.optional(),
     clone_token: z.string().min(1).max(1_000).optional(),
+    clone_destination_id: opaqueId.optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -209,6 +211,7 @@ export const RunnerWorkspaceResponse = z
       "browse",
       "validate",
       "choose",
+      "choose_clone_parent",
       "clone",
       "inspect",
       "delete",
@@ -231,6 +234,13 @@ export const RunnerWorkspaceResponse = z
     // returning a clone response. This opaque id lets onboarding grant the
     // exact working copy without exposing its filesystem path.
     repository_registration_id: opaqueId.optional(),
+    clone_destination: z
+      .object({
+        clone_destination_id: opaqueId,
+        label: safeDisplayLabel,
+      })
+      .strict()
+      .optional(),
     repositories: z.array(RunnerWorkspaceRepository).max(200).optional(),
     inspection: RepositoryInspection.optional(),
   })
@@ -240,6 +250,7 @@ export const RunnerWorkspaceResponse = z
       value.workspaces,
       value.entries,
       value.repository,
+      value.clone_destination,
       value.repositories,
       value.inspection,
     ].filter((payload) => payload !== undefined);
@@ -266,6 +277,7 @@ export const RunnerWorkspaceResponse = z
       (value.operation === "list" && value.workspaces !== undefined) ||
       (value.operation === "catalog" && value.repositories !== undefined) ||
       (value.operation === "browse" && value.entries !== undefined) ||
+      (value.operation === "choose_clone_parent" && value.clone_destination !== undefined) ||
       (value.operation === "delete" && payloads.length === 0) ||
       ((value.operation === "validate" ||
         value.operation === "choose" ||

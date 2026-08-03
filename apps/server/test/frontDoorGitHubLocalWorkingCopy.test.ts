@@ -142,6 +142,7 @@ describe.sequential("Front Door GitHub + this computer creation", () => {
           "workspace_picker",
           "workspace_repository_inventory",
           "workspace_clone",
+          "workspace_clone_destination",
           "workspace_delete",
         ],
       },
@@ -375,6 +376,22 @@ describe.sequential("Front Door GitHub + this computer creation", () => {
   });
 
   it("targets the exact enrolled computer without using a global helper lookup", async () => {
+    const folderResponse = await fetch(`${url}/api/v2/computers/device-local/clone-destination`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    expect(folderResponse.status).toBe(200);
+    const folder = (await folderResponse.json()) as {
+      clone_destination_id: string;
+      label: string;
+    };
+    expect(folder.label).toBeTruthy();
+    expect(JSON.stringify(folder)).not.toContain(parent);
+
     const response = await fetch(`${url}/api/v2/projects/onboarding`, {
       method: "POST",
       headers: {
@@ -393,6 +410,7 @@ describe.sequential("Front Door GitHub + this computer creation", () => {
         private: true,
         local_working_copy: true,
         computer_id: "device-local",
+        clone_destination_id: folder.clone_destination_id,
       }),
     });
 

@@ -117,13 +117,19 @@ describe("new project: name-first creation, planning in the conversation", () =>
     const user = userEvent.setup();
     await openWizard();
 
+    expect(
+      screen.getAllByRole("heading", {
+        name: /^(Name of project|GitHub|Project|QC options)$/,
+      }),
+    ).toHaveLength(4);
+
     expect(screen.getByTestId("automatic-github-destination")).toHaveTextContent("octocat");
     expect(screen.queryByTestId("github-connection")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /create project/i })).toBeDisabled();
 
     await user.type(screen.getByTestId("project-name"), "Lightweight habit tracker");
     expect(screen.getByTestId("derived-project-summary")).toHaveTextContent(
-      "Lightweight habit tracker",
+      "octocat/lightweight-habit-tracker",
     );
     await user.click(screen.getByRole("button", { name: /create project/i }));
 
@@ -186,7 +192,6 @@ describe("new project: name-first creation, planning in the conversation", () =>
     const user = userEvent.setup();
     await openWizard();
     await user.type(screen.getByTestId("project-name"), "Ravel Search");
-    await user.click(screen.getByText("Options"));
     expect(screen.queryByTestId("new-project-attachment-input")).not.toBeInTheDocument();
     await user.type(screen.getByTestId("github-new-repository-name"), "ravel-index");
     await user.selectOptions(screen.getByTestId("github-repository-visibility"), "public");
@@ -206,14 +211,13 @@ describe("new project: name-first creation, planning in the conversation", () =>
     });
   });
 
-  it("allows zero plan review rounds and says review is off", async () => {
+  it("keeps QC options open, allows zero review rounds, and removes the old policy banner", async () => {
     setup();
     const user = userEvent.setup();
     await openWizard();
     await user.type(screen.getByTestId("project-name"), "Ravel Search");
-    await user.click(screen.getByText("Options"));
-
-    expect(screen.getByTestId("qc-mode")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "QC options" })).toBeInTheDocument();
+    expect(screen.queryByText("Cross-provider review is on.")).not.toBeInTheDocument();
     const fewer = screen.getByRole("button", { name: /fewer rounds/i });
     await user.click(fewer);
     await user.click(fewer);
@@ -221,10 +225,11 @@ describe("new project: name-first creation, planning in the conversation", () =>
     expect(screen.getByTestId("rounds-stepper")).toHaveTextContent("0");
     expect(fewer).toBeDisabled();
     expect(screen.getByTestId("review-off-note")).toHaveTextContent("Reviews are off");
-    expect(screen.queryByText("Cross-provider review is on.")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("qc-mode")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /more rounds/i }));
     expect(screen.getByTestId("qc-mode")).toBeInTheDocument();
+    expect(screen.queryByText("Cross-provider review is on.")).not.toBeInTheDocument();
   });
 
   it("sets progress update timing and content with the project QC options", async () => {
@@ -239,7 +244,6 @@ describe("new project: name-first creation, planning in the conversation", () =>
     const user = userEvent.setup();
     await openWizard();
     await user.type(screen.getByTestId("project-name"), "Ravel status updates");
-    await user.click(screen.getByText("Options"));
 
     await user.selectOptions(screen.getByTestId("project-update-timing"), "900");
     await user.selectOptions(screen.getByTestId("project-update-content"), "attention");
@@ -270,5 +274,43 @@ describe("new project: name-first creation, planning in the conversation", () =>
     expect(
       mock.calls.some((call) => call.method === "POST" && call.url.endsWith("/planning-runs")),
     ).toBe(false);
+  });
+
+  it("shows live setup status while project creation runs in the background", async () => {
+    setup();
+    let finishOnboarding: (value: {
+      status: number;
+      body: Record<string, unknown>;
+    }) => void = () => undefined;
+    mock.post(
+      "/api/v2/projects/onboarding",
+      () =>
+        new Promise((resolve) => {
+          finishOnboarding = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    await openWizard();
+    await user.type(screen.getByTestId("project-name"), "Status console");
+    await user.click(screen.getByRole("button", { name: /create project/i }));
+
+    expect(await screen.findByTestId("project-creation-status")).toHaveTextContent(
+      "Creating the GitHub repository and project",
+    );
+    expect(screen.getByRole("button", { name: "Creating project…" })).toBeDisabled();
+
+    finishOnboarding({
+      status: 201,
+      body: {
+        project_id: "proj_wizard",
+        scenario: "new_repo",
+        replayed: false,
+        workspace: null,
+        remote: null,
+        push: null,
+        blockers: [],
+      },
+    });
+    await waitFor(() => expect(onOpenProject).toHaveBeenCalledOnce());
   });
 });

@@ -247,12 +247,19 @@ async function prepare(
                 "workspace_picker",
                 "workspace_repository_inventory",
                 "workspace_clone",
+                "workspace_clone_destination",
               ],
             },
             repository_grants: [],
             activity: { active_run_count: 0, queued_command_count: 0 },
           },
         ],
+      });
+    }
+    if (path === "/api/v2/computers/device-e2e/clone-destination") {
+      return fulfill(route, {
+        clone_destination_id: "local:e2e-destination",
+        label: "Projects",
       });
     }
     if (path === "/api/runners/helper/repositories") {
@@ -605,8 +612,9 @@ test("New work can create a GitHub repository and folder on an enrolled computer
   await page.getByTestId("project-name").fill("Local release readiness dashboard");
   await page.getByRole("button", { name: /^this computer/i }).click();
   await expect(page.getByTestId("project-computer")).toHaveValue("device-e2e");
+  await page.getByRole("button", { name: "Choose folder" }).click();
   await expect(page.getByTestId("setup-confirmation")).toContainText(
-    "ask Front Door Mac where to create its local working folder",
+    "clone it into Projects on Front Door Mac",
   );
   await page.getByRole("button", { name: /create project/i }).click();
 
@@ -618,6 +626,7 @@ test("New work can create a GitHub repository and folder on an enrolled computer
       scenario: "new_repo",
       local_working_copy: true,
       computer_id: "device-e2e",
+      clone_destination_id: "local:e2e-destination",
     }),
   ]);
   expect(observed.localProjectRequests).toEqual([]);

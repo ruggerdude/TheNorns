@@ -92,6 +92,7 @@ const projectComputer = {
       "workspace_picker",
       "workspace_repository_inventory",
       "workspace_clone",
+      "workspace_clone_destination",
     ],
   },
   repository_grants: [],
@@ -128,6 +129,9 @@ describe("O1: GitHub and local Git repository onboarding", () => {
       },
     });
     mock.get("/api/devices", { body: { devices: [projectComputer] } });
+    mock.post("/api/v2/computers/device-1/clone-destination", {
+      body: { clone_destination_id: "local:destination-1", label: "Projects" },
+    });
     mock.post("/api/v2/projects/local", (_url, init) => {
       const body = JSON.parse(String(init?.body)) as {
         name: string;
@@ -339,9 +343,10 @@ describe("O1: GitHub and local Git repository onboarding", () => {
     await user.click(await screen.findByRole("button", { name: /new project/i }));
     await user.click(screen.getByRole("button", { name: /^this computer/i }));
     await user.type(screen.getByTestId("project-name"), "Fresh application");
+    await user.click(screen.getByRole("button", { name: /choose folder/i }));
 
     expect(await screen.findByTestId("setup-confirmation")).toHaveTextContent(
-      /ask david's mac where to create its local working folder/i,
+      /clone it into projects on david's mac/i,
     );
     await user.click(screen.getByRole("button", { name: /create project/i }));
 
@@ -356,6 +361,7 @@ describe("O1: GitHub and local Git repository onboarding", () => {
         repository_name: "fresh-application",
         local_working_copy: true,
         computer_id: "device-1",
+        clone_destination_id: "local:destination-1",
       },
     });
     expect(mock.calls.some((call) => call.url.startsWith("/api/runners/helper/"))).toBe(false);

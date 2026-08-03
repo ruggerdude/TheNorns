@@ -770,6 +770,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       workspacePicker: boolean;
       workspaceRepositoryInventory: boolean;
       workspaceClone: boolean;
+      workspaceCloneDestination: boolean;
       workspaceDelete: boolean;
     }
   >();
@@ -4636,6 +4637,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           private: z.boolean().default(true),
           local_working_copy: z.boolean().default(false),
           computer_id: z.string().trim().min(1).max(512).optional(),
+          clone_destination_id: z.string().trim().min(1).max(512).optional(),
         }),
         z.object({
           ...OnboardingFields,
@@ -4653,6 +4655,69 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           pm_model: OpenAiPmModel.default(DEFAULT_PM_MODEL.openai),
         }),
       ]);
+
+      app.post("/api/v2/computers/:id/clone-destination", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const user = await resolveUser(req);
+        if (!user) return;
+        const { id } = req.params as { id: string };
+        if (!options.deviceManagement) {
+          return reply.code(503).send({
+            error: "computer_working_copy_unavailable",
+            message: "Computer working copies are not enabled on this Norns installation.",
+          });
+        }
+        let computer: OwnedDeviceProjectionT;
+        try {
+          computer = await options.deviceManagement.service.getOwnedDevice(user.id, id);
+        } catch {
+          return reply.code(404).send({
+            error: "computer_not_found",
+            message: "That computer is no longer connected to your account.",
+          });
+        }
+        const reconciled = reconciledRunners.get(computer.device_id);
+        if (
+          computer.lifecycle !== "active" ||
+          computer.status.availability !== "online" ||
+          !reconciled ||
+          !reconciled.workspaceCloneDestination ||
+          reconciled.socket !== runnerSockets.get(computer.device_id) ||
+          reconciled.generation !== computer.active_credential?.generation
+        ) {
+          return reply.code(409).send({
+            error: "computer_unavailable",
+            message:
+              "Update or open the Norns Local Agent on that computer before choosing a project folder.",
+          });
+        }
+        try {
+          const response = await workspaceBroker.request(
+            computer.device_id,
+            reconciled.generation,
+            {
+              operation: "choose_clone_parent",
+            },
+          );
+          if (response.status === "cancelled") return reply.send({ cancelled: true });
+          if (response.status !== "ok" || !response.clone_destination) {
+            return reply.code(409).send({
+              error: "folder_selection_failed",
+              message: "The folder chooser could not save that location. Try again.",
+            });
+          }
+          return reply.send(response.clone_destination);
+        } catch (error) {
+          const code = error instanceof WorkspaceBrokerError ? error.code : "runner_unavailable";
+          return reply.code(code === "timeout" ? 504 : code === "request_limit" ? 429 : 409).send({
+            error: code,
+            message:
+              code === "timeout"
+                ? "The folder chooser timed out. Try again."
+                : "The Local Agent is not available. Open it and try again.",
+          });
+        }
+      });
 
       app.post("/api/v2/projects/onboarding", async (req, reply) => {
         if (!(await requireSession(req, reply))) return;
@@ -4730,6 +4795,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                 !reconciled.workspacePicker ||
                 !reconciled.workspaceRepositoryInventory ||
                 !reconciled.workspaceClone ||
+                (scenario.data.clone_destination_id && !reconciled.workspaceCloneDestination) ||
                 reconciled.socket !== runnerSockets.get(runnerId) ||
                 reconciled.generation !== computer.active_credential?.generation
               ) {
@@ -4909,15 +4975,20 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                 clone_url: credential.repository.clone_url,
                 repository_name: credential.repository.name,
                 clone_token: credential.token,
+                ...(scenario.data.clone_destination_id
+                  ? { clone_destination_id: scenario.data.clone_destination_id }
+                  : {}),
               },
             );
             if (clone.status !== "ok" || !clone.repository) {
               const message =
                 clone.status === "cancelled"
                   ? "The GitHub repository was created. Choose a parent folder to finish the local working copy."
-                  : clone.status === "destination_exists"
-                    ? `A folder named ${credential.repository.name} already exists in that location. Choose a different parent folder.`
-                    : "The GitHub repository was created, but the local helper could not clone it. Check this computer's Git access and try again.";
+                  : clone.status === "not_found"
+                    ? "The selected project folder expired. Choose the folder again to finish the local working copy."
+                    : clone.status === "destination_exists"
+                      ? `A folder named ${credential.repository.name} already exists in that location. Choose a different parent folder.`
+                      : "The GitHub repository was created, but the local helper could not clone it. Check this computer's Git access and try again.";
               console.error(
                 `project onboarding refused: local_working_copy_${clone.status} (409) — helper clone did not complete for ${result.project_id}`,
               );
@@ -8151,6 +8222,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             workspacePicker: true,
             workspaceRepositoryInventory: true,
             workspaceClone: advertisedDeviceCapabilities.has("workspace_clone"),
+            workspaceCloneDestination: advertisedDeviceCapabilities.has(
+              "workspace_clone_destination",
+            ),
             workspaceDelete: advertisedDeviceCapabilities.has("workspace_delete"),
           });
         }
@@ -8354,6 +8428,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                 "workspace_repository_inventory",
               ),
               workspaceClone: body.capabilities.includes("workspace_clone"),
+              workspaceCloneDestination: body.capabilities.includes("workspace_clone_destination"),
               workspaceDelete: body.capabilities.includes("workspace_delete"),
             });
             const recentlyExecuted = new Set(body.recently_executed_command_ids);
@@ -8480,6 +8555,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             "workspace_repository_inventory",
           ),
           workspaceClone: body.capabilities.includes("workspace_clone"),
+          workspaceCloneDestination: body.capabilities.includes("workspace_clone_destination"),
           workspaceDelete: body.capabilities.includes("workspace_delete"),
         });
         stores.markSeen(authedRunnerId, now());

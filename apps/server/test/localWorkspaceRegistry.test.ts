@@ -159,6 +159,59 @@ describe("runner-local workspace registry", () => {
     expect(purposes).toEqual(["clone_parent", "clone_parent"]);
   });
 
+  it("selects a clone parent before creation and consumes only its opaque handle", async () => {
+    const data = mkdtempSync(join(tmpdir(), "norns-preselected-clone-"));
+    const sourceRoot = mkdtempSync(join(tmpdir(), "norns-preselected-source-"));
+    const source = gitRepository(sourceRoot, "preselected-source");
+    const parent = join(data, "Projects");
+    mkdirSync(parent);
+    const cloneUrl = "https://github.com/octocat/preselected-app.git";
+    let pickerCount = 0;
+    const registry = new WorkspaceRegistry(
+      data,
+      async () => {
+        pickerCount += 1;
+        return parent;
+      },
+      async ({ target }) => {
+        execFileSync("git", ["clone", "--", source, target]);
+        execFileSync("git", ["-C", target, "remote", "set-url", "origin", cloneUrl]);
+      },
+    );
+
+    const selected = await registry.handleAsync({
+      request_id: "choose-clone-parent",
+      operation: "choose_clone_parent",
+    });
+    expect(selected).toMatchObject({
+      status: "ok",
+      clone_destination: { label: "Projects" },
+    });
+    expect(JSON.stringify(selected)).not.toContain(parent);
+
+    const cloned = await registry.handleAsync({
+      request_id: "clone-preselected",
+      operation: "clone",
+      clone_url: cloneUrl,
+      repository_name: "preselected-app",
+      clone_token: "one-use-secret",
+      clone_destination_id: selected.clone_destination?.clone_destination_id,
+    });
+    expect(cloned).toMatchObject({ status: "ok", operation: "clone" });
+    expect(pickerCount).toBe(1);
+
+    await expect(
+      registry.handleAsync({
+        request_id: "clone-reuse-destination",
+        operation: "clone",
+        clone_url: cloneUrl,
+        repository_name: "preselected-app",
+        clone_token: "one-use-secret",
+        clone_destination_id: selected.clone_destination?.clone_destination_id,
+      }),
+    ).resolves.toMatchObject({ status: "not_found" });
+  });
+
   it("does not remove a destination another process creates during clone", async () => {
     const data = mkdtempSync(join(tmpdir(), "norns-native-clone-race-"));
     const parent = join(data, "projects");

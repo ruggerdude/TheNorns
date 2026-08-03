@@ -60,10 +60,17 @@ interface Handle {
   expires_at: number;
 }
 
+interface CloneDestination {
+  path: string;
+  label: string;
+  expires_at: number;
+}
+
 const GIT_PROBE_TIMEOUT_MS = 250;
 const BROWSE_DEADLINE_MS = 750;
 const MAX_BROWSE_ENTRIES = 200;
 const MAX_BROWSE_SCAN = 400;
+const CLONE_DESTINATION_TTL_MS = 30 * 60_000;
 
 class InvalidWorkspaceRegistryError extends Error {}
 
@@ -165,6 +172,7 @@ export class WorkspaceRegistry {
   private readonly lockDirectory: string;
   private state: PersistedRegistry;
   private readonly handles = new Map<string, Handle>();
+  private readonly cloneDestinations = new Map<string, CloneDestination>();
 
   constructor(
     dataDir: string,
@@ -185,18 +193,47 @@ export class WorkspaceRegistry {
 
   /** Handles native selection asynchronously so an open dialog never blocks the runner socket. */
   async handleAsync(request: RunnerWorkspaceRequestT): Promise<RunnerWorkspaceResponseT> {
-    if (request.operation !== "choose" && request.operation !== "clone") {
+    if (
+      request.operation !== "choose" &&
+      request.operation !== "choose_clone_parent" &&
+      request.operation !== "clone"
+    ) {
       return this.handle(request);
     }
     try {
-      const selectedPath = await this.directoryPicker(
-        request.operation === "clone" ? "clone_parent" : "repository",
-      );
+      this.pruneCloneDestinations();
+      const selectedPath =
+        request.operation === "clone" && request.clone_destination_id
+          ? this.takeCloneDestination(request.clone_destination_id)
+          : await this.directoryPicker(
+              request.operation === "choose" ? "repository" : "clone_parent",
+            );
       if (!selectedPath) {
         return {
           request_id: request.request_id,
           operation: request.operation,
-          status: "cancelled",
+          status:
+            request.operation === "clone" && request.clone_destination_id
+              ? "not_found"
+              : "cancelled",
+        };
+      }
+      if (request.operation === "choose_clone_parent") {
+        const cloneDestinationId = opaque();
+        const label = safeLabel(basename(selectedPath), "Selected folder");
+        this.cloneDestinations.set(cloneDestinationId, {
+          path: selectedPath,
+          label,
+          expires_at: Date.now() + CLONE_DESTINATION_TTL_MS,
+        });
+        return {
+          request_id: request.request_id,
+          operation: "choose_clone_parent",
+          status: "ok",
+          clone_destination: {
+            clone_destination_id: cloneDestinationId,
+            label,
+          },
         };
       }
       if (request.operation === "clone") {
@@ -235,6 +272,20 @@ export class WorkspaceRegistry {
         status: request.operation === "clone" ? "clone_failed" : "unavailable",
       };
     }
+  }
+
+  private pruneCloneDestinations(): void {
+    const currentTime = Date.now();
+    for (const [id, destination] of this.cloneDestinations) {
+      if (destination.expires_at <= currentTime) this.cloneDestinations.delete(id);
+    }
+  }
+
+  private takeCloneDestination(id: string): string | null {
+    const destination = this.cloneDestinations.get(id);
+    if (!destination) return null;
+    this.cloneDestinations.delete(id);
+    return destination.path;
   }
 
   /**

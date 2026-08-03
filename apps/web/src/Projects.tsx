@@ -324,6 +324,12 @@ interface GitHubRepository {
   binding_ready?: boolean;
 }
 
+interface CloneDestinationSelection {
+  clone_destination_id: string;
+  label: string;
+  computer_id: string;
+}
+
 async function request<T>(path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(path, {
     method: body ? "POST" : "GET",
@@ -543,7 +549,11 @@ export function Projects({
   const [computers, setComputers] = useState<OwnedDeviceProjectionT[] | null>(null);
   const [computersError, setComputersError] = useState<string | null>(null);
   const [selectedComputerId, setSelectedComputerId] = useState("");
+  const [cloneDestination, setCloneDestination] = useState<CloneDestinationSelection | null>(null);
+  const [folderPickerBusy, setFolderPickerBusy] = useState(false);
+  const [folderPickerError, setFolderPickerError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [creationStatus, setCreationStatus] = useState<string | null>(null);
   const [attention, setAttention] = useState<PortfolioAttentionDto | null>(null);
   const [attentionBusy, setAttentionBusy] = useState<string | null>(null);
   const [resumePollIssue, setResumePollIssue] = useState<string | null>(null);
@@ -911,7 +921,8 @@ export function Projects({
               computer.status.availability === "online" &&
               computer.agent?.capabilities.includes("workspace_picker") &&
               computer.agent.capabilities.includes("workspace_repository_inventory") &&
-              computer.agent?.capabilities.includes("workspace_clone"),
+              computer.agent?.capabilities.includes("workspace_clone") &&
+              computer.agent.capabilities.includes("workspace_clone_destination"),
           )?.device_id ??
           availableComputers.find((computer) => computer.lifecycle === "active")?.device_id ??
           ""
@@ -1063,10 +1074,19 @@ export function Projects({
       setRepositoryName("");
       setRepositoryQuery("");
       setLocalSelection(null);
+      setCloneDestination(null);
+      setFolderPickerBusy(false);
+      setFolderPickerError(null);
       setLocalSources(null);
       setLocalSourcesError(null);
       setSubmissionError(null);
       setAdoptionError(null);
+      setCreationStatus(null);
+      setReviewerSelection("auto");
+      setRoundsCount(3);
+      setQcMode("automatic");
+      setAllowUnadjudicatedRebuttals(false);
+      setProjectUpdatePreferences(loadGlobalUpdatePreferences());
       setIdempotencyKey(globalThis.crypto.randomUUID());
       onOpenProject(stableProject, {
         startNewWork,
@@ -1127,6 +1147,25 @@ export function Projects({
     [reviewerSelection, qcMode, allowUnadjudicatedRebuttals, roundsCount],
   );
 
+  const chooseCloneDestination = useCallback(async (): Promise<void> => {
+    if (!selectedComputerId) return;
+    setFolderPickerBusy(true);
+    setFolderPickerError(null);
+    setSubmissionError(null);
+    try {
+      const selection = await request<
+        { cancelled: true } | { clone_destination_id: string; label: string }
+      >(`/api/v2/computers/${encodeURIComponent(selectedComputerId)}/clone-destination`, {});
+      if ("cancelled" in selection) return;
+      setCloneDestination({ ...selection, computer_id: selectedComputerId });
+    } catch (error) {
+      if (error instanceof UnauthorizedError) onUnauthorized();
+      else setFolderPickerError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setFolderPickerBusy(false);
+    }
+  }, [onUnauthorized, selectedComputerId]);
+
   /** DESIGN R2: a new project opens straight into the workspace after
    *  creation — planning begins in the conversation there, so the wizard no
    *  longer starts a planning run or uploads objective attachments. The
@@ -1157,6 +1196,7 @@ export function Projects({
 
   const create = useCallback(async () => {
     setCreating(true);
+    setCreationStatus(null);
     setError(null);
     setSourceError(null);
     setSubmissionError(null);
@@ -1173,6 +1213,7 @@ export function Projects({
           return;
         }
         const isNewLocalProject = startingPoint === "new";
+        setCreationStatus("Creating the project and preparing its repository…");
         // DESIGN R2: no auto-filled filler description — a new project's
         // description is empty at creation (planning happens in the
         // conversation); an adoption records only the human's optional
@@ -1189,7 +1230,6 @@ export function Projects({
         });
         if (isNewLocalProject) {
           await applyReviewerPreference(completedProject.id);
-          saveProjectUpdatePreferences(completedProject.id, projectUpdatePreferences);
           await prepareNewLocalProject(completedProject);
           return;
         }
@@ -1249,6 +1289,13 @@ export function Projects({
       // creation); adoptions keep the human's optional direction or the
       // repository's own GitHub description.
       const projectDescription = description.trim() || repository?.description || "";
+      setCreationStatus(
+        scenario === "new_repo"
+          ? computerExecution
+            ? "Creating the GitHub repository and cloning its working folder…"
+            : "Creating the GitHub repository and project…"
+          : "Connecting the repository and creating the project…",
+      );
       const onboarding = await request<OnboardingResponse>("/api/v2/projects/onboarding", {
         name: projectName,
         description: projectDescription,
@@ -1259,6 +1306,9 @@ export function Projects({
           ? {
               local_working_copy: computerExecution,
               ...(computerExecution ? { computer_id: selectedComputerId } : {}),
+              ...(computerExecution && cloneDestination
+                ? { clone_destination_id: cloneDestination.clone_destination_id }
+                : {}),
             }
           : {}),
         ...onboardingFields,
@@ -1267,6 +1317,7 @@ export function Projects({
       // replayed, workspace/remote/push, blockers) — not the full project
       // record the rest of the app expects, so fetch that separately
       // through the existing GET /api/projects/:id route.
+      setCreationStatus("Repository ready. Loading the new project…");
       const completedProject = await request<ProjectSummary>(
         `/api/projects/${onboarding.project_id}`,
       );
@@ -1280,6 +1331,7 @@ export function Projects({
       // Advanced reviewer selection changes planning behavior, so apply it
       // before either the normal continuation or a blocker recovery.
       if (startingPoint === "new") {
+        setCreationStatus("Project created. Saving QC settings…");
         await applyReviewerPreference(completedProject.id);
         saveProjectUpdatePreferences(completedProject.id, projectUpdatePreferences);
       }
@@ -1291,11 +1343,15 @@ export function Projects({
         return;
       }
       if (startingPoint === "existing") {
+        setCreationStatus("Project created. Preparing the repository…");
         await completeAdoption(completedProject, description.trim());
         return;
       }
+      setCreationStatus("Setup complete. Opening the project…");
       finishNewProject(completedProject);
     } catch (e) {
+      setCreationStatus(null);
+      if (executionLocation !== "github_actions") setCloneDestination(null);
       e instanceof UnauthorizedError
         ? onUnauthorized()
         : setSubmissionError(e instanceof Error ? e.message : String(e));
@@ -1313,6 +1369,8 @@ export function Projects({
     sourceKind,
     executionLocation,
     selectedComputerId,
+    cloneDestination,
+    projectUpdatePreferences,
     localExecutionCapabilities.computers_available,
     localExecutionCapabilities.repository_grants_available,
     localExecutionCapabilities.legacy_local_creation_available,
@@ -1321,7 +1379,6 @@ export function Projects({
     derivedIdentity,
     repositoryPrivate,
     idempotencyKey,
-    projectUpdatePreferences,
     applyReviewerPreference,
     completeAdoption,
     finishNewProject,
@@ -1412,10 +1469,14 @@ export function Projects({
     setRepositoryName("");
     setRepositoryQuery("");
     setLocalSelection(null);
+    setCloneDestination(null);
+    setFolderPickerBusy(false);
+    setFolderPickerError(null);
     setLocalSources(null);
     setLocalSourcesError(null);
     setSubmissionError(null);
     setAdoptionError(null);
+    setCreationStatus(null);
     setReviewerSelection("auto");
     setRoundsCount(3);
     setQcMode("automatic");
@@ -1487,7 +1548,8 @@ export function Projects({
         computer.status.availability === "online" &&
         computer.agent?.capabilities.includes("workspace_picker") &&
         computer.agent.capabilities.includes("workspace_repository_inventory") &&
-        computer.agent.capabilities.includes("workspace_clone"),
+        computer.agent.capabilities.includes("workspace_clone") &&
+        computer.agent.capabilities.includes("workspace_clone_destination"),
     ) ?? [];
   const computerExecution = executionLocation !== "github_actions";
   const sourceReady = isLocalSource
@@ -1501,6 +1563,7 @@ export function Projects({
     !computerExecution ||
     (computerCreationAvailable &&
       selectedComputer !== undefined &&
+      cloneDestination?.computer_id === selectedComputer.device_id &&
       readyComputers.some((computer) => computer.device_id === selectedComputer.device_id));
   const canCreate =
     !creating &&
@@ -1522,11 +1585,13 @@ export function Projects({
     ? localSelection
       ? `Norns will not create a folder or initialize Git. It will work only inside the already-initialized, approved local Git repository ${localSelection.repository.repository_display_name}; its filesystem path stays on this computer.`
       : "Select an already-initialized local Git repository approved in Connections. Norns will not create a folder or initialize Git."
-    : describeSetup(
-        confirmationRepositoryFullName,
-        startingPoint === "new" ? executionLocation : "github_actions",
-        selectedComputer?.name,
-      );
+    : computerExecution && confirmationRepositoryFullName && cloneDestination
+      ? `Norns will create ${confirmationRepositoryFullName} on GitHub, then clone it into ${cloneDestination.label} on ${selectedComputer?.name ?? "the selected computer"}. Folder paths stay on that computer.`
+      : describeSetup(
+          confirmationRepositoryFullName,
+          startingPoint === "new" ? executionLocation : "github_actions",
+          selectedComputer?.name,
+        );
 
   return (
     <div className={`app-shell${dialog ? " project-setup-view" : ""}`}>
@@ -1998,624 +2063,721 @@ export function Projects({
                   </div>
                 </div>
               ) : (
-                <div className="form-stack">
+                <div className="form-stack project-setup-form">
                   {/* DESIGN R2: the project name is the first field and IS the
                       name (used for folder/repo naming) — the old objective
                       textarea is gone; planning happens in the conversation
                       after creation. */}
-                  {startingPoint === "new" ? (
-                    <Field label="Project name">
-                      <Input
-                        data-testid="project-name"
-                        value={name}
-                        onChange={(event) => setName(event.target.value)}
-                        placeholder="e.g. Apollo customer portal"
-                      />
-                    </Field>
-                  ) : null}
-                  <fieldset className="source-picker">
-                    <legend>Working location</legend>
-                    <div className="source-options">
-                      <button
-                        type="button"
-                        className={
-                          sourceKind === "github" && startingPoint === "new" ? "is-selected" : ""
-                        }
-                        onClick={() => {
-                          setStartingPoint("new");
-                          setSourceKind("github");
-                          setSelectedRepositoryId("");
-                          setLocalSelection(null);
-                          setSourceError(null);
-                          setLocalSourcesError(null);
-                          setSubmissionError(null);
-                        }}
-                      >
-                        <strong>New GitHub</strong>
-                        <span>
-                          Create a new repository in a connected GitHub account or organization.
-                        </span>
-                      </button>
-                      <button
-                        type="button"
-                        className={
-                          sourceKind === "github" && startingPoint === "existing"
-                            ? "is-selected"
-                            : ""
-                        }
-                        onClick={() => {
-                          setStartingPoint("existing");
-                          setSourceKind("github");
-                          setExecutionLocation("github_actions");
-                          setRepositoryName("");
-                          setLocalSelection(null);
-                          setSourceError(null);
-                          setLocalSourcesError(null);
-                          setSubmissionError(null);
-                        }}
-                      >
-                        <strong>Existing GitHub</strong>
-                        <span>
-                          Select a repository from a connected GitHub account or organization.
-                        </span>
-                      </button>
-                    </div>
-                  </fieldset>
+                  <section className="setup-section" aria-labelledby="project-name-section">
+                    <header className="setup-section-header">
+                      <span className="setup-section-number" aria-hidden="true">
+                        1
+                      </span>
+                      <div>
+                        <h2 id="project-name-section">Name of project</h2>
+                        <p>The name shown across your workspace.</p>
+                      </div>
+                    </header>
+                    {startingPoint === "new" ? (
+                      <Field label="Project name">
+                        <Input
+                          data-testid="project-name"
+                          value={name}
+                          onChange={(event) => setName(event.target.value)}
+                          placeholder="e.g. Apollo customer portal"
+                        />
+                      </Field>
+                    ) : (
+                      <p className="setup-section-note">
+                        The project will use the name of the GitHub repository you select.
+                      </p>
+                    )}
+                  </section>
 
-                  {isLocalSource ? (
-                    <div className="repository-picker local-folder-picker">
-                      {localSourcesError ? (
-                        <Alert testId="local-source-error">{localSourcesError}</Alert>
-                      ) : null}
-                      {sourceError ? <Alert>{sourceError}</Alert> : null}
-                      {localSources === null ? (
-                        <Spinner label="Loading approved local repositories…" />
-                      ) : localSources.state !== "connected" ? (
-                        <div className="connection-required">
-                          <div>
-                            <strong>Local repositories need workspace setup</strong>
-                            <p>{localSources.message}</p>
-                          </div>
-                          <Button
-                            type="button"
-                            variant="primary"
-                            className="btn-small"
-                            onClick={() => onOpenAccount("connections")}
-                          >
-                            Open Connections
-                          </Button>
-                        </div>
-                      ) : localSources.repositories.length ? (
-                        <div className="repository-list" aria-label="Approved local repositories">
-                          {localSources.repositories.map((selection) => (
-                            <button
-                              type="button"
-                              aria-pressed={
-                                localSelection?.repository.repository_id ===
-                                selection.repository.repository_id
-                              }
-                              className={
-                                localSelection?.repository.repository_id ===
-                                selection.repository.repository_id
-                                  ? "is-selected"
-                                  : ""
-                              }
-                              key={selection.repository.repository_id}
-                              onClick={() => setLocalSelection(selection)}
-                            >
-                              <span>
-                                <strong>{selection.repository.repository_display_name}</strong>
-                                <small>{selection.repository.default_branch}</small>
-                              </span>
-                              <span className="repository-meta">
-                                {selection.repository.observed_head.slice(0, 8)}
-                              </span>
-                            </button>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="connection-required">
-                          <div>
-                            <strong>No approved local repositories yet</strong>
-                            <p>Add one once in Connections, then it will be available here.</p>
-                          </div>
-                          <Button
-                            type="button"
-                            variant="primary"
-                            className="btn-small"
-                            onClick={() => onOpenAccount("connections")}
-                          >
-                            Open Connections
-                          </Button>
-                        </div>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="repository-picker">
-                      {sourceError ? <Alert>{sourceError}</Alert> : null}
-                      {!githubStatus?.configured ? (
-                        <div className="connection-required">
-                          <div>
-                            <strong>GitHub is not configured</strong>
-                            <p>
-                              Configure the Norns GitHub App in workspace Settings before selecting
-                              repositories.
-                            </p>
-                          </div>
-                          <Button
-                            type="button"
-                            variant="primary"
-                            className="btn-small"
-                            onClick={() => onOpenAccount("connections")}
-                          >
-                            Open Connections
-                          </Button>
-                        </div>
-                      ) : !githubConnected ? (
-                        <div className="connection-required">
-                          <div>
-                            <strong>
-                              {githubStatus.user_authorization.connected
-                                ? "Finish GitHub setup"
-                                : "Connect GitHub to continue"}
-                            </strong>
-                            <p>
-                              {githubStatus.user_authorization.connected
-                                ? `Your identity is authorized as ${githubStatus.user_authorization.login}. Install The Norns for the personal account or organization where it should create and select repositories.`
-                                : "Authorize your identity, then choose the personal account or organization where Norns can work."}
-                            </p>
-                          </div>
-                          <Button
-                            type="button"
-                            variant="primary"
-                            className="btn-small"
-                            disabled={githubSetupBusy}
-                            onClick={() => void continueGitHubSetup()}
-                          >
-                            {githubStatus.user_authorization.connected
-                              ? "Install The Norns on GitHub"
-                              : "Connect GitHub"}
-                          </Button>
-                        </div>
-                      ) : (
-                        <>
-                          {scenario === "existing_repo" || connectedGitHub.length > 1 ? (
-                            <Field
-                              label={
-                                scenario === "new_repo"
-                                  ? "Create repository under"
-                                  : "GitHub account or organization"
-                              }
-                            >
-                              <Select
-                                data-testid="github-connection"
-                                value={selectedConnectionId}
-                                onChange={(event) => {
-                                  setSelectedConnectionId(event.target.value);
-                                  setSelectedRepositoryId("");
-                                }}
-                              >
-                                {connectedGitHub.map((connection: GitHubConnection) => (
-                                  <option key={connection.id} value={connection.id}>
-                                    {connection.owner_login} · {connection.owner_type}
-                                  </option>
-                                ))}
-                              </Select>
-                            </Field>
-                          ) : selectedConnection ? (
-                            <p className="field-help" data-testid="automatic-github-destination">
-                              Repository destination: {selectedConnection.owner_login}
-                            </p>
-                          ) : null}
-                          {scenario === "new_repo" ? null : (
-                            <>
-                              <div className="repository-search">
-                                <Input
-                                  aria-label="Search connected repositories"
-                                  value={repositoryQuery}
-                                  onChange={(event) => setRepositoryQuery(event.target.value)}
-                                  placeholder={`Search ${selectedConnection?.owner_login ?? "repositories"} or paste a repo URL…`}
-                                />
-                                <Button
-                                  type="button"
-                                  className="btn-small"
-                                  disabled={repositoryLoading}
-                                  onClick={() => void loadRepositories()}
-                                >
-                                  Refresh
-                                </Button>
-                              </div>
-                              {repositoryLoading ? (
-                                <Spinner label="Loading repositories…" />
-                              ) : visibleRepositories.length ? (
-                                <div className="repository-list" aria-label="GitHub repositories">
-                                  {visibleRepositories.map((repository) => (
-                                    <button
-                                      type="button"
-                                      aria-pressed={selectedRepositoryId === repository.id}
-                                      disabled={repository.archived}
-                                      className={
-                                        selectedRepositoryId === repository.id ? "is-selected" : ""
-                                      }
-                                      key={repository.id}
-                                      onClick={() => setSelectedRepositoryId(repository.id)}
-                                    >
-                                      <span>
-                                        <strong>{repository.full_name}</strong>
-                                        <small>
-                                          {repository.description || "No repository description"}
-                                        </small>
-                                      </span>
-                                      <span className="repository-meta">
-                                        {repository.private ? "Private" : "Public"}
-                                        {repository.language ? ` · ${repository.language}` : ""}
-                                        {repository.archived ? " · Archived" : ""}
-                                      </span>
-                                    </button>
-                                  ))}
-                                </div>
-                              ) : (
-                                <p className="muted">
-                                  No repositories match this connection and search.
-                                </p>
-                              )}
-                            </>
-                          )}
-                        </>
-                      )}
-                    </div>
-                  )}
-
-                  {!isLocalSource && startingPoint === "new" && githubConnected ? (
-                    <fieldset className="source-picker" data-testid="execution-location-picker">
-                      <legend>Project location</legend>
-                      <div className="source-options source-options-three">
+                  <section className="setup-section" aria-labelledby="github-section">
+                    <header className="setup-section-header">
+                      <span className="setup-section-number" aria-hidden="true">
+                        2
+                      </span>
+                      <div>
+                        <h2 id="github-section">GitHub</h2>
+                        <p>Choose the repository and where it belongs.</p>
+                      </div>
+                    </header>
+                    <fieldset className="source-picker setup-choice-group">
+                      <legend>Repository</legend>
+                      <div className="source-options">
                         <button
                           type="button"
-                          className={executionLocation === "this_computer" ? "is-selected" : ""}
-                          disabled={!computerCreationAvailable}
+                          className={
+                            sourceKind === "github" && startingPoint === "new" ? "is-selected" : ""
+                          }
                           onClick={() => {
-                            setExecutionLocation("this_computer");
+                            setStartingPoint("new");
+                            setSourceKind("github");
+                            setSelectedRepositoryId("");
+                            setLocalSelection(null);
                             setSourceError(null);
-                            setComputersError(null);
+                            setLocalSourcesError(null);
                             setSubmissionError(null);
                           }}
                         >
-                          <strong>This computer</strong>
+                          <strong>New GitHub</strong>
                           <span>
-                            Choose a parent folder here and clone the new GitHub repository.
+                            Create a new repository in a connected GitHub account or organization.
                           </span>
                         </button>
                         <button
                           type="button"
-                          className={executionLocation === "remote_computer" ? "is-selected" : ""}
-                          disabled={!computerCreationAvailable}
+                          className={
+                            sourceKind === "github" && startingPoint === "existing"
+                              ? "is-selected"
+                              : ""
+                          }
                           onClick={() => {
-                            setExecutionLocation("remote_computer");
-                            setSourceError(null);
-                            setComputersError(null);
-                            setSubmissionError(null);
-                          }}
-                        >
-                          <strong>Remote computer</strong>
-                          <span>
-                            Ask an online enrolled computer to choose a folder and clone the
-                            repository there.
-                          </span>
-                        </button>
-                        <button
-                          type="button"
-                          className={executionLocation === "github_actions" ? "is-selected" : ""}
-                          onClick={() => {
+                            setStartingPoint("existing");
+                            setSourceKind("github");
                             setExecutionLocation("github_actions");
+                            setRepositoryName("");
+                            setLocalSelection(null);
                             setSourceError(null);
-                            setComputersError(null);
+                            setLocalSourcesError(null);
                             setSubmissionError(null);
                           }}
                         >
-                          <strong>GitHub Actions</strong>
-                          <span>Run approved work in an ephemeral GitHub-hosted runner.</span>
+                          <strong>Existing GitHub</strong>
+                          <span>
+                            Select a repository from a connected GitHub account or organization.
+                          </span>
                         </button>
                       </div>
-                      {computerExecution ? (
-                        computersError ? (
-                          <Alert testId="computer-source-error">{computersError}</Alert>
-                        ) : computers === null ? (
-                          <Spinner label="Checking your computers…" />
-                        ) : readyComputers.length === 0 ? (
+                    </fieldset>
+
+                    {isLocalSource ? (
+                      <div className="repository-picker local-folder-picker">
+                        {localSourcesError ? (
+                          <Alert testId="local-source-error">{localSourcesError}</Alert>
+                        ) : null}
+                        {sourceError ? <Alert>{sourceError}</Alert> : null}
+                        {localSources === null ? (
+                          <Spinner label="Loading approved local repositories…" />
+                        ) : localSources.state !== "connected" ? (
                           <div className="connection-required">
                             <div>
-                              <strong>Online Local Agent required</strong>
+                              <strong>Local repositories need workspace setup</strong>
+                              <p>{localSources.message}</p>
+                            </div>
+                            <Button
+                              type="button"
+                              variant="primary"
+                              className="btn-small"
+                              onClick={() => onOpenAccount("connections")}
+                            >
+                              Open Connections
+                            </Button>
+                          </div>
+                        ) : localSources.repositories.length ? (
+                          <div className="repository-list" aria-label="Approved local repositories">
+                            {localSources.repositories.map((selection) => (
+                              <button
+                                type="button"
+                                aria-pressed={
+                                  localSelection?.repository.repository_id ===
+                                  selection.repository.repository_id
+                                }
+                                className={
+                                  localSelection?.repository.repository_id ===
+                                  selection.repository.repository_id
+                                    ? "is-selected"
+                                    : ""
+                                }
+                                key={selection.repository.repository_id}
+                                onClick={() => setLocalSelection(selection)}
+                              >
+                                <span>
+                                  <strong>{selection.repository.repository_display_name}</strong>
+                                  <small>{selection.repository.default_branch}</small>
+                                </span>
+                                <span className="repository-meta">
+                                  {selection.repository.observed_head.slice(0, 8)}
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="connection-required">
+                            <div>
+                              <strong>No approved local repositories yet</strong>
+                              <p>Add one once in Connections, then it will be available here.</p>
+                            </div>
+                            <Button
+                              type="button"
+                              variant="primary"
+                              className="btn-small"
+                              onClick={() => onOpenAccount("connections")}
+                            >
+                              Open Connections
+                            </Button>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="repository-picker">
+                        {sourceError ? <Alert>{sourceError}</Alert> : null}
+                        {!githubStatus?.configured ? (
+                          <div className="connection-required">
+                            <div>
+                              <strong>GitHub is not configured</strong>
                               <p>
-                                Open or update the Local Agent on a computer connected to your
-                                account, then leave it running while you create the project.
+                                Configure the Norns GitHub App in workspace Settings before
+                                selecting repositories.
                               </p>
                             </div>
                             <Button
                               type="button"
                               variant="primary"
                               className="btn-small"
-                              onClick={onOpenAdmin}
+                              onClick={() => onOpenAccount("connections")}
                             >
-                              Open Computers
+                              Open Connections
+                            </Button>
+                          </div>
+                        ) : !githubConnected ? (
+                          <div className="connection-required">
+                            <div>
+                              <strong>
+                                {githubStatus.user_authorization.connected
+                                  ? "Finish GitHub setup"
+                                  : "Connect GitHub to continue"}
+                              </strong>
+                              <p>
+                                {githubStatus.user_authorization.connected
+                                  ? `Your identity is authorized as ${githubStatus.user_authorization.login}. Install The Norns for the personal account or organization where it should create and select repositories.`
+                                  : "Authorize your identity, then choose the personal account or organization where Norns can work."}
+                              </p>
+                            </div>
+                            <Button
+                              type="button"
+                              variant="primary"
+                              className="btn-small"
+                              disabled={githubSetupBusy}
+                              onClick={() => void continueGitHubSetup()}
+                            >
+                              {githubStatus.user_authorization.connected
+                                ? "Install The Norns on GitHub"
+                                : "Connect GitHub"}
                             </Button>
                           </div>
                         ) : (
-                          <div className="form-stack computer-project-picker">
-                            <Field
-                              label={
-                                executionLocation === "this_computer"
-                                  ? "Computer you are using"
-                                  : "Remote computer"
-                              }
-                            >
-                              <Select
-                                data-testid="project-computer"
-                                value={selectedComputerId}
-                                onChange={(event) => setSelectedComputerId(event.target.value)}
-                              >
-                                {readyComputers.map((computer) => (
-                                  <option key={computer.device_id} value={computer.device_id}>
-                                    {computer.name}
-                                    {computer.location_label ? ` · ${computer.location_label}` : ""}
-                                  </option>
-                                ))}
-                              </Select>
-                            </Field>
-                            <p className="field-help">
-                              {executionLocation === "this_computer"
-                                ? "Choose this Mac from the list. Its system folder chooser opens after GitHub creates the repository."
-                                : "The folder chooser opens on the selected computer after GitHub creates the repository."}{" "}
-                              Folder paths never leave that computer.
-                            </p>
-                          </div>
-                        )
-                      ) : null}
-                    </fieldset>
-                  ) : null}
-
-                  {startingPoint === "new" ? (
-                    <>
-                      {name.trim() ? (
-                        <div className="policy" data-testid="derived-project-summary">
-                          <strong>{derivedIdentity.projectName}</strong>
-                          <br />
-                          {isLocalSource
-                            ? localSelection
-                              ? `New Norns project in ${localSelection.repository.repository_display_name}`
-                              : "Choose an approved local Git repository"
-                            : `${selectedConnection?.owner_login ?? "GitHub"}/${derivedIdentity.repositorySlug} · ${
-                                repositoryPrivate ? "Private" : "Public"
-                              }`}
-                        </div>
-                      ) : null}
-                      <details>
-                        <summary>Options</summary>
-                        <div className="form-stack">
-                          {!isLocalSource ? (
-                            <div className="project-create-grid">
-                              <Field label="Repository slug override">
-                                <Input
-                                  data-testid="github-new-repository-name"
-                                  value={repositoryName}
-                                  onChange={(event) => setRepositoryName(event.target.value)}
-                                  placeholder={deriveProjectIdentity("", name).repositorySlug}
-                                />
-                              </Field>
-                            </div>
-                          ) : null}
-                          {!isLocalSource ? (
-                            <Field label="Visibility">
-                              <Select
-                                data-testid="github-repository-visibility"
-                                value={repositoryPrivate ? "private" : "public"}
-                                onChange={(event) =>
-                                  setRepositoryPrivate(event.target.value === "private")
+                          <>
+                            {scenario === "existing_repo" || connectedGitHub.length > 1 ? (
+                              <Field
+                                label={
+                                  scenario === "new_repo"
+                                    ? "Create repository under"
+                                    : "GitHub account or organization"
                                 }
                               >
-                                <option value="private">Private (default)</option>
-                                <option value="public">Public</option>
-                              </Select>
-                            </Field>
-                          ) : null}
-                          <div className="two-col-fields">
-                            <Field label="Coordinator model">
-                              <Select
-                                data-testid="pm-model"
-                                value={pmModel}
-                                onChange={(event) => setPmModel(event.target.value as PmModelT)}
-                              >
-                                <optgroup label="Anthropic">
-                                  {PM_MODEL_OPTIONS.anthropic.map((model) => (
-                                    <option key={model.id} value={model.id}>
-                                      {model.label}
-                                    </option>
-                                  ))}
-                                </optgroup>
-                                <optgroup label="OpenAI">
-                                  {PM_MODEL_OPTIONS.openai.map((model) => (
-                                    <option key={model.id} value={model.id}>
-                                      {model.label}
-                                    </option>
-                                  ))}
-                                </optgroup>
-                              </Select>
-                            </Field>
-                            {pmProvider === "openai" ? (
-                              <Field label="Coordinator Codex effort">
                                 <Select
-                                  data-testid="pm-effort"
-                                  value={pmEffort}
-                                  onChange={(event) =>
-                                    setPmEffort(event.target.value as CodexReasoningEffortT)
-                                  }
+                                  data-testid="github-connection"
+                                  value={selectedConnectionId}
+                                  onChange={(event) => {
+                                    setSelectedConnectionId(event.target.value);
+                                    setSelectedRepositoryId("");
+                                  }}
                                 >
-                                  <option value="minimal">Minimal</option>
-                                  <option value="low">Low</option>
-                                  <option value="medium">Medium</option>
-                                  <option value="high">High</option>
-                                  <option value="xhigh">Extra high</option>
+                                  {connectedGitHub.map((connection: GitHubConnection) => (
+                                    <option key={connection.id} value={connection.id}>
+                                      {connection.owner_login} · {connection.owner_type}
+                                    </option>
+                                  ))}
                                 </Select>
                               </Field>
+                            ) : selectedConnection ? (
+                              <p className="field-help" data-testid="automatic-github-destination">
+                                Repository destination: {selectedConnection.owner_login}
+                              </p>
                             ) : null}
-                            <Field label="Reviewer model">
-                              <Select
-                                data-testid="reviewer-model"
-                                value={reviewerSelection}
-                                onChange={(event) => setReviewerSelection(event.target.value)}
-                              >
-                                <option value="auto">
-                                  Automatic (cross-provider) · {reviewerPreviewLabel}
-                                </option>
-                                <optgroup label="Anthropic">
-                                  {PM_MODEL_OPTIONS.anthropic.map((model) => (
-                                    <option key={model.id} value={`anthropic:${model.id}`}>
-                                      {model.label}
-                                    </option>
-                                  ))}
-                                </optgroup>
-                                <optgroup label="OpenAI">
-                                  {PM_MODEL_OPTIONS.openai.map((model) => (
-                                    <option key={model.id} value={`openai:${model.id}`}>
-                                      {model.label}
-                                    </option>
-                                  ))}
-                                </optgroup>
-                              </Select>
-                            </Field>
-                          </div>
-                          <Field label="Reviews">
-                            {/* DESIGN R2: zero rounds is allowed — it means
-                                review is off. */}
-                            <div className="rounds-stepper" data-testid="rounds-stepper">
+                            {scenario === "new_repo" ? null : (
+                              <>
+                                <div className="repository-search">
+                                  <Input
+                                    aria-label="Search connected repositories"
+                                    value={repositoryQuery}
+                                    onChange={(event) => setRepositoryQuery(event.target.value)}
+                                    placeholder={`Search ${selectedConnection?.owner_login ?? "repositories"} or paste a repo URL…`}
+                                  />
+                                  <Button
+                                    type="button"
+                                    className="btn-small"
+                                    disabled={repositoryLoading}
+                                    onClick={() => void loadRepositories()}
+                                  >
+                                    Refresh
+                                  </Button>
+                                </div>
+                                {repositoryLoading ? (
+                                  <Spinner label="Loading repositories…" />
+                                ) : visibleRepositories.length ? (
+                                  <div className="repository-list" aria-label="GitHub repositories">
+                                    {visibleRepositories.map((repository) => (
+                                      <button
+                                        type="button"
+                                        aria-pressed={selectedRepositoryId === repository.id}
+                                        disabled={repository.archived}
+                                        className={
+                                          selectedRepositoryId === repository.id
+                                            ? "is-selected"
+                                            : ""
+                                        }
+                                        key={repository.id}
+                                        onClick={() => setSelectedRepositoryId(repository.id)}
+                                      >
+                                        <span>
+                                          <strong>{repository.full_name}</strong>
+                                          <small>
+                                            {repository.description || "No repository description"}
+                                          </small>
+                                        </span>
+                                        <span className="repository-meta">
+                                          {repository.private ? "Private" : "Public"}
+                                          {repository.language ? ` · ${repository.language}` : ""}
+                                          {repository.archived ? " · Archived" : ""}
+                                        </span>
+                                      </button>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <p className="muted">
+                                    No repositories match this connection and search.
+                                  </p>
+                                )}
+                              </>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )}
+
+                    {startingPoint === "new" && !isLocalSource ? (
+                      <div className="two-col-fields github-repository-fields">
+                        <Field label="Repository name">
+                          <Input
+                            data-testid="github-new-repository-name"
+                            value={repositoryName}
+                            onChange={(event) => setRepositoryName(event.target.value)}
+                            placeholder={deriveProjectIdentity("", name).repositorySlug}
+                          />
+                        </Field>
+                        <Field label="Visibility">
+                          <Select
+                            data-testid="github-repository-visibility"
+                            value={repositoryPrivate ? "private" : "public"}
+                            onChange={(event) =>
+                              setRepositoryPrivate(event.target.value === "private")
+                            }
+                          >
+                            <option value="private">Private (default)</option>
+                            <option value="public">Public</option>
+                          </Select>
+                        </Field>
+                      </div>
+                    ) : null}
+                    {startingPoint === "new" && name.trim() ? (
+                      <div
+                        className="github-repository-summary"
+                        data-testid="derived-project-summary"
+                      >
+                        <span className="github-repository-summary-label">Repository</span>
+                        <strong>{derivedIdentity.projectName}</strong>
+                        <span>
+                          {isLocalSource
+                            ? (localSelection?.repository.repository_display_name ??
+                              "Choose a repository")
+                            : `${selectedConnection?.owner_login ?? "GitHub"}/${derivedIdentity.repositorySlug}`}{" "}
+                          · {repositoryPrivate ? "Private" : "Public"}
+                        </span>
+                      </div>
+                    ) : null}
+                  </section>
+
+                  <section className="setup-section" aria-labelledby="project-section">
+                    <header className="setup-section-header">
+                      <span className="setup-section-number" aria-hidden="true">
+                        3
+                      </span>
+                      <div>
+                        <h2 id="project-section">Project</h2>
+                        <p>Choose where the project runs and where its files live.</p>
+                      </div>
+                    </header>
+                    {!isLocalSource && startingPoint === "new" && githubConnected ? (
+                      <fieldset
+                        className="source-picker setup-choice-group"
+                        data-testid="execution-location-picker"
+                      >
+                        <legend>Project location</legend>
+                        <div className="source-options source-options-three project-location-options">
+                          <button
+                            type="button"
+                            className={executionLocation === "this_computer" ? "is-selected" : ""}
+                            disabled={!computerCreationAvailable}
+                            onClick={() => {
+                              setExecutionLocation("this_computer");
+                              setCloneDestination(null);
+                              setFolderPickerError(null);
+                              setSourceError(null);
+                              setComputersError(null);
+                              setSubmissionError(null);
+                            }}
+                          >
+                            <strong>This computer</strong>
+                            <span>Create a local working folder here.</span>
+                          </button>
+                          <button
+                            type="button"
+                            className={executionLocation === "remote_computer" ? "is-selected" : ""}
+                            disabled={!computerCreationAvailable}
+                            onClick={() => {
+                              setExecutionLocation("remote_computer");
+                              setCloneDestination(null);
+                              setFolderPickerError(null);
+                              setSourceError(null);
+                              setComputersError(null);
+                              setSubmissionError(null);
+                            }}
+                          >
+                            <strong>Remote computer</strong>
+                            <span>Create a folder on an online computer.</span>
+                          </button>
+                          <button
+                            type="button"
+                            className={executionLocation === "github_actions" ? "is-selected" : ""}
+                            onClick={() => {
+                              setExecutionLocation("github_actions");
+                              setCloneDestination(null);
+                              setFolderPickerError(null);
+                              setSourceError(null);
+                              setComputersError(null);
+                              setSubmissionError(null);
+                            }}
+                          >
+                            <strong>GitHub Actions</strong>
+                            <span>Use an ephemeral GitHub-hosted runner.</span>
+                          </button>
+                        </div>
+                        {computerExecution ? (
+                          computersError ? (
+                            <Alert testId="computer-source-error">{computersError}</Alert>
+                          ) : computers === null ? (
+                            <Spinner label="Checking your computers…" />
+                          ) : readyComputers.length === 0 ? (
+                            <div className="connection-required">
+                              <div>
+                                <strong>Online Local Agent required</strong>
+                                <p>
+                                  Open or update the Local Agent on a connected computer, then try
+                                  again.
+                                </p>
+                              </div>
                               <Button
                                 type="button"
+                                variant="primary"
                                 className="btn-small"
-                                disabled={roundsCount <= 0}
-                                onClick={() => setRoundsCount((count) => Math.max(0, count - 1))}
-                                aria-label="Fewer rounds"
+                                onClick={onOpenAdmin}
                               >
-                                −
+                                Open Computers
                               </Button>
-                              <span className="rounds-value mono">{roundsCount}</span>
-                              <Button
-                                type="button"
-                                className="btn-small"
-                                disabled={roundsCount >= 5}
-                                onClick={() => setRoundsCount((count) => Math.min(5, count + 1))}
-                                aria-label="More rounds"
-                              >
-                                +
-                              </Button>
-                            </div>
-                          </Field>
-                          {roundsCount > 0 ? (
-                            <div className="two-col-fields">
-                              <Field label="Pause mode">
-                                <Select
-                                  data-testid="qc-mode"
-                                  value={qcMode}
-                                  onChange={(event) => setQcMode(event.target.value as QcModeT)}
-                                >
-                                  {QC_MODE_OPTIONS.map((option) => (
-                                    <option key={option.value} value={option.value}>
-                                      {option.label}
-                                    </option>
-                                  ))}
-                                </Select>
-                              </Field>
-                              <label className="debate-toggle">
-                                <input
-                                  type="checkbox"
-                                  data-testid="allow-unadjudicated-rebuttals"
-                                  checked={allowUnadjudicatedRebuttals}
-                                  onChange={(event) =>
-                                    setAllowUnadjudicatedRebuttals(event.target.checked)
-                                  }
-                                />
-                                Allow rebuttals
-                              </label>
                             </div>
                           ) : (
-                            <p className="field-help" data-testid="review-off-note">
-                              Reviews are off.
-                            </p>
-                          )}
-                          <div className="two-col-fields">
-                            <Field label="Update timing">
-                              <Select
-                                data-testid="project-update-timing"
-                                value={projectUpdatePreferences.intervalSeconds}
-                                onChange={(event) =>
-                                  setProjectUpdatePreferences((current) => ({
-                                    ...current,
-                                    intervalSeconds: Number(
-                                      event.target.value,
-                                    ) as UpdateIntervalSeconds,
-                                  }))
+                            <div className="computer-project-picker">
+                              <input
+                                type="hidden"
+                                data-testid="project-computer"
+                                value={selectedComputerId}
+                              />
+                              <div
+                                className="computer-choice-list"
+                                role="radiogroup"
+                                aria-label={
+                                  executionLocation === "this_computer"
+                                    ? "Computer you are using"
+                                    : "Remote computer"
                                 }
                               >
-                                {UPDATE_INTERVAL_OPTIONS.map((option) => (
-                                  <option key={option.value} value={option.value}>
-                                    {option.label}
-                                  </option>
+                                {readyComputers.map((computer) => (
+                                  <label
+                                    className={
+                                      selectedComputerId === computer.device_id ? "is-selected" : ""
+                                    }
+                                    key={computer.device_id}
+                                  >
+                                    <input
+                                      type="radio"
+                                      name="project-computer"
+                                      value={computer.device_id}
+                                      checked={selectedComputerId === computer.device_id}
+                                      onChange={() => {
+                                        setSelectedComputerId(computer.device_id);
+                                        setCloneDestination(null);
+                                        setFolderPickerError(null);
+                                      }}
+                                    />
+                                    <span className="computer-choice-status" aria-hidden="true" />
+                                    <span>
+                                      <strong>{computer.name}</strong>
+                                      <small>{computer.location_label || "Online"}</small>
+                                    </span>
+                                  </label>
                                 ))}
-                              </Select>
-                            </Field>
-                            <Field label="Update content">
-                              <Select
-                                data-testid="project-update-content"
-                                value={projectUpdatePreferences.detailLevel}
-                                onChange={(event) =>
-                                  setProjectUpdatePreferences((current) => ({
-                                    ...current,
-                                    detailLevel: event.target.value as UpdateDetailLevel,
-                                  }))
-                                }
-                              >
-                                {UPDATE_DETAIL_OPTIONS.map((option) => (
-                                  <option key={option.value} value={option.value}>
-                                    {option.label}
-                                  </option>
-                                ))}
-                              </Select>
-                            </Field>
-                          </div>
+                              </div>
+                              <div className="folder-destination">
+                                <div>
+                                  <span className="folder-destination-label">Project folder</span>
+                                  <strong>
+                                    {cloneDestination?.computer_id === selectedComputerId
+                                      ? cloneDestination.label
+                                      : "No folder selected"}
+                                  </strong>
+                                  <small>The folder path stays on the selected computer.</small>
+                                </div>
+                                <Button
+                                  type="button"
+                                  className="btn-small"
+                                  disabled={folderPickerBusy || !selectedComputerId}
+                                  onClick={() => void chooseCloneDestination()}
+                                >
+                                  {folderPickerBusy
+                                    ? "Waiting for folder…"
+                                    : cloneDestination?.computer_id === selectedComputerId
+                                      ? "Change folder"
+                                      : "Choose folder"}
+                                </Button>
+                              </div>
+                              {folderPickerError ? (
+                                <Alert testId="folder-picker-error">{folderPickerError}</Alert>
+                              ) : null}
+                            </div>
+                          )
+                        ) : null}
+                      </fieldset>
+                    ) : startingPoint === "existing" ? (
+                      <Field label="What should The Norns do first? (optional)">
+                        <TextArea
+                          data-testid="project-description"
+                          value={description}
+                          onChange={(event) => setDescription(event.target.value)}
+                          placeholder="Leave blank to adopt and understand the repository without starting a plan."
+                        />
+                      </Field>
+                    ) : null}
+                  </section>
+
+                  {startingPoint === "new" ? (
+                    <section className="setup-section" aria-labelledby="qc-section">
+                      <header className="setup-section-header">
+                        <span className="setup-section-number" aria-hidden="true">
+                          4
+                        </span>
+                        <div>
+                          <h2 id="qc-section">QC options</h2>
+                          <p>Set the planning models and review cadence.</p>
                         </div>
-                      </details>
-                    </>
-                  ) : (
-                    <Field label="What should The Norns do first? (optional)">
-                      <TextArea
-                        data-testid="project-description"
-                        value={description}
-                        onChange={(event) => setDescription(event.target.value)}
-                        placeholder="Leave blank to adopt and understand the repository without starting a plan."
-                      />
-                      <span className="field-help">
-                        If provided, planning starts automatically after repository analysis.
-                      </span>
-                    </Field>
-                  )}
+                      </header>
+                      <div className="two-col-fields">
+                        <Field label="Coordinator model">
+                          <Select
+                            data-testid="pm-model"
+                            value={pmModel}
+                            onChange={(event) => setPmModel(event.target.value as PmModelT)}
+                          >
+                            <optgroup label="Anthropic">
+                              {PM_MODEL_OPTIONS.anthropic.map((model) => (
+                                <option key={model.id} value={model.id}>
+                                  {model.label}
+                                </option>
+                              ))}
+                            </optgroup>
+                            <optgroup label="OpenAI">
+                              {PM_MODEL_OPTIONS.openai.map((model) => (
+                                <option key={model.id} value={model.id}>
+                                  {model.label}
+                                </option>
+                              ))}
+                            </optgroup>
+                          </Select>
+                        </Field>
+                        <Field label="Reviewer model">
+                          <Select
+                            data-testid="reviewer-model"
+                            value={reviewerSelection}
+                            onChange={(event) => setReviewerSelection(event.target.value)}
+                          >
+                            <option value="auto">
+                              Automatic (cross-provider) · {reviewerPreviewLabel}
+                            </option>
+                            <optgroup label="Anthropic">
+                              {PM_MODEL_OPTIONS.anthropic.map((model) => (
+                                <option key={model.id} value={`anthropic:${model.id}`}>
+                                  {model.label}
+                                </option>
+                              ))}
+                            </optgroup>
+                            <optgroup label="OpenAI">
+                              {PM_MODEL_OPTIONS.openai.map((model) => (
+                                <option key={model.id} value={`openai:${model.id}`}>
+                                  {model.label}
+                                </option>
+                              ))}
+                            </optgroup>
+                          </Select>
+                        </Field>
+                        {pmProvider === "openai" ? (
+                          <Field label="Coordinator Codex effort">
+                            <Select
+                              data-testid="pm-effort"
+                              value={pmEffort}
+                              onChange={(event) =>
+                                setPmEffort(event.target.value as CodexReasoningEffortT)
+                              }
+                            >
+                              <option value="minimal">Minimal</option>
+                              <option value="low">Low</option>
+                              <option value="medium">Medium</option>
+                              <option value="high">High</option>
+                              <option value="xhigh">Extra high</option>
+                            </Select>
+                          </Field>
+                        ) : null}
+                        <Field label="Reviews">
+                          <div className="rounds-stepper" data-testid="rounds-stepper">
+                            <Button
+                              type="button"
+                              className="btn-small"
+                              disabled={roundsCount <= 0}
+                              onClick={() => setRoundsCount((count) => Math.max(0, count - 1))}
+                              aria-label="Fewer rounds"
+                            >
+                              −
+                            </Button>
+                            <span className="rounds-value mono">{roundsCount}</span>
+                            <Button
+                              type="button"
+                              className="btn-small"
+                              disabled={roundsCount >= 5}
+                              onClick={() => setRoundsCount((count) => Math.min(5, count + 1))}
+                              aria-label="More rounds"
+                            >
+                              +
+                            </Button>
+                          </div>
+                        </Field>
+                      </div>
+                      {roundsCount > 0 ? (
+                        <div className="qc-review-mode">
+                          <Field label="Pause mode">
+                            <Select
+                              data-testid="qc-mode"
+                              value={qcMode}
+                              onChange={(event) => setQcMode(event.target.value as QcModeT)}
+                            >
+                              {QC_MODE_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </Select>
+                          </Field>
+                          <label className="qc-rebuttals-toggle">
+                            <input
+                              type="checkbox"
+                              data-testid="allow-unadjudicated-rebuttals"
+                              checked={allowUnadjudicatedRebuttals}
+                              onChange={(event) =>
+                                setAllowUnadjudicatedRebuttals(event.target.checked)
+                              }
+                            />
+                            <span>
+                              <strong>Allow rebuttals</strong>
+                            </span>
+                          </label>
+                        </div>
+                      ) : (
+                        <p className="setup-section-note" data-testid="review-off-note">
+                          Reviews are off.
+                        </p>
+                      )}
+                      <div className="two-col-fields qc-update-preferences">
+                        <Field label="Update timing">
+                          <Select
+                            data-testid="project-update-timing"
+                            value={projectUpdatePreferences.intervalSeconds}
+                            onChange={(event) =>
+                              setProjectUpdatePreferences((current) => ({
+                                ...current,
+                                intervalSeconds: Number(
+                                  event.target.value,
+                                ) as UpdateIntervalSeconds,
+                              }))
+                            }
+                          >
+                            {UPDATE_INTERVAL_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </Select>
+                        </Field>
+                        <Field label="Update content">
+                          <Select
+                            data-testid="project-update-content"
+                            value={projectUpdatePreferences.detailLevel}
+                            onChange={(event) =>
+                              setProjectUpdatePreferences((current) => ({
+                                ...current,
+                                detailLevel: event.target.value as UpdateDetailLevel,
+                              }))
+                            }
+                          >
+                            {UPDATE_DETAIL_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </Select>
+                        </Field>
+                      </div>
+                    </section>
+                  ) : null}
                   {submissionError ? (
                     <Alert testId="onboarding-submit-error">{submissionError}</Alert>
                   ) : null}
                   <p className="setup-confirmation" data-testid="setup-confirmation">
                     {confirmationText}
                   </p>
-                  <Button variant="primary" disabled={!canCreate} onClick={() => void create()}>
-                    {creating
-                      ? startingPoint === "new" &&
-                        sourceKind === "github" &&
-                        executionLocation !== "github_actions"
-                        ? "Creating GitHub repository and local folder…"
-                        : scenario === "new_repo"
-                          ? "Creating repository and project…"
-                          : "Creating…"
-                      : startingPoint === "new"
-                        ? "Create project →"
-                        : "Adopt project →"}
-                  </Button>
+                  {creationStatus ? (
+                    <output
+                      className="project-creation-status"
+                      data-testid="project-creation-status"
+                      aria-live="polite"
+                    >
+                      <span className="spinner" aria-hidden="true" />
+                      <div>
+                        <strong>Setting up your project</strong>
+                        <span>{creationStatus}</span>
+                      </div>
+                    </output>
+                  ) : null}
+                  <div className="project-create-actions">
+                    <Button variant="primary" disabled={!canCreate} onClick={() => void create()}>
+                      {creating
+                        ? "Creating project…"
+                        : startingPoint === "new"
+                          ? "Create project →"
+                          : "Adopt project →"}
+                    </Button>
+                    <span>Setup continues here until the project is ready to open.</span>
+                  </div>
                 </div>
               )}
             </section>
