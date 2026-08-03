@@ -483,14 +483,14 @@ function QcStopActions({
   onStopAll: QcWorkspaceProps["onStopAll"];
 }): React.ReactElement {
   return (
-    <div className="qc-new-stop-actions" aria-label="Stop plan work">
+    <>
       <Button variant="danger" disabled={busy} onClick={() => void onStopAll(review)}>
-        Stop QC and all agent work
+        Stop QC and Agents
       </Button>
       <Button disabled={busy} onClick={() => void onCancel(review, "Stopped by the user.")}>
-        Stop QC only
+        Stop QC
       </Button>
-    </div>
+    </>
   );
 }
 
@@ -558,7 +558,8 @@ function FindingTriage({
         </button>
       </div>
 
-      <div className="qc-new-triage-actions">
+      <fieldset className="qc-new-triage-actions" aria-label="Quality control actions">
+        <QcStopActions review={review} busy={busy} onCancel={onCancel} onStopAll={onStopAll} />
         {mode === "none" ? (
           <Button variant="danger" disabled={busy} onClick={() => void onRejectAll()}>
             {busy ? "Recording…" : "Keep current plan"}
@@ -579,8 +580,7 @@ function FindingTriage({
             {busy ? "Sending…" : "Send to PM"}
           </Button>
         )}
-        <QcStopActions review={review} busy={busy} onCancel={onCancel} onStopAll={onStopAll} />
-      </div>
+      </fieldset>
 
       {mode === "individual" && selectedCount === 0 ? (
         <p className="qc-new-selection-note">Select at least one finding, or choose Accept none.</p>

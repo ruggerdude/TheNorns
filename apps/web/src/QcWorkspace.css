@@ -399,13 +399,14 @@
   display: flex;
   min-height: 3.25rem;
   align-items: center;
+  justify-content: center;
   padding: 0.7rem 0.9rem;
   border: 1px solid var(--line);
   border-radius: 10px;
   color: var(--ink);
   background: var(--surface-2);
   font: inherit;
-  text-align: left;
+  text-align: center;
   cursor: pointer;
 }
 
@@ -590,18 +591,22 @@
 }
 
 .qc-new-triage-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: center;
-  justify-content: space-between;
   gap: 0.75rem;
-  padding-bottom: 0.9rem;
+  min-width: 0;
+  margin: 0;
+  padding: 0 0 0.9rem;
+  border: 0;
   border-bottom: 1px solid var(--line);
 }
 
-.qc-new-stop-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 0.55rem;
+.qc-new-triage-actions > .btn {
+  width: 100%;
+  min-height: 3.25rem;
+  justify-content: center;
+  text-align: center;
 }
 
 .qc-new-selection-note {
@@ -833,10 +838,8 @@
     justify-self: stretch;
   }
 
-  .qc-new-triage-actions,
-  .qc-new-stop-actions {
-    align-items: stretch;
-    flex-direction: column;
+  .qc-new-triage-actions {
+    grid-template-columns: 1fr;
   }
 }
 

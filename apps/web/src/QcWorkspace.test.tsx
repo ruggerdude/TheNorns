@@ -134,7 +134,11 @@ describe("QcWorkspace", () => {
     expect(screen.getByRole("button", { name: "Accept all 2" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Choose individually" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Accept none" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Send to PM" })).toBeVisible();
+    expect(
+      within(screen.getByRole("group", { name: "Quality control actions" }))
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual(["Stop QC and Agents", "Stop QC", "Send to PM"]);
     expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
     expect(screen.getByText("Choose and document a deployment target.")).toBeVisible();
     expect(screen.queryByText("YOUR DECISION")).not.toBeInTheDocument();
