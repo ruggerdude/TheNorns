@@ -2090,9 +2090,13 @@ describe("conversation workspace", () => {
     expect(proposalBodies).toHaveLength(1);
     expect(proposalBodies[0]?.idempotency_key).toEqual(expect.any(String));
 
-    expect(screen.getByRole("button", { name: "Confirm action: Send to QC" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Confirm action: Approve plan and send to QC" }),
+    ).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Send to QC" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Confirm action: Reject plan" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Confirm action: Reject and return to PM" }),
+    ).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Confirm action: Request changes" }),
     ).not.toBeInTheDocument();
@@ -2330,6 +2334,16 @@ describe("conversation workspace", () => {
               ],
             });
           }
+          if (url.endsWith(`/api/v2/projects/${projectId}/planning-reviewer`)) {
+            return Response.json({
+              provider: "openai",
+              model: "gpt-5.6-terra",
+              mode: "explicit",
+              qc_mode: "automatic",
+              allow_unadjudicated_rebuttals: false,
+              default_max_rounds: 2,
+            });
+          }
           if (
             url.endsWith(`/conversations/${conversationId}`) &&
             (!init?.method || init.method === "GET")
@@ -2413,19 +2427,18 @@ describe("conversation workspace", () => {
         expect(screen.queryByText("UI preview", { exact: true })).not.toBeInTheDocument();
         await user.click(screen.getByRole("button", { name: "Use conversation as plan" }));
         const handoffDialog = await screen.findByRole("dialog", {
-          name: "Prepare the plan handoff",
+          name: "Confirm QC Settings",
         });
         expect(handoffDialog.closest(".plan-handoff-backdrop")?.parentElement).toBe(document.body);
+        const savedQcAgent = await screen.findByRole("combobox", { name: "QC agent" });
+        await waitFor(() => expect(savedQcAgent).toHaveValue("gpt-5.6-terra"));
+        expect(screen.getByRole("combobox", { name: "QC rounds" })).toHaveValue("2");
         if (skipsQc) {
           await user.click(await screen.findByRole("radio", { name: /Skip QC/ }));
           expect(screen.queryByRole("combobox", { name: "QC agent" })).not.toBeInTheDocument();
-          await user.click(screen.getByRole("button", { name: "Create plan for review" }));
+          await user.click(screen.getByRole("button", { name: "Build plan for review" }));
         } else {
-          const qcAgent = await screen.findByRole("combobox", { name: "QC agent" });
-          expect(qcAgent).toHaveValue("gpt-5.6-sol");
-          await user.selectOptions(qcAgent, ["gpt-5.6-terra"]);
-          await user.selectOptions(screen.getByRole("combobox", { name: "QC rounds" }), ["2"]);
-          await user.click(screen.getByRole("button", { name: "Create plan for review" }));
+          await user.click(screen.getByRole("button", { name: "Build plan for review" }));
         }
       }
 
@@ -2454,10 +2467,16 @@ describe("conversation workspace", () => {
         await waitFor(() => expect(saved).toBe(true));
         expect(handedOff).toBe(false);
         expect(
-          await screen.findByRole("button", { name: "Confirm action: Send to QC" }),
+          await screen.findByRole("button", {
+            name: "Confirm action: Approve plan and send to QC",
+          }),
         ).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "Plan with PM" })).toBeInTheDocument();
-        await user.click(screen.getByRole("button", { name: "Confirm action: Send to QC" }));
+        await user.click(
+          screen.getByRole("button", {
+            name: "Confirm action: Approve plan and send to QC",
+          }),
+        );
         await waitFor(() => expect(handedOff).toBe(true));
         expect(await screen.findByTestId("qc-new-workspace")).toBeInTheDocument();
         expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
@@ -3492,7 +3511,7 @@ describe("conversation workspace", () => {
     );
 
     const confirm = await screen.findByRole("button", {
-      name: "Confirm action: Send to QC",
+      name: "Confirm action: Approve plan and send to QC",
     });
     await user.click(confirm);
     expect(
@@ -3504,7 +3523,9 @@ describe("conversation workspace", () => {
     expect(
       window.sessionStorage.getItem(`norns:conversation-action-confirmation:${proposed.id}`),
     ).toBe(confirmationBodies[0]?.idempotency_key);
-    await user.click(screen.getByRole("button", { name: "Confirm action: Send to QC" }));
+    await user.click(
+      screen.getByRole("button", { name: "Confirm action: Approve plan and send to QC" }),
+    );
 
     await waitFor(() => expect(confirmationBodies).toHaveLength(2));
     expect(confirmationBodies[0]?.idempotency_key).toEqual(expect.any(String));
@@ -3552,7 +3573,7 @@ describe("conversation workspace", () => {
       />,
     );
     const confirm = await screen.findByRole("button", {
-      name: "Confirm action: Send to QC",
+      name: "Confirm action: Approve plan and send to QC",
     });
     vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new Error("storage disabled");
@@ -3568,7 +3589,9 @@ describe("conversation workspace", () => {
         selector: "output.conversation-action-error",
       }),
     ).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Confirm action: Send to QC" }));
+    await user.click(
+      screen.getByRole("button", { name: "Confirm action: Approve plan and send to QC" }),
+    );
     await waitFor(() => expect(confirmationBodies).toHaveLength(2));
     expect(confirmationBodies[1]?.idempotency_key).toBe(confirmationBodies[0]?.idempotency_key);
   });
@@ -3627,7 +3650,11 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Continue action: Send to QC" }));
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Continue action: Approve plan and send to QC",
+      }),
+    );
     expect(submittedKey).toBe("original-confirmation-key");
   });
 
@@ -3681,7 +3708,11 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Confirm action: Send to QC" }));
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Confirm action: Approve plan and send to QC",
+      }),
+    );
     expect(
       await screen.findByText("stale plan hash", {
         exact: false,
@@ -3689,7 +3720,9 @@ describe("conversation workspace", () => {
       }),
     ).toBeInTheDocument();
     expect(screen.getByText("Plan Contract · Version 1")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Confirm action: Send to QC" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Confirm action: Approve plan and send to QC" }),
+    ).toBeInTheDocument();
   });
 
   it("sends the kickoff QC-mode selection on the confirm request and issues no follow-up PATCH", async () => {
@@ -3765,7 +3798,9 @@ describe("conversation workspace", () => {
     const select = await screen.findByLabelText("QC cadence for this review");
     await waitFor(() => expect(select).toHaveValue("gated_when_contested"));
 
-    await user.click(screen.getByRole("button", { name: "Confirm action: Send to QC" }));
+    await user.click(
+      screen.getByRole("button", { name: "Confirm action: Approve plan and send to QC" }),
+    );
 
     await waitFor(() => expect(confirmationBodies).toHaveLength(1));
     expect(confirmationBodies[0]).toMatchObject({ qc_mode: "gated_when_contested" });

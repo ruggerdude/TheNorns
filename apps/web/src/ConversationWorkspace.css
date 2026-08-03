@@ -1064,7 +1064,7 @@
   margin: 0.9rem auto 0;
   padding: 1rem 1.15rem;
   border: 1px solid color-mix(in srgb, white 32%, var(--info));
-  border-radius: 999px;
+  border-radius: 1.25rem;
   color: white;
   background: linear-gradient(120deg, color-mix(in srgb, var(--info) 88%, #1746c7), #265bd7);
   box-shadow: 0 10px 28px color-mix(in srgb, var(--info) 28%, transparent);
@@ -1125,6 +1125,13 @@
 .conversation-plan-generation-copy time {
   min-width: 5.4rem;
   text-align: right;
+}
+
+.conversation-plan-generation-note {
+  color: color-mix(in srgb, white 84%, transparent);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  text-align: center;
 }
 
 .conversation-plan-generation-spinner {

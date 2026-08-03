@@ -115,6 +115,7 @@ import {
   createConversationMessageBranch,
   createPlanningWorkItem,
   deleteConversationFolder,
+  fetchPlanningReviewerSettings,
   generateConversationPlanChangeProposal,
   getConversation,
   getConversationExecution,
@@ -2926,23 +2927,58 @@ function conversationDraftStorageKey(conversationId: string): string {
 
 function PlanHandoffDialog({
   busy,
+  projectId,
   pmProvider,
   onCancel,
   onSubmit,
 }: {
   busy: boolean;
+  projectId: string;
   pmProvider: PmProviderT;
   onCancel: () => void;
   onSubmit: (handoff: V2PlanHandoffPreferenceT) => void;
 }): React.ReactElement {
   const [reviewMode, setReviewMode] = useState<"qc" | "skip_qc">("qc");
-  const [rounds, setRounds] = useState(3);
-  const reviewerProvider = defaultReviewerProviderFor(pmProvider);
+  const fallbackReviewerProvider = defaultReviewerProviderFor(pmProvider);
+  const [rounds, setRounds] = useState(1);
+  const [reviewerProvider, setReviewerProvider] = useState<PmProviderT>(fallbackReviewerProvider);
   const reviewerOptions = PM_MODEL_OPTIONS[reviewerProvider];
   const [reviewerModel, setReviewerModel] = useState<string>(DEFAULT_PM_MODEL[reviewerProvider]);
+  const [settingsReady, setSettingsReady] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const [executionModels, setExecutionModels] = useState<ExecutionModelCapability[] | null>(null);
   const [executionModel, setExecutionModel] = useState("");
   const [capabilityError, setCapabilityError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let current = true;
+    void fetchPlanningReviewerSettings(projectId)
+      .then((settings) => {
+        if (!current) return;
+        const provider = settings.provider;
+        const options = PM_MODEL_OPTIONS[provider];
+        const configuredModel =
+          settings.model && options.some((option) => option.id === settings.model)
+            ? settings.model
+            : DEFAULT_PM_MODEL[provider];
+        setReviewerProvider(provider);
+        setReviewerModel(configuredModel);
+        setRounds(Math.max(1, Math.min(5, settings.default_max_rounds || 1)));
+        setReviewMode(settings.default_max_rounds === 0 ? "skip_qc" : "qc");
+        setSettingsReady(true);
+      })
+      .catch(() => {
+        if (!current) return;
+        setReviewerProvider(fallbackReviewerProvider);
+        setReviewerModel(DEFAULT_PM_MODEL[fallbackReviewerProvider]);
+        setRounds(1);
+        setSettingsError("Saved QC settings could not be loaded. Built-in defaults are shown.");
+        setSettingsReady(true);
+      });
+    return () => {
+      current = false;
+    };
+  }, [fallbackReviewerProvider, projectId]);
 
   useEffect(() => {
     let current = true;
@@ -2970,7 +3006,7 @@ function PlanHandoffDialog({
 
   const selectedExecution =
     executionModels?.find((model) => `${model.provider}:${model.id}` === executionModel) ?? null;
-  const canSubmit = !busy && selectedExecution !== null;
+  const canSubmit = !busy && settingsReady && selectedExecution !== null;
 
   return createPortal(
     <div className="plan-handoff-backdrop" role="presentation" onMouseDown={onCancel}>
@@ -2982,8 +3018,8 @@ function PlanHandoffDialog({
       >
         <header>
           <div>
-            <div className="eyebrow">Plan handoff</div>
-            <h2 id="plan-handoff-title">Prepare the plan handoff</h2>
+            <div className="eyebrow">Plan review</div>
+            <h2 id="plan-handoff-title">Confirm QC Settings</h2>
           </div>
           <Button type="button" variant="ghost" disabled={busy} onClick={onCancel}>
             Cancel
@@ -3000,7 +3036,7 @@ function PlanHandoffDialog({
             />
             <span>
               <strong>Run QC</strong>
-              <small>Choose the independent review that can run after you approve the plan.</small>
+              <small>Use the project’s saved independent-review settings.</small>
             </span>
           </label>
           <label className={reviewMode === "skip_qc" ? "is-selected" : undefined}>
@@ -3012,7 +3048,7 @@ function PlanHandoffDialog({
             />
             <span>
               <strong>Skip QC</strong>
-              <small>Prepare a QC waiver that still requires your explicit confirmation.</small>
+              <small>Prepare a QC waiver after you review the finished plan.</small>
             </span>
           </label>
         </div>
@@ -3071,6 +3107,7 @@ function PlanHandoffDialog({
         </div>
 
         {capabilityError ? <Alert>{capabilityError}</Alert> : null}
+        {settingsError ? <Alert>{settingsError}</Alert> : null}
         {executionModels?.length === 0 && !capabilityError ? (
           <Alert>No development agents are currently available.</Alert>
         ) : null}
@@ -3097,7 +3134,7 @@ function PlanHandoffDialog({
             });
           }}
         >
-          {busy ? "Preparing plan…" : "Create plan for review"}
+          {busy ? "Building plan…" : settingsReady ? "Build plan for review" : "Loading settings…"}
         </Button>
       </dialog>
     </div>,
@@ -3106,6 +3143,7 @@ function PlanHandoffDialog({
 }
 
 function ConversationComposer({
+  projectId,
   conversationId,
   isExecution,
   isPlanning,
@@ -3116,6 +3154,7 @@ function ConversationComposer({
   prefillText,
   onPrefillConsumed,
 }: {
+  projectId: string;
   conversationId: string;
   isExecution: boolean;
   isPlanning: boolean;
@@ -3262,6 +3301,7 @@ function ConversationComposer({
         {handoffOpen ? (
           <PlanHandoffDialog
             busy={planIntentBusy}
+            projectId={projectId}
             pmProvider={pmProvider}
             onCancel={() => setHandoffOpen(false)}
             onSubmit={(handoff) => {
@@ -3315,7 +3355,7 @@ function PlanGenerationProgress({
           <small>
             {progress
               ? PLAN_STAGE_COPY[progress.stage]
-              : "Analyzing the conversation and generating an executable proposal"}
+              : "Reading the PM conversation and project context"}
           </small>
         </span>
         <time>{planElapsedLabel(elapsedSeconds)}</time>
@@ -3339,6 +3379,11 @@ function PlanGenerationProgress({
       <span className="conversation-plan-generation-track" aria-hidden="true">
         <span />
       </span>
+      <small className="conversation-plan-generation-note">
+        The PM is drafting structured modules, then the app validates and saves the exact plan for
+        your review. Larger conversations and model response time can make this take a minute or
+        two.
+      </small>
     </output>
   );
 }
@@ -5019,6 +5064,7 @@ function ConversationThread({
                         </output>
                       ) : (
                         <ConversationComposer
+                          projectId={detail.work_item.project_id}
                           conversationId={detail.conversation.id}
                           isExecution={isExecution}
                           isPlanning={isPlanning}

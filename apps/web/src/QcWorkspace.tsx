@@ -278,9 +278,13 @@ function QcProgressPopout({
                   Round {currentRound(review)} of {review.max_rounds}
                 </span>
               </div>
-              <b>1%</b>
+              <b>Waiting</b>
             </header>
-            <progress max="100" value="1" aria-label="Total QC progress" />
+            <progress
+              max="100"
+              aria-label="Current QC step progress"
+              aria-valuetext="Waiting for the reviewer to start"
+            />
             <p className="qc-progress-activity">Waiting for the independent reviewer to start.</p>
             <dl>
               <div>
@@ -309,20 +313,15 @@ function QcProgressPopout({
     ? stepElapsed
     : Math.max(0, Math.floor((now - reviewStarted) / 1_000));
   const estimate = STAGE_ESTIMATE_SECONDS[live.stage];
-  const estimatedRemaining = Math.max(0, estimate - stepElapsed);
   const takingLongerThanUsual = stepElapsed > estimate * 2;
-  const itemProgress = live.total_items > 0 ? live.completed_items / live.total_items : 0;
-  const stepProgress = Math.max(itemProgress, Math.min(0.92, stepElapsed / estimate));
   const round = live.round ?? currentRound(review);
-  const overallProgress = Math.min(
-    99,
-    Math.max(2, Math.round(((round - 1 + stepProgress) / review.max_rounds) * 100)),
-  );
-  const itemLabel =
-    live.total_items > 0
-      ? `${Math.min(live.completed_items, live.total_items)} of ${live.total_items} item${live.total_items === 1 ? "" : "s"}`
+  const hasMeasuredProgress = live.total_items > 0 && live.completed_items > 0;
+  const itemLabel = hasMeasuredProgress
+    ? `${Math.min(live.completed_items, live.total_items)} completed of ${live.total_items} item${live.total_items === 1 ? "" : "s"}`
+    : live.total_items > 0
+      ? `${live.total_items} item${live.total_items === 1 ? "" : "s"} in this review step`
       : live.stage === "revising" && accepted > 0
-        ? `0 of ${accepted} accepted finding${accepted === 1 ? "" : "s"}`
+        ? `${accepted} accepted finding${accepted === 1 ? "" : "s"} in this revision step`
         : null;
 
   return (
@@ -343,14 +342,30 @@ function QcProgressPopout({
                 Round {round} of {review.max_rounds}
               </span>
             </div>
-            <b>{overallProgress}%</b>
+            <b>
+              {hasMeasuredProgress
+                ? `${Math.min(live.completed_items, live.total_items)} of ${live.total_items}`
+                : "In progress"}
+            </b>
           </header>
-          <progress max="100" value={overallProgress} aria-label="Total QC progress" />
+          <progress
+            max={hasMeasuredProgress ? live.total_items : 100}
+            {...(hasMeasuredProgress
+              ? { value: Math.min(live.completed_items, live.total_items) }
+              : {})}
+            aria-label="Current QC step progress"
+            aria-valuetext={
+              hasMeasuredProgress
+                ? `${live.completed_items} of ${live.total_items} items complete`
+                : "Reviewer is active; no completed checkpoint yet"
+            }
+          />
           <p className="qc-progress-activity">{live.activity}</p>
           {takingLongerThanUsual ? (
             <p className="qc-progress-delay">
-              This step is taking longer than usual, but QC is still active. Open Live dialogue for
-              the latest visible output, or use the stop controls below.
+              {hasMeasuredProgress
+                ? "This step is over its typical time, but QC is still active. Open Live dialogue for emitted output, or use the stop controls below."
+                : "No review checkpoint has completed yet. The reviewer request is still active; open Live dialogue for emitted output, or use the stop controls below."}
             </p>
           ) : null}
           <dl>
@@ -359,18 +374,12 @@ function QcProgressPopout({
               <dd>{durationLabel(totalElapsed)}</dd>
             </div>
             <div>
-              <dt>Estimated</dt>
-              <dd>
-                {estimatedRemaining > 0
-                  ? `~${durationLabel(estimatedRemaining)} left in step`
-                  : takingLongerThanUsual
-                    ? "Longer than usual"
-                    : "Wrapping up this step"}
-              </dd>
+              <dt>Typical</dt>
+              <dd>About {durationLabel(estimate)} for this step</dd>
             </div>
             {itemLabel ? (
               <div>
-                <dt>Items</dt>
+                <dt>{hasMeasuredProgress ? "Items" : "Scope"}</dt>
                 <dd>{itemLabel}</dd>
               </div>
             ) : null}
@@ -380,7 +389,7 @@ function QcProgressPopout({
             {live.model ? <span>{live.model}</span> : null}
             {live.attempt > 1 ? <span>retry {live.attempt}</span> : null}
           </p>
-          <small>Timing estimates adjust at each workflow checkpoint.</small>
+          <small>Progress advances only when QC reports a completed checkpoint.</small>
         </section>
       ) : (
         <QcLiveDialogue review={review} />

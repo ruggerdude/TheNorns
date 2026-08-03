@@ -261,14 +261,57 @@ describe("QcWorkspace", () => {
     );
     expect(screen.getByText("4:12 on this step")).toBeVisible();
     expect(screen.getByText("gpt")).toBeVisible();
-    expect(screen.getByText("2 of 5 items")).toBeVisible();
-    expect(screen.getByRole("progressbar", { name: "Total QC progress" })).toBeVisible();
-    expect(screen.getByText(/taking longer than usual/i)).toBeVisible();
+    expect(screen.getByText("2 completed of 5 items")).toBeVisible();
+    expect(screen.getByRole("progressbar", { name: "Current QC step progress" })).toHaveAttribute(
+      "value",
+      "2",
+    );
+    expect(screen.getByText(/over its typical time/i)).toBeVisible();
     fireEvent.click(screen.getByRole("tab", { name: "Live dialogue" }));
     expect(screen.getByText("Visible agent dialogue")).toBeVisible();
     expect(screen.getByText("Response streaming now")).toBeVisible();
     expect(screen.getByText(/"severity":"should_fix"/)).toBeVisible();
     expect(screen.getByText(/View instructions sent to reviewer/)).toBeVisible();
+    vi.useRealTimers();
+  });
+
+  it("does not turn elapsed time into fake progress before QC completes a checkpoint", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-02T12:04:08.000Z"));
+    renderWorkspace(
+      review({
+        status: "running",
+        paused_checkpoint: null,
+        paused_at_round: null,
+        findings: [],
+        finding_decisions: [],
+        round_exchanges: [],
+        live_progress: {
+          stage: "reviewing",
+          round: 1,
+          attempt: 1,
+          provider: "openai",
+          model: "gpt-5.6-sol",
+          completed_items: 0,
+          total_items: 6,
+          activity: "Checking 6 plan modules against the QC requirements",
+          output_preview: "",
+          started_at: "2026-08-02T12:01:18.000Z",
+          checkpoint_at: "2026-08-02T12:01:18.000Z",
+        },
+      }),
+    );
+
+    expect(screen.getByText("In progress")).toBeVisible();
+    expect(screen.queryByText("92%")).not.toBeInTheDocument();
+    expect(screen.queryByText("0 of 6 items")).not.toBeInTheDocument();
+    expect(screen.getByText("6 items in this review step")).toBeVisible();
+    expect(
+      screen.getByRole("progressbar", { name: "Current QC step progress" }),
+    ).not.toHaveAttribute("value");
+    expect(
+      screen.getByText("Progress advances only when QC reports a completed checkpoint."),
+    ).toBeVisible();
     vi.useRealTimers();
   });
 });

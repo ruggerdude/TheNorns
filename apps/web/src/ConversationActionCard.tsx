@@ -24,9 +24,9 @@ const PLAN_ACTIONS = {
     description: "Create an immutable, versioned candidate from this proposed Plan Contract.",
   },
   send_plan_to_qc: {
-    title: "Send to QC",
-    button: "Send to QC",
-    description: "Sends this exact plan version to the cross-provider reviewer.",
+    title: "Review and send to QC",
+    button: "Approve plan and send to QC",
+    description: "Approve this exact plan version and send it to the cross-provider reviewer.",
   },
   request_plan_changes: {
     title: "Request changes",
@@ -39,9 +39,9 @@ const PLAN_ACTIONS = {
     description: "Approve this exact reviewed plan version and begin the existing kickoff bridge.",
   },
   reject_plan: {
-    title: "Reject plan",
-    button: "Reject plan",
-    description: "Reject this exact plan version. Work will not begin.",
+    title: "Reject and return to PM",
+    button: "Reject and return to PM",
+    description: "Reject this exact plan version and keep the planning chat open for revisions.",
   },
 } as const;
 

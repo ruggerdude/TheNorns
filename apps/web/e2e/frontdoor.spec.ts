@@ -541,6 +541,16 @@ async function prepare(
         updated_at: null,
       });
     }
+    if (path.includes("/planning-reviewer") && request.method() === "GET") {
+      return fulfill(route, {
+        provider: "openai",
+        model: "gpt-5.6-terra",
+        mode: "explicit",
+        qc_mode: "automatic",
+        allow_unadjudicated_rebuttals: false,
+        default_max_rounds: 2,
+      });
+    }
     if (path.includes("/planning-reviewer") && request.method() === "DELETE") {
       return route.fulfill({ status: 204, body: "" });
     }
@@ -871,7 +881,7 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   await expect(page.getByRole("button", { name: "Use conversation as plan" })).toHaveText("Plan");
   await expect(page.getByText("UI preview", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Use conversation as plan" }).click();
-  const planHandoff = page.getByRole("dialog", { name: "Prepare the plan handoff" });
+  const planHandoff = page.getByRole("dialog", { name: "Confirm QC Settings" });
   expect(
     await planHandoff.evaluate(
       (dialog) => dialog.closest(".plan-handoff-backdrop")?.parentElement === document.body,
@@ -887,11 +897,13 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
     Math.abs((planHandoffBox?.x ?? 0) + (planHandoffBox?.width ?? 0) / 2 - 1920 / 2),
   ).toBeLessThanOrEqual(1);
   await expect(planHandoff.getByRole("combobox", { name: "Execution agent" })).toBeVisible();
-  await expect(planHandoff.getByRole("combobox", { name: "QC agent" })).toBeVisible();
-  await expect(planHandoff.getByRole("combobox", { name: "QC rounds" })).toBeVisible();
+  await expect(planHandoff.getByRole("combobox", { name: "QC agent" })).toHaveValue(
+    "gpt-5.6-terra",
+  );
+  await expect(planHandoff.getByRole("combobox", { name: "QC rounds" })).toHaveValue("2");
   await planHandoff.getByRole("radio", { name: /Skip QC/ }).check();
   await expect(planHandoff.getByRole("combobox", { name: "QC agent" })).toHaveCount(0);
-  await expect(planHandoff.getByRole("button", { name: "Create plan for review" })).toBeVisible();
+  await expect(planHandoff.getByRole("button", { name: "Build plan for review" })).toBeVisible();
   await planHandoff.getByRole("button", { name: "Cancel" }).click();
   await expect(planHandoff).toHaveCount(0);
   await expect(page.getByRole("region", { name: "Planning workflow" })).toHaveCount(0);
@@ -1030,7 +1042,7 @@ test("Mobile workspace opens navigation as a drawer and keeps chat usable", asyn
   await expect(conversationDrawer).toBeHidden();
 
   await page.getByRole("button", { name: "Use conversation as plan" }).click();
-  const planDialog = page.getByRole("dialog", { name: "Prepare the plan handoff" });
+  const planDialog = page.getByRole("dialog", { name: "Confirm QC Settings" });
   await expect(planDialog).toBeVisible();
   const dialogBox = await planDialog.boundingBox();
   expect(dialogBox?.width ?? 0).toBeGreaterThanOrEqual(385);

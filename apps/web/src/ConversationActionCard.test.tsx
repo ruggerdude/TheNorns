@@ -71,7 +71,9 @@ describe("conversation action card", () => {
     expect(
       screen.getByText("This project change happens only when you confirm this card."),
     ).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Confirm action: Send to QC" }));
+    await user.click(
+      screen.getByRole("button", { name: "Confirm action: Approve plan and send to QC" }),
+    );
     // No `review` preference on this action's parameters, so the kickoff
     // qc_mode control doesn't render and no override is passed.
     expect(onConfirm).toHaveBeenCalledWith(proposed, undefined);
@@ -129,7 +131,9 @@ describe("conversation action card", () => {
         />,
       );
 
-      await user.click(screen.getByRole("button", { name: "Continue action: Send to QC" }));
+      await user.click(
+        screen.getByRole("button", { name: "Continue action: Approve plan and send to QC" }),
+      );
       expect(onConfirm).toHaveBeenCalledWith(pending);
     },
   );
