@@ -4,7 +4,7 @@ import type {
   V2ConversationPlanReviewT,
   V2WorkPlanVersionT,
 } from "@norns/contracts";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { QcModeT } from "./conversationApi";
 import { Button } from "./ui";
 import "./QcWorkspace.css";
@@ -83,6 +83,26 @@ function ownerLabel(review: V2ConversationPlanReviewT): string {
     return "Independent reviewer is checking the plan";
   if (review.status === "queued") return "Review is queued";
   return "Quality review is working";
+}
+
+/** Live elapsed time for the current QC operation. Counts from the durable
+ *  live_progress.started_at (per stage/round/attempt/model), so a refresh or a
+ *  new tab shows the true age of the step rather than restarting at zero. */
+function StageElapsed({ startedAt }: { startedAt: string }): React.ReactElement | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const started = Date.parse(startedAt);
+  if (Number.isNaN(started)) return null;
+  const seconds = Math.max(0, Math.floor((now - started) / 1_000));
+  const label = `${Math.floor(seconds / 60)}:${(seconds % 60).toString().padStart(2, "0")}`;
+  return (
+    <time className="qc-new-elapsed" dateTime={startedAt}>
+      {label} on this step
+    </time>
+  );
 }
 
 function severityLabel(severity: V2ConversationPlanReviewFindingT["severity"]): string {
@@ -454,6 +474,15 @@ export function QcWorkspace({
                 ? `Applying the ${accepted} finding${accepted === 1 ? "" : "s"} you accepted. You can leave this page and return later.`
                 : "No action is needed right now. This page will stop when your decision is required."}
             </p>
+            {review.live_progress ? (
+              <p className="qc-new-working-meta">
+                <StageElapsed startedAt={review.live_progress.started_at} />
+                {review.live_progress.model ? <span>{review.live_progress.model}</span> : null}
+                {review.live_progress.attempt > 1 ? (
+                  <span>retry {review.live_progress.attempt}</span>
+                ) : null}
+              </p>
+            ) : null}
           </div>
         </section>
       ) : null}

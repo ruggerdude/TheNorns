@@ -217,4 +217,31 @@ describe("QcWorkspace", () => {
 
     expect(onTriage).toHaveBeenCalledWith(current, { "finding-2": "accept" });
   });
+
+  it("shows how long the running step has been going so a slow review is not mistaken for a frozen one", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-02T12:05:30.000Z"));
+    renderWorkspace(
+      review({
+        status: "running",
+        paused_checkpoint: null,
+        paused_at_round: null,
+        findings: [],
+        finding_decisions: [],
+        round_exchanges: [],
+        live_progress: {
+          stage: "reviewing",
+          round: 1,
+          attempt: 1,
+          provider: "openai",
+          model: "gpt",
+          started_at: "2026-08-02T12:01:18.000Z",
+          checkpoint_at: "2026-08-02T12:01:18.000Z",
+        },
+      }),
+    );
+    expect(screen.getByText("4:12 on this step")).toBeVisible();
+    expect(screen.getByText("gpt")).toBeVisible();
+    vi.useRealTimers();
+  });
 });
