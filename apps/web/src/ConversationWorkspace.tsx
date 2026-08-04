@@ -141,6 +141,7 @@ import {
 } from "./conversationApi";
 import {
   type ExecutionModelCapability,
+  activateProjectRepository,
   getExecutionModelCapabilities,
   retryPlanningRunExecution,
 } from "./phaseTabApi";
@@ -4926,30 +4927,45 @@ function ConversationThread({
   const recoverableExecutionEffect = isPlanning
     ? ([...actionContext.effects.values()].find(isRecoverableExecutionEffect) ?? null)
     : null;
-  const retryApprovedExecution = useCallback(async () => {
-    if (!recoverableExecutionEffect || executionRetryBusy) return;
-    setExecutionRetryBusy(true);
-    setExecutionRetryError(null);
-    try {
-      const result = await retryPlanningRunExecution(
-        detail.work_item.project_id,
-        recoverableExecutionEffect.planning_run_id,
-      );
-      const report = result.execution ?? {
-        started: false,
-        detail: "The approved plan is recorded, but no kickoff result was returned.",
-      };
-      setExecutionRetryReport(report);
-    } catch (caught) {
-      if (caught instanceof UnauthorizedError) {
-        onUnauthorized();
-        return;
+  const retryApprovedExecution = useCallback(
+    async (reconnectRepository = false) => {
+      if (!recoverableExecutionEffect || executionRetryBusy) return;
+      setExecutionRetryBusy(true);
+      setExecutionRetryError(null);
+      try {
+        if (reconnectRepository) {
+          const activation = await activateProjectRepository(detail.work_item.project_id);
+          if (!activation.activated) {
+            setExecutionRetryReport({
+              started: false,
+              detail:
+                activation.blockers.map((blocker) => blocker.message).join(" ") ||
+                "The GitHub repository could not be reconnected.",
+            });
+            return;
+          }
+        }
+        const result = await retryPlanningRunExecution(
+          detail.work_item.project_id,
+          recoverableExecutionEffect.planning_run_id,
+        );
+        const report = result.execution ?? {
+          started: false,
+          detail: "The approved plan is recorded, but no kickoff result was returned.",
+        };
+        setExecutionRetryReport(report);
+      } catch (caught) {
+        if (caught instanceof UnauthorizedError) {
+          onUnauthorized();
+          return;
+        }
+        setExecutionRetryError(caught instanceof Error ? caught.message : String(caught));
+      } finally {
+        setExecutionRetryBusy(false);
       }
-      setExecutionRetryError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      setExecutionRetryBusy(false);
-    }
-  }, [detail.work_item.project_id, executionRetryBusy, onUnauthorized, recoverableExecutionEffect]);
+    },
+    [detail.work_item.project_id, executionRetryBusy, onUnauthorized, recoverableExecutionEffect],
+  );
   const linkedExecutionConversationId = isPlanning
     ? (detail.handoff?.target_conversation_id ??
       [...actionContext.effects.values()]
@@ -5472,14 +5488,23 @@ function ConversationThread({
                       </p>
                     </div>
                     {!executionRetryReport?.started ? (
-                      <Button
-                        variant="primary"
-                        data-testid="conversation-retry-execution"
-                        disabled={executionRetryBusy}
-                        onClick={() => void retryApprovedExecution()}
-                      >
-                        {executionRetryBusy ? "Starting development…" : "Retry development start"}
-                      </Button>
+                      <div className="conversation-development-start-actions">
+                        <Button
+                          variant="primary"
+                          data-testid="conversation-retry-execution"
+                          disabled={executionRetryBusy}
+                          onClick={() => void retryApprovedExecution()}
+                        >
+                          {executionRetryBusy ? "Starting development…" : "Retry development start"}
+                        </Button>
+                        <Button
+                          data-testid="conversation-activate-retry-execution"
+                          disabled={executionRetryBusy}
+                          onClick={() => void retryApprovedExecution(true)}
+                        >
+                          Reconnect GitHub and retry
+                        </Button>
+                      </div>
                     ) : null}
                     {executionRetryError ? (
                       <output role="alert">{executionRetryError}</output>

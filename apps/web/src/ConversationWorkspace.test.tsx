@@ -3492,6 +3492,7 @@ describe("conversation workspace", () => {
       created_at: now,
       updated_at: now,
     };
+    let activationCalls = 0;
     let retryCalls = 0;
     vi.stubGlobal(
       "fetch",
@@ -3505,6 +3506,10 @@ describe("conversation workspace", () => {
             reviews: [review],
             effects: [effect],
           });
+        }
+        if (url.endsWith(`/projects/${projectId}/activate`) && init?.method === "POST") {
+          activationCalls += 1;
+          return Response.json({ project_id: projectId, activated: true, blockers: [] });
         }
         if (
           url.endsWith("/planning-runs/planning-run-retry/execution") &&
@@ -3528,13 +3533,15 @@ describe("conversation workspace", () => {
       />,
     );
 
-    const retry = await screen.findByTestId("conversation-retry-execution");
+    expect(await screen.findByTestId("conversation-retry-execution")).toBeInTheDocument();
+    const reconnect = screen.getByTestId("conversation-activate-retry-execution");
     expect(screen.getByText("Coordinator unavailable.")).toBeInTheDocument();
-    await user.click(retry);
+    await user.click(reconnect);
 
     expect(await screen.findByText("4 tasks dispatched.")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Development started" })).toBeInTheDocument();
     expect(screen.queryByTestId("conversation-retry-execution")).not.toBeInTheDocument();
+    expect(activationCalls).toBe(1);
     expect(retryCalls).toBe(1);
   });
 

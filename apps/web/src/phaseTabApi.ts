@@ -332,6 +332,16 @@ export function retryPlanningRunExecution(
   return postJson(`/api/v2/projects/${projectId}/planning-runs/${runId}/execution`, {});
 }
 
+export interface ProjectActivationResult {
+  project_id: string;
+  activated: boolean;
+  blockers: Array<{ code: string; message: string; action_required?: string }>;
+}
+
+export function activateProjectRepository(projectId: string): Promise<ProjectActivationResult> {
+  return postJson(`/api/v2/projects/${projectId}/activate`, {});
+}
+
 /**
  * Poll per-phase execution progress. Project-scoped — the backend's
  * GET /api/v2/projects/:id/execution-status (AttentionService

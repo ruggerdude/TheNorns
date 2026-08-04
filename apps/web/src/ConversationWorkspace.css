@@ -4406,12 +4406,23 @@
   font-size: 0.82rem;
 }
 
+.conversation-development-start > .conversation-development-start-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
 @media (max-width: 48rem) {
   .conversation-development-start {
     grid-template-columns: 1fr;
   }
 
   .conversation-development-start > .btn {
+    width: 100%;
+  }
+
+  .conversation-development-start > .conversation-development-start-actions > .btn {
     width: 100%;
   }
 }
