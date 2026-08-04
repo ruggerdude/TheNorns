@@ -86,7 +86,7 @@
 
 .conversation-sidebar h2,
 .conversation-header h2,
-.conversation-new-work h2 {
+.conversation-new-work h3 {
   margin: 0;
   letter-spacing: -0.025em;
 }
@@ -3477,7 +3477,7 @@
   gap: 0.45rem;
 }
 
-.conversation-new-work .conversation-new-intro h2 {
+.conversation-new-work .conversation-new-intro h3 {
   font-size: clamp(1.85rem, 3.2vw, 2.65rem);
   line-height: 1.08;
 }
@@ -4366,4 +4366,52 @@
 .conversation-thread > .workspace-tab-panel {
   flex: 1;
   min-height: 0;
+}
+
+.conversation-development-start {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 1rem;
+  margin: 1rem;
+  padding: 1rem 1.1rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+}
+
+.conversation-development-start > div {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.conversation-development-start h2,
+.conversation-development-start p {
+  margin: 0;
+}
+
+.conversation-development-start h2 {
+  font-size: 1.05rem;
+}
+
+.conversation-development-start p {
+  color: var(--ink-muted);
+  font-size: 0.86rem;
+  line-height: 1.45;
+}
+
+.conversation-development-start > output {
+  grid-column: 1 / -1;
+  color: var(--danger);
+  font-size: 0.82rem;
+}
+
+@media (max-width: 48rem) {
+  .conversation-development-start {
+    grid-template-columns: 1fr;
+  }
+
+  .conversation-development-start > .btn {
+    width: 100%;
+  }
 }

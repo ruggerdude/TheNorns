@@ -1,7 +1,12 @@
-import { V2ConversationPlanReview, type V2ConversationPlanReviewT } from "@norns/contracts";
+import {
+  V2ConversationPlanReview,
+  type V2ConversationPlanReviewT,
+  type V2WorkPlanVersionT,
+} from "@norns/contracts";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { QcWorkspace } from "./QcWorkspace";
+import { makeCoreApiModule, makePlan } from "./test/fixtures";
 
 const now = "2026-08-02T12:00:00.000Z";
 
@@ -100,13 +105,63 @@ function review(overrides: Partial<V2ConversationPlanReviewT> = {}): V2Conversat
   });
 }
 
-function renderWorkspace(current = review(), error?: string) {
+function revisedPlanVersion(): V2WorkPlanVersionT {
+  const module = makeCoreApiModule({
+    description: "Store the selected deployment target and measurable accuracy tolerance.",
+  });
+  return {
+    schema_version: 2,
+    id: "plan-version-2",
+    project_id: "project-1",
+    work_item_id: "work-1",
+    conversation_id: "conversation-1",
+    created_by_user_id: "user-1",
+    version: 2,
+    status: "changes_requested",
+    origin: "qc_interim",
+    plan: {
+      plan: makePlan({
+        objective: "Ship the revised, measurable deployment plan",
+        modules: [module],
+      }),
+      staffing: [
+        {
+          module_id: module.id,
+          agent_role: "implementation",
+          provider: "anthropic",
+          model: "claude",
+        },
+      ],
+      verification_requirements: ["pnpm test"],
+      open_decisions: [],
+      estimated_budget: { currency: "USD", amount: 20 },
+    },
+    content_hash: "c".repeat(64),
+    created_by_action_id: "action-revision-2",
+    supersedes_plan_version_id: "plan-1",
+    diff_from_previous: {
+      added: ["Documented the deployment target"],
+      changed: ["Made the accuracy tolerance measurable"],
+      removed: [],
+    },
+    approved_by_user_id: null,
+    approved_at: null,
+    created_at: now,
+    updated_at: now,
+  };
+}
+
+function renderWorkspace(
+  current = review(),
+  error?: string,
+  planVersion: V2WorkPlanVersionT | null = null,
+) {
   const onTriage = vi.fn().mockResolvedValue(undefined);
   const onContinueWithoutQc = vi.fn().mockResolvedValue(undefined);
   render(
     <QcWorkspace
       review={current}
-      planVersion={null}
+      planVersion={planVersion}
       history={[]}
       actions={{}}
       busy={false}
@@ -233,9 +288,164 @@ describe("QcWorkspace", () => {
         ],
       }),
     );
-    fireEvent.click(screen.getByText("Review record"));
+    expect(screen.getByRole("heading", { name: "Current review record" })).toBeVisible();
     expect(screen.queryByText(/WORK PLAN CONTRACT ENVELOPE/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Full reviewer/)).not.toBeInTheDocument();
+  });
+
+  it("shows the exact revised plan, its diff, and inline review evidence at the revision gate", () => {
+    const version = revisedPlanVersion();
+    const current = review({
+      rounds_completed: 1,
+      paused_checkpoint: "after_revision",
+      paused_at_round: 1,
+      revised_plan_version_id: version.id,
+      result_plan_content_hash: version.content_hash,
+      finding_decisions: [
+        {
+          finding_id: "finding-1",
+          finding_index: 0,
+          decision: "accept",
+          decided_by_user_id: "user-1",
+          decided_at: now,
+        },
+        {
+          finding_id: "finding-2",
+          finding_index: 1,
+          decision: "accept",
+          decided_by_user_id: "user-1",
+          decided_at: now,
+        },
+      ],
+      dispositions: [
+        {
+          finding_id: "finding-1",
+          finding_index: 0,
+          disposition: "accept",
+          rationale: "Deployment target added.",
+          adjudication: null,
+        },
+        {
+          finding_id: "finding-2",
+          finding_index: 1,
+          disposition: "accept",
+          rationale: "Tolerance documented.",
+          adjudication: null,
+        },
+      ],
+      round_exchanges: [
+        {
+          round: 1,
+          reviewed_plan_content_hash: "a".repeat(64),
+          reviewer: {
+            provider: "openai",
+            model: "gpt",
+            findings: [
+              {
+                severity: "must_fix",
+                module_id: null,
+                finding: "Deployment target is undefined.",
+                recommendation: "Choose and document a deployment target.",
+              },
+              {
+                severity: "should_fix",
+                module_id: "parser",
+                finding: "Accuracy tolerance is unclear.",
+                recommendation: "Add a measurable tolerance.",
+              },
+            ],
+          },
+          pm: {
+            provider: "anthropic",
+            model: "claude",
+            dispositions: [
+              {
+                finding_index: 0,
+                disposition: "accept",
+                rationale: "Deployment target added.",
+              },
+              {
+                finding_index: 1,
+                disposition: "accept",
+                rationale: "Tolerance documented.",
+              },
+            ],
+            revised_plan_content_hash: version.content_hash,
+          },
+        },
+      ],
+    });
+
+    renderWorkspace(current, undefined, version);
+
+    expect(screen.getByRole("heading", { name: "Review the revised plan" })).toBeVisible();
+    const card = screen.getByRole("article", {
+      name: "Ship the revised, measurable deployment plan",
+    });
+    expect(within(card).getByText("Plan Contract · Version 2")).toBeVisible();
+    expect(within(card).getByText("Changes from version 1")).toBeVisible();
+    expect(within(card).getByText("Documented the deployment target")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Current review record" })).toBeVisible();
+    expect(screen.getAllByText("Accepted by PM")).toHaveLength(2);
+    expect(screen.getAllByText("Recommendation")).toHaveLength(2);
+    expect(screen.getAllByText("PM response")).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: "Recommendation" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "PM response" })).not.toBeInTheDocument();
+  });
+
+  it("shows the exact terminal plan and factual per-finding outcomes", () => {
+    const version = revisedPlanVersion();
+    const current = review({
+      status: "converged",
+      rounds_completed: 1,
+      paused_checkpoint: null,
+      paused_at_round: null,
+      completed_at: now,
+      revised_plan_version_id: version.id,
+      result_plan_content_hash: version.content_hash,
+      finding_decisions: [
+        {
+          finding_id: "finding-1",
+          finding_index: 0,
+          decision: "accept",
+          decided_by_user_id: "user-1",
+          decided_at: now,
+        },
+        {
+          finding_id: "finding-2",
+          finding_index: 1,
+          decision: "reject",
+          decided_by_user_id: "user-1",
+          decided_at: now,
+        },
+      ],
+      dispositions: [
+        {
+          finding_id: "finding-1",
+          finding_index: 0,
+          disposition: "accept",
+          rationale: "Deployment target added.",
+          adjudication: null,
+        },
+      ],
+    });
+
+    renderWorkspace(current, undefined, version);
+
+    expect(
+      screen.getByRole("heading", { name: "Review the exact plan for approval" }),
+    ).toBeVisible();
+    expect(
+      screen.getByRole("article", { name: "Ship the revised, measurable deployment plan" }),
+    ).toBeVisible();
+    expect(screen.getByText("Accepted by PM")).toBeVisible();
+    expect(screen.getByText("Excluded by you")).toBeVisible();
+    expect(
+      screen.getAllByText(
+        "2 QC findings were recorded. 1 sent to the PM; 1 excluded by you. 1 accepted by the PM; 0 rebutted by the PM.",
+      ).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText(/findings remain/i)).not.toBeInTheDocument();
   });
 
   it("triages only the findings from the paused reviewer round", () => {

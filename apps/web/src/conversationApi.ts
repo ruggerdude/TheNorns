@@ -378,6 +378,25 @@ export function confirmConversationAction(
   );
 }
 
+export interface ConversationDevelopmentStart {
+  status: "held" | "pending" | "leased" | "succeeded" | "refused" | "failed";
+  execution_started: boolean | null;
+  execution_detail: string | null;
+}
+
+export function startConversationDevelopment(
+  projectId: string,
+  workItemId: string,
+  conversationId: string,
+): Promise<ConversationDevelopmentStart> {
+  return requestJson(
+    `${messageEndpoint(projectId, workItemId, conversationId)}/start-development`,
+    {
+      method: "POST",
+    },
+  );
+}
+
 export function cancelConversationPlanReview(
   projectId: string,
   workItemId: string,

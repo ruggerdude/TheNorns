@@ -132,6 +132,7 @@ import {
   resolveConversation,
   resumeConversationPlanReview,
   retrieveConversationPlanningExcerpt,
+  startConversationDevelopment,
   streamConversationPlanProposal,
   switchConversationModel,
   updateConversationFolder,
@@ -870,6 +871,10 @@ function MarkdownText(): React.ReactElement {
     <MarkdownTextPrimitive
       className="conversation-markdown"
       remarkPlugins={[remarkGfm]}
+      components={{
+        h1: ({ node: _node, ...props }) => <h3 {...props} />,
+        h2: ({ node: _node, ...props }) => <h3 {...props} />,
+      }}
       smooth
       defer
     />
@@ -3592,6 +3597,8 @@ function ConversationThread({
   );
   const [pmSettingsBusy, setPmSettingsBusy] = useState(false);
   const [pmSettingsError, setPmSettingsError] = useState<string | null>(null);
+  const [developmentStartBusy, setDevelopmentStartBusy] = useState(false);
+  const [developmentStartError, setDevelopmentStartError] = useState<string | null>(null);
   const [pmSettingsOverride, setPmSettingsOverride] =
     useState<V2ConversationPmUpdateSettingsT | null>(null);
   const [actionOverrides, setActionOverrides] = useState(
@@ -4679,6 +4686,35 @@ function ConversationThread({
     [detail.work_item.project_id, onUnauthorized, pmSettingsBusy],
   );
 
+  const startDevelopment = useCallback(async (): Promise<void> => {
+    if (developmentStartBusy) return;
+    setDevelopmentStartBusy(true);
+    setDevelopmentStartError(null);
+    try {
+      await startConversationDevelopment(
+        detail.work_item.project_id,
+        detail.work_item.id,
+        detail.conversation.id,
+      );
+      onRefresh();
+    } catch (caught) {
+      if (caught instanceof UnauthorizedError) {
+        onUnauthorized();
+        return;
+      }
+      setDevelopmentStartError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setDevelopmentStartBusy(false);
+    }
+  }, [
+    detail.conversation.id,
+    detail.work_item.id,
+    detail.work_item.project_id,
+    developmentStartBusy,
+    onRefresh,
+    onUnauthorized,
+  ]);
+
   const confirmAction = useCallback(
     async (action: V2ConversationActionT, qcMode?: QcModeT) => {
       if (busyActionId !== null) return;
@@ -5243,6 +5279,31 @@ function ConversationThread({
                     ) : null}
                   </div>
                 ) : null}
+                {isExecution && detail.work_item.status === "awaiting_approval" ? (
+                  <section
+                    className="conversation-development-start"
+                    aria-label="Approved plan ready for development"
+                  >
+                    <div>
+                      <span className="eyebrow">Plan approved</span>
+                      <h2>Review the handoff, then start development</h2>
+                      <p>
+                        The approved design is locked. No implementation agents will run until you
+                        start development here.
+                      </p>
+                    </div>
+                    <Button
+                      variant="primary"
+                      disabled={developmentStartBusy}
+                      onClick={() => void startDevelopment()}
+                    >
+                      {developmentStartBusy ? "Starting development…" : "Start development"}
+                    </Button>
+                    {developmentStartError ? (
+                      <output role="alert">{developmentStartError}</output>
+                    ) : null}
+                  </section>
+                ) : null}
                 {detail.handoff || detail.latest_summary ? (
                   <section
                     className="conversation-context-receipt"
@@ -5467,7 +5528,7 @@ function NewWorkForm({
   return (
     <section className="conversation-new-work" aria-labelledby="conversation-new-title">
       <div className="conversation-new-intro">
-        <h2 id="conversation-new-title">Describe the project</h2>
+        <h3 id="conversation-new-title">Describe the project</h3>
       </div>
       <dl className="conversation-new-context" aria-label="Project setup context">
         <div>
@@ -7033,7 +7094,7 @@ export function ConversationWorkspace({
           : null}
       </aside>
 
-      <main className="conversation-main">
+      <div className="conversation-main">
         {error ? (
           <div className="conversation-main-error">
             <Alert testId="conversation-error">{error}</Alert>
@@ -7113,7 +7174,7 @@ export function ConversationWorkspace({
             </Button>
           </div>
         ) : null}
-      </main>
+      </div>
     </div>
   );
 }

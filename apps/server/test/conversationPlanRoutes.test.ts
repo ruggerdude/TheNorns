@@ -22,6 +22,10 @@ describe("conversation plan routes", () => {
         calls.push({ kind: "confirm", arguments: args });
         return { action: { id: "action-1" }, effect: { kind: "plan_saved" } };
       },
+      startDevelopment: async (...args: unknown[]) => {
+        calls.push({ kind: "start-development", arguments: args });
+        return { status: "succeeded", execution_started: true, execution_detail: "Started." };
+      },
       adjudicateReview: async (...args: unknown[]) => {
         calls.push({ kind: "adjudicate", arguments: args });
         return { id: "review-1", status: "awaiting_human" };
@@ -134,6 +138,28 @@ describe("conversation plan routes", () => {
             action_id: "action-1",
             idempotency_key: "confirmation-key",
           },
+        ],
+      },
+    ]);
+  });
+
+  it("starts development only from authenticated route scope", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v2/projects/project-1/work-items/work-1/conversations/execution-1/start-development",
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      status: "succeeded",
+      execution_started: true,
+      execution_detail: "Started.",
+    });
+    expect(calls).toEqual([
+      {
+        kind: "start-development",
+        arguments: [
+          "route-user",
+          { projectId: "project-1", workItemId: "work-1", conversationId: "execution-1" },
         ],
       },
     ]);

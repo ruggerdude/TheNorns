@@ -145,6 +145,12 @@ export interface ConversationPlanDetail {
   project_runs_qc: boolean;
 }
 
+export interface ConversationDevelopmentStart {
+  status: "held" | "pending" | "leased" | "succeeded" | "refused" | "failed";
+  execution_started: boolean | null;
+  execution_detail: string | null;
+}
+
 interface ActionRow {
   schema_version: 2;
   id: string;
@@ -653,9 +659,6 @@ export class ConversationPlanWorkflowService {
     );
     if (applied.dispatchRunId) {
       void this.options.runReviewNow(applied.dispatchRunId).catch(() => undefined);
-    }
-    if (applied.kickoffIntentId) {
-      await this.dispatchKickoffIntent(applied.kickoffIntentId);
     }
     return this.loadConfirmResponse(
       userId,
@@ -3304,7 +3307,7 @@ export class ConversationPlanWorkflowService {
          execution_conversation_id, action_id, approved_plan_version_id,
          plan_review_id, planning_run_id, handoff_id, decided_by_user_id,
          status, created_at, updated_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12,$12)`,
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'held',$12,$12)`,
       [
         kickoffIntentId,
         action.project_id,
@@ -3340,6 +3343,67 @@ export class ConversationPlanWorkflowService {
     });
     for (const id of ids) await this.dispatchKickoffIntent(id);
     return ids.length;
+  }
+
+  async startDevelopment(
+    userId: string,
+    scope: { projectId: string; workItemId: string; conversationId: string },
+  ): Promise<ConversationDevelopmentStart> {
+    const intentId = await this.transactions.transaction(async (tx) => {
+      await this.assertAccess(tx, scope.projectId, userId);
+      const conversation = await this.assertConversation(
+        tx,
+        scope.projectId,
+        scope.workItemId,
+        scope.conversationId,
+        true,
+        true,
+        false,
+      );
+      if (conversation.kind !== "execution_pm") {
+        throw new ConversationPlanWorkflowError(
+          "invalid_plan_state",
+          "development can start only from the approved Development chat",
+        );
+      }
+      const intent = (
+        await tx.query<{ id: string; status: ConversationDevelopmentStart["status"] }>(
+          `SELECT id, status
+             FROM conversation_kickoff_intents
+            WHERE project_id=$1 AND work_item_id=$2 AND execution_conversation_id=$3
+            FOR UPDATE`,
+          [scope.projectId, scope.workItemId, scope.conversationId],
+        )
+      ).rows[0];
+      if (!intent) {
+        throw new ConversationPlanWorkflowError(
+          "invalid_plan_state",
+          "this Development chat has no approved execution handoff",
+        );
+      }
+      if (intent.status === "held") {
+        await tx.query(
+          `UPDATE conversation_kickoff_intents
+              SET status='pending', updated_at=$2
+            WHERE id=$1 AND status='held'`,
+          [intent.id, this.now().toISOString()],
+        );
+      }
+      return intent.id;
+    });
+    await this.dispatchKickoffIntent(intentId);
+    return this.transactions.transaction(async (tx) => {
+      const result = (
+        await tx.query<ConversationDevelopmentStart>(
+          `SELECT status, execution_started, execution_detail
+             FROM conversation_kickoff_intents
+            WHERE id=$1`,
+          [intentId],
+        )
+      ).rows[0];
+      if (!result) throw new Error("development kickoff intent disappeared");
+      return result;
+    });
   }
 
   private async dispatchKickoffIntent(intentId: string): Promise<void> {

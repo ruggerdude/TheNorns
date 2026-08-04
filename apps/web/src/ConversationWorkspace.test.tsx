@@ -1810,17 +1810,15 @@ describe("conversation workspace", () => {
     expect(screen.queryByText(/QC checks planned/)).not.toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Quality control" })).toBeInTheDocument();
     expect(screen.getByText(/Quality review passed/)).toBeInTheDocument();
-    expect(screen.queryByText("Plan Contract · Version 1")).not.toBeInTheDocument();
+    expect(screen.getByText("Plan Contract · Version 1")).toBeInTheDocument();
     expect(screen.queryByTestId("conversation-action-approve_plan")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
     expect(screen.getByText("Make cancellation verification explicit.")).toBeInTheDocument();
-    await userEvent.click(screen.getByText("Review record"));
-    await userEvent.click(screen.getByText("PM response"));
+    expect(screen.getByRole("heading", { name: "Current review record" })).toBeInTheDocument();
+    expect(screen.getByText("PM response")).toBeInTheDocument();
     expect(screen.getByText("Added the requested telemetry assertion.")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Approve plan and start development" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Approve plan" })).toBeInTheDocument();
     await waitFor(() => expect(onJourneyStageChange).toHaveBeenLastCalledWith(4, []));
   });
 
@@ -1907,7 +1905,7 @@ describe("conversation workspace", () => {
 
     expect((await screen.findAllByText("Round 1 of 3")).length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
-    await userEvent.click(screen.getByText("Review record"));
+    expect(screen.getByRole("heading", { name: "Current review record" })).toBeInTheDocument();
     await userEvent.click(screen.getByText("Previous attempts · 1"));
     expect(screen.getByText("The retry boundary is not explicit.")).toBeInTheDocument();
   });
@@ -2582,9 +2580,7 @@ describe("conversation workspace", () => {
         expect(await screen.findByTestId("qc-new-workspace")).toBeInTheDocument();
         expect(screen.getByRole("heading", { name: "Quality control" })).toBeInTheDocument();
         expect(screen.getByText(/Quality review passed/)).toBeInTheDocument();
-        expect(
-          await screen.findByRole("button", { name: "Approve plan and start development" }),
-        ).toBeInTheDocument();
+        expect(await screen.findByRole("button", { name: "Approve plan" })).toBeInTheDocument();
       } else {
         await waitFor(() => expect(saved).toBe(true));
         expect(handedOff).toBe(false);
@@ -4906,7 +4902,7 @@ describe("conversation workspace", () => {
     );
   });
 
-  it("opens the exact fresh execution PM conversation returned by approval", async () => {
+  it("opens the approved Development chat and waits for an explicit start", async () => {
     const approvedVersion = planVersion({
       status: "approved",
       approved_by_user_id: "user-1",
@@ -4966,6 +4962,7 @@ describe("conversation workspace", () => {
       execution: { status: "pending" as const, started: null, detail: null },
     };
     let approved = false;
+    let developmentStarted = false;
     const selected = vi.fn();
     vi.stubGlobal(
       "fetch",
@@ -4975,7 +4972,10 @@ describe("conversation workspace", () => {
           return Response.json({
             work_items: [
               {
-                work_item: workItem,
+                work_item: {
+                  ...workItem,
+                  status: approved && !developmentStarted ? "awaiting_approval" : "executing",
+                },
                 conversations: approved ? [conversation, execution] : [conversation],
               },
             ],
@@ -4999,7 +4999,10 @@ describe("conversation workspace", () => {
           (!init?.method || init.method === "GET")
         ) {
           return detailResponse(executionHistory, null, null, {
-            workItem: { ...workItem, status: "executing" },
+            workItem: {
+              ...workItem,
+              status: developmentStarted ? "executing" : "awaiting_approval",
+            },
             conversation: execution,
             planVersions: [approvedVersion],
             handoff,
@@ -5012,6 +5015,14 @@ describe("conversation workspace", () => {
               usage_status: "exact",
               attempt_count: 1,
             },
+          });
+        }
+        if (url.endsWith(`/conversations/${execution.id}/start-development`)) {
+          developmentStarted = true;
+          return Response.json({
+            status: "succeeded",
+            execution_started: true,
+            execution_detail: "Development started.",
           });
         }
         throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
@@ -5053,6 +5064,16 @@ describe("conversation workspace", () => {
       "Compacted summary v1",
     );
     expect(screen.queryByTestId("conversation-total-usage")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("region", { name: "Approved plan ready for development" }),
+    ).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Start development" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("region", { name: "Approved plan ready for development" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(developmentStarted).toBe(true);
     await user.click(screen.getByRole("button", { name: "Chat options" }));
     expect(screen.getByRole("combobox", { name: "Conversation model" })).toHaveValue("gpt-5.6-sol");
   });

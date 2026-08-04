@@ -920,7 +920,13 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   const conversationChromeBox = await page.locator(".conversation-thread-chrome").boundingBox();
   const transcriptBox = await page.locator(".conversation-thread-viewport").boundingBox();
   const composerShellBox = await page.locator(".conversation-composer").boundingBox();
-  expect(conversationBox?.height ?? 0).toBeGreaterThan(1020);
+  const journeyBox = await page.getByRole("navigation", { name: "Project journey" }).boundingBox();
+  expect(conversationBox?.y ?? 0).toBeGreaterThanOrEqual(
+    (journeyBox?.y ?? 0) + (journeyBox?.height ?? 0),
+  );
+  expect((conversationBox?.y ?? 0) + (conversationBox?.height ?? 0)).toBeGreaterThanOrEqual(
+    (page.viewportSize()?.height ?? 0) - 12,
+  );
   expect(conversationMainBox?.width ?? 0).toBeGreaterThan((conversationBox?.width ?? 0) - 280);
   expect(conversationMainBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThan(
     (conversationBox?.width ?? 0) - 260,
@@ -1026,7 +1032,13 @@ test("Mobile workspace opens navigation as a drawer and keeps chat usable", asyn
   const conversationBox = await page.locator(".conversation-workspace").boundingBox();
   const composerBox = await composer.boundingBox();
   expect(topbarBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(58);
-  expect(conversationBox?.height ?? 0).toBeGreaterThan(775);
+  const journeyBox = await page.getByRole("navigation", { name: "Project journey" }).boundingBox();
+  expect(conversationBox?.y ?? 0).toBeGreaterThanOrEqual(
+    (journeyBox?.y ?? 0) + (journeyBox?.height ?? 0),
+  );
+  expect((conversationBox?.y ?? 0) + (conversationBox?.height ?? 0)).toBeGreaterThanOrEqual(
+    (page.viewportSize()?.height ?? 0) - 12,
+  );
   expect((composerBox?.y ?? 0) + (composerBox?.height ?? 0)).toBeLessThanOrEqual(844);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 

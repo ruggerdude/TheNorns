@@ -2,6 +2,7 @@ import { PGlite } from "@electric-sql/pglite";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import {
+  HELD_EXECUTION_KICKOFF_MIGRATION_NAME,
   PROJECT_DESTROY_MIGRATION_NAME,
   type V2MigrationDatabase,
   currentV2MigrationSources,
@@ -35,8 +36,12 @@ describe.sequential("permanent project deletion", () => {
     await pg.close();
   });
 
-  it("registers the project deletion migration last", async () => {
-    expect((await currentV2MigrationSources()).at(-1)?.name).toBe(PROJECT_DESTROY_MIGRATION_NAME);
+  it("registers held execution kickoff after project deletion", async () => {
+    const names = (await currentV2MigrationSources()).map(({ name }) => name);
+    expect(names.slice(-2)).toEqual([
+      PROJECT_DESTROY_MIGRATION_NAME,
+      HELD_EXECUTION_KICKOFF_MIGRATION_NAME,
+    ]);
   });
 
   it("deletes the complete project graph while retaining normal immutability", async () => {

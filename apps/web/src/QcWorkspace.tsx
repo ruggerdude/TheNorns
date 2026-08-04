@@ -5,6 +5,7 @@ import type {
   V2WorkPlanVersionT,
 } from "@norns/contracts";
 import { useEffect, useMemo, useState } from "react";
+import { ConversationPlanCard } from "./ConversationPlanCard";
 import { aiProviderLabel } from "./aiProviders";
 import type { QcModeT } from "./conversationApi";
 import { Button } from "./ui";
@@ -444,14 +445,14 @@ function FindingRow({
   selected,
   onSelected,
   response,
-  showRecommendation = false,
+  status,
 }: {
   finding: V2ConversationPlanReviewFindingT;
   selectable: boolean;
   selected: boolean;
   onSelected: (selected: boolean) => void;
   response?: { disposition: "accept" | "rebut"; rationale: string } | null;
-  showRecommendation?: boolean;
+  status?: { label: string; tone: "neutral" | "success" | "warn" | "muted" };
 }): React.ReactElement {
   return (
     <li
@@ -469,31 +470,105 @@ function FindingRow({
         ) : null}
         <span className="qc-new-severity">{severityLabel(finding.severity)}</span>
         <div>
-          <strong>{finding.finding}</strong>
+          <span className="qc-new-finding-title">
+            <strong>{finding.finding}</strong>
+            {status ? (
+              <span className="qc-new-finding-status" data-tone={status.tone}>
+                {status.label}
+              </span>
+            ) : null}
+          </span>
           <small>{finding.module_id ? `Plan area · ${finding.module_id}` : "Plan-wide"}</small>
         </div>
       </div>
-      {showRecommendation ? (
-        <div className="qc-new-finding-recommendation">
-          <strong>Recommendation</strong>
-          <p>{finding.recommendation}</p>
-        </div>
-      ) : (
-        <details>
-          <summary>Recommendation</summary>
-          <p>{finding.recommendation}</p>
-        </details>
-      )}
+      <div className="qc-new-finding-recommendation">
+        <strong>Recommendation</strong>
+        <p>{finding.recommendation}</p>
+      </div>
       {response ? (
-        <details>
-          <summary>PM response</summary>
+        <div className="qc-new-finding-response">
+          <strong>PM response</strong>
           <p>
             <strong>{response.disposition === "accept" ? "Accepted: " : "Rebutted: "}</strong>
             {response.rationale}
           </p>
-        </details>
+        </div>
       ) : null}
     </li>
+  );
+}
+
+function findingStatus(
+  review: V2ConversationPlanReviewT,
+  finding: V2ConversationPlanReviewFindingT,
+): { label: string; tone: "neutral" | "success" | "warn" | "muted" } {
+  const decision = review.finding_decisions?.find((item) => item.finding_id === finding.id);
+  const disposition = review.dispositions.find((item) => item.finding_id === finding.id);
+
+  if (decision?.decision === "reject") return { label: "Excluded by you", tone: "muted" };
+  if (disposition?.adjudication?.ruling === "reviewer") {
+    return { label: "Reviewer position chosen", tone: "success" };
+  }
+  if (disposition?.adjudication?.ruling === "pm") {
+    return { label: "PM position chosen", tone: "success" };
+  }
+  if (disposition?.adjudication?.ruling === "supplied_fact") {
+    return { label: "Resolved with supplied fact", tone: "success" };
+  }
+  if (disposition?.disposition === "accept") {
+    return { label: "Accepted by PM", tone: "success" };
+  }
+  if (disposition?.disposition === "rebut") {
+    return { label: "Rebutted by PM", tone: "warn" };
+  }
+  if (decision?.decision === "accept") return { label: "Sent to PM", tone: "neutral" };
+  return { label: "Awaiting your decision", tone: "neutral" };
+}
+
+function reviewRecordSummary(
+  review: V2ConversationPlanReviewT,
+  findings: V2ConversationPlanReviewFindingT[],
+): string {
+  if (findings.length === 0) return "QC completed without recording any findings.";
+
+  const decisions = review.finding_decisions ?? [];
+  const sent = decisions.filter((item) => item.decision === "accept").length;
+  const excluded = decisions.filter((item) => item.decision === "reject").length;
+  const acceptedByPm = review.dispositions.filter((item) => item.disposition === "accept").length;
+  const rebuttedByPm = review.dispositions.filter((item) => item.disposition === "rebut").length;
+  const parts = [
+    `${findings.length} QC finding${findings.length === 1 ? " was" : "s were"} recorded.`,
+  ];
+  if (decisions.length > 0) {
+    parts.push(`${sent} sent to the PM; ${excluded} excluded by you.`);
+  }
+  if (review.dispositions.length > 0) {
+    parts.push(`${acceptedByPm} accepted by the PM; ${rebuttedByPm} rebutted by the PM.`);
+  }
+  return parts.join(" ");
+}
+
+function QcPlanVersion({
+  planVersion,
+  heading,
+}: {
+  planVersion: V2WorkPlanVersionT | null;
+  heading: string;
+}): React.ReactElement {
+  return (
+    <section className="qc-new-plan-review" aria-labelledby="qc-current-plan-title">
+      <header>
+        <div>
+          <h3 id="qc-current-plan-title">{heading}</h3>
+          <p>
+            {planVersion
+              ? `Exact saved plan version ${planVersion.version}, including its changes from the prior version.`
+              : "The saved plan preview is not available yet."}
+          </p>
+        </div>
+      </header>
+      {planVersion ? <ConversationPlanCard version={planVersion} /> : null}
+    </section>
   );
 }
 
@@ -627,7 +702,6 @@ function FindingTriage({
                 return next;
               })
             }
-            showRecommendation
           />
         ))}
       </ul>
@@ -774,10 +848,14 @@ export function QcWorkspace({
   const activeAgent = activeQcAgent(review);
 
   return (
-    <main className="qc-new-workspace" data-testid="qc-new-workspace">
+    <section
+      className="qc-new-workspace"
+      data-testid="qc-new-workspace"
+      aria-labelledby="qc-workspace-title"
+    >
       <header className="qc-new-header">
         <div>
-          <h1>Quality control</h1>
+          <h2 id="qc-workspace-title">Quality control</h2>
           <p className="qc-new-stage-title">{stageTitle}</p>
           {stageDetail ? <p className="qc-new-header-detail">{stageDetail}</p> : null}
           <p className="qc-new-agent-identity">
@@ -813,6 +891,7 @@ export function QcWorkspace({
             <h2>The PM finished the selected changes</h2>
             <p>The plan remains inside QC. Send this revision directly to the reviewer.</p>
           </div>
+          <QcPlanVersion planVersion={planVersion} heading="Review the revised plan" />
           <div className="qc-new-decision-bar">
             <span>Plan version {planVersion?.version ?? "updated"}</span>
             <Button
@@ -849,9 +928,12 @@ export function QcWorkspace({
             <p>
               {review.status === "failed"
                 ? "The plan is unchanged. A fresh QC attempt will use the new finding-triage flow before the PM revises it."
-                : `${findings.length} finding${findings.length === 1 ? " remains" : "s remain"} in the review record.`}
+                : reviewRecordSummary(review, findings)}
             </p>
           </div>
+          {["converged", "cap_reached"].includes(review.status) ? (
+            <QcPlanVersion planVersion={planVersion} heading="Review the exact plan for approval" />
+          ) : null}
           <div className="qc-new-outcome-actions">
             {actions.approve && ["converged", "cap_reached"].includes(review.status) ? (
               <Button
@@ -861,7 +943,7 @@ export function QcWorkspace({
                   if (actions.approve) void onConfirmAction(actions.approve);
                 }}
               >
-                Approve plan and start development
+                Approve plan
               </Button>
             ) : null}
             {actions.repeat && ["failed", "cancelled", "cap_reached"].includes(review.status) ? (
@@ -908,8 +990,11 @@ export function QcWorkspace({
       ) : null}
 
       {!awaitingFindingDecision ? (
-        <details className="qc-new-record">
-          <summary>Review record</summary>
+        <section className="qc-new-record" aria-labelledby="qc-review-record-title">
+          <header>
+            <h2 id="qc-review-record-title">Current review record</h2>
+            <p>{reviewRecordSummary(review, findings)}</p>
+          </header>
           <div>
             <dl>
               <div>
@@ -941,6 +1026,7 @@ export function QcWorkspace({
                     response={
                       review.dispositions.find((item) => item.finding_id === finding.id) ?? null
                     }
+                    status={findingStatus(review, finding)}
                   />
                 ))}
               </ul>
@@ -978,8 +1064,8 @@ export function QcWorkspace({
               </details>
             ) : null}
           </div>
-        </details>
+        </section>
       ) : null}
-    </main>
+    </section>
   );
 }

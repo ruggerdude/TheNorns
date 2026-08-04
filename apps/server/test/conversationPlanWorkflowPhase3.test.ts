@@ -1108,6 +1108,33 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       owner.id,
       confirmation(scope, approval.id, "approve-exact-qc-result"),
     );
+    expect(kickoffInputs).toHaveLength(0);
+    expect(approved.effect).toMatchObject({
+      kind: "plan_approved",
+      transition_status: "created",
+      plan_version: {
+        id: saved.id,
+        status: "approved",
+        content_hash: saved.content_hash,
+      },
+      plan_review_id: seed.reviewId,
+      planning_run_id: qc.effect.planning_run_id,
+      execution: { status: "pending", started: null, detail: null },
+    });
+    if (approved.effect.kind !== "plan_approved") throw new Error("expected approved effect");
+    const executionConversationId = approved.effect.execution_conversation_id;
+    if (!executionConversationId) throw new Error("missing execution conversation");
+    expect(
+      await workflow.startDevelopment(owner.id, {
+        projectId,
+        workItemId: scope.workItemId,
+        conversationId: executionConversationId,
+      }),
+    ).toEqual({
+      status: "failed",
+      execution_started: false,
+      execution_detail: "runner unavailable after approval",
+    });
     expect(kickoffInputs).toEqual([
       {
         projectId,
@@ -1125,7 +1152,11 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
         decidedBy: owner.id,
       },
     ]);
-    expect(approved.effect).toMatchObject({
+    const settled = await workflow.confirm(
+      owner.id,
+      confirmation(scope, approval.id, "approve-exact-qc-result"),
+    );
+    expect(settled.effect).toMatchObject({
       kind: "plan_approved",
       transition_status: "created",
       plan_version: {
@@ -1141,7 +1172,6 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
         detail: "runner unavailable after approval",
       },
     });
-    if (approved.effect.kind !== "plan_approved") throw new Error("expected approved effect");
     expect(approved.effect.execution_conversation_id).toBeTruthy();
     expect(approved.effect.handoff_id).toBeTruthy();
     expect(approved.effect.kickoff_intent_id).toBeTruthy();
@@ -1207,8 +1237,6 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     expect(JSON.stringify(transition.rows[0]?.task_packages)).not.toContain(
       "PLANNING_TRANSCRIPT_SENTINEL_DO_NOT_FORWARD",
     );
-    const executionConversationId = approved.effect.execution_conversation_id;
-    if (!executionConversationId) throw new Error("missing execution conversation");
     const executionPrompt = await conversations.submitUserMessage(owner, {
       project_id: projectId,
       work_item_id: scope.workItemId,
@@ -1600,7 +1628,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     );
     expect(
       await workflow.confirm(owner.id, confirmation(scope, approval.id, "approve-exact-qc-result")),
-    ).toEqual(approved);
+    ).toEqual(settled);
     expect(kickoffInputs).toHaveLength(1);
   });
 
@@ -1786,12 +1814,21 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       action_id: approveMockup.action.id,
       state: "applied",
     });
+    const approved = await workflow.confirm(
+      owner.id,
+      confirmation(scope, ready.approval.id, "production-package-approve"),
+    );
+    expect(kickoffInputs).toHaveLength(0);
+    if (approved.effect.kind !== "plan_approved") throw new Error("expected approval effect");
+    const executionConversationId = approved.effect.execution_conversation_id;
+    if (!executionConversationId) throw new Error("missing production Development chat");
     failKickoffSettlement = true;
     await expect(
-      workflow.confirm(
-        owner.id,
-        confirmation(scope, ready.approval.id, "production-package-approve"),
-      ),
+      workflow.startDevelopment(owner.id, {
+        projectId,
+        workItemId: scope.workItemId,
+        conversationId: executionConversationId,
+      }),
     ).rejects.toThrow("injected kickoff settlement failure");
     failKickoffSettlement = false;
 
@@ -2365,9 +2402,18 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       kind: "plan_approved",
       transition_status: "created",
       plan_version: { id: ready.saved.id, status: "approved" },
+      execution: { status: "pending", started: null },
     });
-    expect(kickoffInputs).toHaveLength(1);
     expect(await workflow.confirm(owner.id, input)).toEqual(approved);
+    expect(kickoffInputs).toHaveLength(0);
+    if (approved.effect.kind !== "plan_approved") throw new Error("expected approval effect");
+    const executionConversationId = approved.effect.execution_conversation_id;
+    if (!executionConversationId) throw new Error("missing rollback Development chat");
+    await workflow.startDevelopment(owner.id, {
+      projectId,
+      workItemId: scope.workItemId,
+      conversationId: executionConversationId,
+    });
     expect(kickoffInputs).toHaveLength(1);
   });
 
@@ -2379,10 +2425,19 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       "kickoff-recovery",
     );
     const input = confirmation(scope, ready.approval.id, "kickoff-recovery-approval");
+    const approved = await workflow.confirm(owner.id, input);
+    expect(kickoffInputs).toHaveLength(0);
+    if (approved.effect.kind !== "plan_approved") throw new Error("expected approval effect");
+    const executionConversationId = approved.effect.execution_conversation_id;
+    if (!executionConversationId) throw new Error("missing recovery Development chat");
     failKickoffClaim = true;
-    await expect(workflow.confirm(owner.id, input)).rejects.toThrow(
-      "injected kickoff claim failure",
-    );
+    await expect(
+      workflow.startDevelopment(owner.id, {
+        projectId,
+        workItemId: scope.workItemId,
+        conversationId: executionConversationId,
+      }),
+    ).rejects.toThrow("injected kickoff claim failure");
     const pending = await pg.query<{
       status: string;
       attempt_count: number | string;
@@ -2522,6 +2577,15 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       plan_review_id: seed.reviewId,
     });
     expect(await workflow.confirm(owner.id, approvalInput)).toEqual(approved);
+    expect(kickoffInputs).toHaveLength(0);
+    if (approved.effect.kind !== "plan_approved") throw new Error("expected approval effect");
+    const executionConversationId = approved.effect.execution_conversation_id;
+    if (!executionConversationId) throw new Error("missing revised-plan Development chat");
+    await workflow.startDevelopment(owner.id, {
+      projectId,
+      workItemId: scope.workItemId,
+      conversationId: executionConversationId,
+    });
     expect(kickoffInputs).toHaveLength(1);
   });
 

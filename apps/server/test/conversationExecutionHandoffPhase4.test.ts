@@ -415,7 +415,67 @@ describe.sequential("conversation-first Phase 4 execution handoff", () => {
     }
   }, 60_000);
 
-  it("replays one archived transition and reconciles an expired kickoff lease after restart", async () => {
+  it("holds approved work until an explicit, idempotent development start", async () => {
+    const scope = await approvalReady("held-start");
+    let kickoffCalls = 0;
+    kickoff = async () => {
+      kickoffCalls += 1;
+      return { started: false, detail: "Explicit development start refused safely." };
+    };
+
+    const approved = await workflow.confirm(owner.id, scope.confirmation);
+    expect(approved.effect).toMatchObject({
+      kind: "plan_approved",
+      transition_status: "created",
+      execution: { status: "pending", started: null },
+    });
+    if (approved.effect.kind !== "plan_approved") throw new Error("expected approval effect");
+    const executionConversationId = required(
+      approved.effect.execution_conversation_id,
+      "missing execution conversation ID",
+    );
+    const kickoffIntentId = required(
+      approved.effect.kickoff_intent_id,
+      "missing kickoff intent ID",
+    );
+    expect(kickoffCalls).toBe(0);
+    expect(await workflow.reconcileKickoffIntents()).toBe(0);
+    expect(kickoffCalls).toBe(0);
+    expect(
+      (
+        await pg.query<{ status: string; attempt_count: number | string }>(
+          "SELECT status, attempt_count FROM conversation_kickoff_intents WHERE id=$1",
+          [kickoffIntentId],
+        )
+      ).rows[0],
+    ).toEqual({ status: "held", attempt_count: 0 });
+
+    const startScope = {
+      projectId,
+      workItemId: scope.workItemId,
+      conversationId: executionConversationId,
+    };
+    const started = await workflow.startDevelopment(owner.id, startScope);
+    expect(started).toEqual({
+      status: "refused",
+      execution_started: false,
+      execution_detail: "Explicit development start refused safely.",
+    });
+    expect(kickoffCalls).toBe(1);
+
+    expect(await workflow.startDevelopment(owner.id, startScope)).toEqual(started);
+    expect(kickoffCalls).toBe(1);
+    expect(
+      (
+        await pg.query<{ status: string; attempt_count: number | string }>(
+          "SELECT status, attempt_count FROM conversation_kickoff_intents WHERE id=$1",
+          [kickoffIntentId],
+        )
+      ).rows[0],
+    ).toEqual({ status: "refused", attempt_count: 1 });
+  });
+
+  it("replays one held approval and reconciles an expired kickoff lease after restart", async () => {
     const scope = await approvalReady("restart");
     let enterFirstKickoff!: () => void;
     let releaseFirstKickoff!: () => void;
@@ -432,9 +492,7 @@ describe.sequential("conversation-first Phase 4 execution handoff", () => {
       await firstKickoffRelease;
       return { started: false, detail: "Stale leased worker result." };
     };
-    const approvalPromise = workflow.confirm(owner.id, scope.confirmation);
-    await firstKickoffEntered;
-
+    const approvedBeforeStart = await workflow.confirm(owner.id, scope.confirmation);
     const pendingReplay = await workflow.confirm(owner.id, scope.confirmation);
     expect(pendingReplay.effect).toMatchObject({
       kind: "plan_approved",
@@ -455,6 +513,14 @@ describe.sequential("conversation-first Phase 4 execution handoff", () => {
         "missing kickoff intent ID",
       ),
     };
+    expect(kickoffCalls).toBe(0);
+    expect(await workflow.reconcileKickoffIntents()).toBe(0);
+    const startPromise = workflow.startDevelopment(owner.id, {
+      projectId,
+      workItemId: scope.workItemId,
+      conversationId: transitionIds.executionConversationId,
+    });
+    await firstKickoffEntered;
     expect(kickoffCalls).toBe(1);
     const leased = await pg.query<{
       status: string;
@@ -487,14 +553,15 @@ describe.sequential("conversation-first Phase 4 execution handoff", () => {
     });
     expect(await restarted.reconcileKickoffIntents()).toBe(1);
     releaseFirstKickoff();
-    const approved = await approvalPromise;
-    expect(approved.effect).toMatchObject({
+    const started = await startPromise;
+    expect(started).toEqual({
+      status: "refused",
+      execution_started: false,
+      execution_detail: "Restart reconciliation refused safely.",
+    });
+    expect(approvedBeforeStart.effect).toMatchObject({
       kind: "plan_approved",
-      execution: {
-        status: "refused",
-        started: false,
-        detail: "Restart reconciliation refused safely.",
-      },
+      execution: { status: "pending", started: null },
     });
     expect(kickoffCalls).toBe(2);
 

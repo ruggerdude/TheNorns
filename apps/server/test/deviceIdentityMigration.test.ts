@@ -11,6 +11,7 @@ import {
   DEVICE_MANAGEMENT_OBSERVATIONS_MIGRATION_NAME,
   DEVICE_REPOSITORY_ACCESS_MIGRATION_NAME,
   GATEWAY_DEVICE_AUTHORIZATION_MIGRATION_NAME,
+  HELD_EXECUTION_KICKOFF_MIGRATION_NAME,
   LEGACY_REPOSITORY_BINDING_CLAIMS_MIGRATION_NAME,
   PLANNING_LIVE_PROGRESS_MIGRATION_NAME,
   PROJECT_DESTROY_MIGRATION_NAME,
@@ -96,6 +97,7 @@ describe.sequential("device identity core migration", () => {
       QC_ROUTINE_ROUND_DEFAULT_MIGRATION_NAME,
       DEEPSEEK_PROVIDER_MIGRATION_NAME,
       PROJECT_DESTROY_MIGRATION_NAME,
+      HELD_EXECUTION_KICKOFF_MIGRATION_NAME,
     ]);
     expect(tail[0]?.sql).toContain("CREATE TABLE IF NOT EXISTS devices");
     expect(tail[4]?.sql).toContain("ADD COLUMN os_version TEXT");
@@ -125,6 +127,7 @@ describe.sequential("device identity core migration", () => {
     expect(tail[26]?.sql).toContain("ALTER COLUMN default_max_rounds SET DEFAULT 1");
     expect(tail[27]?.sql).toContain("ADD COLUMN agent_credential_mode TEXT");
     expect(tail[28]?.sql).toContain("norns_destroy_project");
+    expect(tail[29]?.sql).toContain("status IN ('held','pending')");
   });
 
   it("creates the five core tables, privacy-safe columns, and runtime grants", async () => {

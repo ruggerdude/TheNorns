@@ -522,6 +522,11 @@ export const PROJECT_DESTROY_MIGRATION_URL = new URL(
   "../../../drizzle/0081_project_destroy.sql",
   import.meta.url,
 );
+export const HELD_EXECUTION_KICKOFF_MIGRATION_NAME = "0082_held_execution_kickoff";
+export const HELD_EXECUTION_KICKOFF_MIGRATION_URL = new URL(
+  "../../../drizzle/0082_held_execution_kickoff.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -877,6 +882,10 @@ export async function loadDeepSeekProviderMigrationSql(): Promise<string> {
 
 export async function loadProjectDestroyMigrationSql(): Promise<string> {
   return readFile(PROJECT_DESTROY_MIGRATION_URL, "utf8");
+}
+
+export async function loadHeldExecutionKickoffMigrationSql(): Promise<string> {
+  return readFile(HELD_EXECUTION_KICKOFF_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1374,6 +1383,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: PROJECT_DESTROY_MIGRATION_NAME,
       sql: await loadProjectDestroyMigrationSql(),
+    },
+    {
+      name: HELD_EXECUTION_KICKOFF_MIGRATION_NAME,
+      sql: await loadHeldExecutionKickoffMigrationSql(),
     },
   ];
 }

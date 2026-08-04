@@ -365,6 +365,27 @@ export function registerConversationPlanRoutes(
     }
   });
 
+  app.post(`${base}/start-development`, async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    const { projectId, workItemId, conversationId } = request.params as {
+      projectId: string;
+      workItemId: string;
+      conversationId: string;
+    };
+    try {
+      return reply.send(
+        await options.workflow.startDevelopment(user.id, {
+          projectId,
+          workItemId,
+          conversationId,
+        }),
+      );
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
+
   app.post(`${base}/plan-reviews/:reviewId/cancel`, async (request, reply) => {
     const user = await options.requireUser(request, reply);
     if (!user) return;

@@ -273,8 +273,29 @@ describe.sequential("conversation plan workflow", () => {
     expect(approved).toEqual(replay);
     expect(approved.effect.kind).toBe("plan_approved");
     if (approved.effect.kind === "plan_approved") {
-      expect(approved.effect.execution.status).toBe("refused");
-      expect(approved.effect.execution.started).toBe(false);
+      expect(approved.effect.execution.status).toBe("pending");
+      expect(approved.effect.execution.started).toBeNull();
+      const executionConversationId = approved.effect.execution_conversation_id;
+      if (!executionConversationId) throw new Error("approval must create a Development chat");
+      expect(
+        (
+          await pg.query<{ status: string; attempt_count: number | string }>(
+            "SELECT status, attempt_count FROM conversation_kickoff_intents WHERE execution_conversation_id=$1",
+            [executionConversationId],
+          )
+        ).rows[0],
+      ).toEqual({ status: "held", attempt_count: 0 });
+      expect(
+        await workflow.startDevelopment(owner.id, {
+          projectId,
+          workItemId: saved.work_item.id,
+          conversationId: executionConversationId,
+        }),
+      ).toEqual({
+        status: "refused",
+        execution_started: false,
+        execution_detail: "Execution kickoff is not configured.",
+      });
     }
     const work = await pg.query<{
       status: string;

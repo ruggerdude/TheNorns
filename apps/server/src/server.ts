@@ -3185,6 +3185,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       },
     });
     app.setNotFoundHandler((req, reply) => {
+      if (req.url.startsWith("/assets/")) {
+        return reply.code(404).send({ error: "not_found" });
+      }
       if (req.raw.method === "GET" && !req.url.startsWith("/api") && !req.url.startsWith("/ws")) {
         return reply.sendFile("index.html");
       }

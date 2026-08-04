@@ -62,6 +62,14 @@ describe("POLISH P2 — webDist cache-control headers", () => {
     expect(asset.statusCode).toBe(200);
     expect(asset.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
 
+    const missingAsset = await server.app.inject({
+      method: "GET",
+      url: "/assets/index-OLDDEPLOY.js",
+    });
+    expect(missingAsset.statusCode).toBe(404);
+    expect(missingAsset.json()).toEqual({ error: "not_found" });
+    expect(missingAsset.headers["content-type"]).toContain("application/json");
+
     const favicon = await server.app.inject({ method: "GET", url: "/favicon.ico" });
     expect(favicon.statusCode).toBe(200);
     expect(favicon.headers["cache-control"]).toBe("public, max-age=3600");
