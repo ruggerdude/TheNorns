@@ -22,6 +22,12 @@ import type { V2ContentAddressedReferenceT } from "@norns/contracts";
 import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import { type TaskContextStore, taskContextDocumentId } from "./taskContextStore.js";
+import {
+  VERIFICATION_COMMAND_KEYS,
+  VERIFICATION_MANIFEST_KEY,
+  VERIFICATION_POLICY_FACT_KEYS,
+  verificationCommandsFromTaskPackage,
+} from "./verificationPolicy.js";
 
 /**
  * The frozen interface EXECUTION E1 and E2 build against.
@@ -50,15 +56,6 @@ export interface TaskKnowledgeContextSource {
  * cap is on the *briefing*, not on the work.
  */
 export const MAX_TOTAL_CONTEXT_BYTES = 256 * 1024;
-
-/** Repository-fact keys that describe how to build, test, and lint. */
-export const VERIFICATION_COMMAND_KEYS = ["build_command", "test_command", "lint_command"] as const;
-/** A committed manifest is an alternative complete verification policy. */
-export const VERIFICATION_MANIFEST_KEY = "verification_manifest";
-export const VERIFICATION_POLICY_FACT_KEYS = [
-  ...VERIFICATION_COMMAND_KEYS,
-  VERIFICATION_MANIFEST_KEY,
-] as const;
 
 // ---- failures ---------------------------------------------------------------
 
@@ -671,7 +668,12 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
         // mission plus repository/verification facts and dependency outcomes
         // remain necessary execution support and retain their fail-closed
         // checks.
-        const model = await this.gather(tx, taskId, true);
+        const model = await this.gather(
+          tx,
+          taskId,
+          true,
+          verificationCommandsFromTaskPackage(frozenPackage.package).length > 0,
+        );
         const mockupSupplements = await this.approvedMockupSupplements(
           tx,
           taskId,
@@ -912,6 +914,7 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
     project_id: string;
     content_hash: string;
     canonical_package: string;
+    package: unknown;
     context_document_id: string;
   } | null> {
     const binding = (
@@ -993,13 +996,14 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
         "Do not dispatch this task; restore the exact package bytes frozen at approval.",
       );
     }
-    return binding;
+    return { ...binding, package: parsed };
   }
 
   private async gather(
     tx: V2SqlExecutor,
     taskId: string,
     frozenConversationPackage: boolean,
+    frozenPackageHasVerification = false,
   ): Promise<ContextModel> {
     const taskResult = await tx.query<TaskRow>(
       `SELECT id, project_id, phase_id, objective_id, strategy_version_id, title, description,
@@ -1135,7 +1139,7 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
         policy: (VERIFICATION_POLICY_FACT_KEYS as readonly string[]).includes(key),
       };
     });
-    if (!facts.some((fact) => fact.policy)) {
+    if (!facts.some((fact) => fact.policy) && !frozenPackageHasVerification) {
       throw new TaskContextAssemblyError(
         "verification_commands_missing",
         `project ${project.id} has no ${VERIFICATION_POLICY_FACT_KEYS.join(", ")} repository fact`,

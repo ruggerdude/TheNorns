@@ -43,11 +43,11 @@
 // memory entry would be a worse failure than verifying with the commands that
 // did parse.
 import type { V2VerificationCommandT } from "@norns/contracts";
-import { VERIFICATION_COMMAND_KEYS } from "../execution/index.js";
+import {
+  VERIFICATION_COMMAND_KEYS,
+  tokenizeVerificationCommand,
+} from "../execution/verificationPolicy.js";
 import type { V2SqlExecutor } from "../persistence/v2/database.js";
-
-/** Characters that only mean anything to a shell. Their presence is a refusal. */
-const SHELL_METACHARACTERS = /[|&;<>()$`\\"'*?[\]{}~\n\r]/;
 
 interface MemoryFactRow {
   content: string;
@@ -72,49 +72,7 @@ function splitFact(content: string): { key: string; value: string } {
  * spaces (`pnpm exec vitest run "test/a b.test.ts"`). Everything else that a
  * shell would treat as syntax is a rejection, not an escape.
  */
-export function tokenizeVerificationCommand(value: string): [string, ...string[]] | null {
-  const trimmed = value.trim();
-  if (trimmed === "") return null;
-  const tokens: string[] = [];
-  let current = "";
-  let quote: '"' | "'" | null = null;
-  let started = false;
-  for (const character of trimmed) {
-    if (quote) {
-      if (character === quote) {
-        quote = null;
-        continue;
-      }
-      current += character;
-      continue;
-    }
-    if (character === '"' || character === "'") {
-      quote = character;
-      started = true;
-      continue;
-    }
-    if (character === " " || character === "\t") {
-      if (started) {
-        tokens.push(current);
-        current = "";
-        started = false;
-      }
-      continue;
-    }
-    // Outside quotes, anything a shell would interpret is refused rather than
-    // guessed at. Note this runs on the UNQUOTED remainder only, so a quoted
-    // argument containing a `*` is fine — it is a literal, which is what the
-    // runner's shell-free execFile will pass through.
-    if (SHELL_METACHARACTERS.test(character)) return null;
-    current += character;
-    started = true;
-  }
-  if (quote) return null; // Unterminated quote: the intent is not knowable.
-  if (started) tokens.push(current);
-  const [file, ...args] = tokens;
-  if (!file) return null;
-  return [file, ...args];
-}
+export { tokenizeVerificationCommand } from "../execution/verificationPolicy.js";
 
 export interface ProjectVerificationCommandResolution {
   commands: V2VerificationCommandT[];

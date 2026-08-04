@@ -11,6 +11,7 @@ import {
   v2CommandIdForDispatchJob,
 } from "@norns/contracts";
 import type { PostgresDeviceActionAuthorization } from "../devices/actionAuthorization.js";
+import { verificationCommandsFromTaskPackage } from "../execution/verificationPolicy.js";
 import {
   CLAUDE_CODE_SONNET_5_MAX_OUTPUT_TOKENS,
   GATEWAY_REQUEST_BODY_LIMIT_BYTES,
@@ -186,6 +187,7 @@ interface ConversationTaskPackageBindingRow {
   content_hash: string | null;
   context_document_id: string | null;
   byte_size: number | string | null;
+  package: unknown | null;
 }
 
 interface ConversationTaskPackageSupplementRow {
@@ -288,7 +290,8 @@ export class Phase4Coordinator {
                        )
                   ) AS pause_pending,
                   package_binding.package_id, package_binding.content_hash,
-                  package_binding.context_document_id, document.byte_size
+                  package_binding.context_document_id, document.byte_size,
+                  task_package.package
              FROM phases phase
              JOIN conversation_kickoff_intents intent
                ON intent.project_id=phase.project_id
@@ -301,6 +304,8 @@ export class Phase4Coordinator {
               AND package_binding.task_id=$3
              LEFT JOIN task_context_documents document
                ON document.id=package_binding.context_document_id
+             LEFT JOIN conversation_task_packages task_package
+               ON task_package.id=package_binding.package_id
             WHERE phase.project_id=$1 AND phase.id=$2
             ORDER BY intent.created_at DESC, intent.id DESC
             LIMIT 1`,
@@ -340,6 +345,7 @@ export class Phase4Coordinator {
               contentHash: packageScope.content_hash,
               contextDocumentId: packageScope.context_document_id,
               contextRef: taskPackageContextRefs[0],
+              package: packageScope.package,
             }
           : null;
       if (packageScope?.package_id && !taskPackageDispatch) {
@@ -712,8 +718,18 @@ export class Phase4Coordinator {
       //
       // Exact commands remain highest precedence. A manifest fact is carried
       // separately so the runner reads the full file at the tested commit and
-      // does not silently substitute its built-in hygiene-only default.
+      // does not silently substitute its built-in hygiene-only default. A
+      // greenfield conversation task may fall back to the explicit commands
+      // frozen in its human-approved package until the repository commits its
+      // own verification policy.
       const verification = await resolveProjectVerificationCommands(sql, input.project_id);
+      const packageVerificationCommands = taskPackageDispatch
+        ? verificationCommandsFromTaskPackage(taskPackageDispatch.package)
+        : [];
+      const verificationCommands =
+        verification.commands.length > 0 || verification.repository_manifest
+          ? verification.commands
+          : packageVerificationCommands;
       const command = V2DispatchCommand.parse({
         schema_version: 2,
         protocol_version: 2,
@@ -768,9 +784,7 @@ export class Phase4Coordinator {
         max_duration_seconds: input.max_duration_seconds,
         execution_mode: row.execution_mode,
         verification_policy_ref: row.verification_policy_ref,
-        ...(verification.commands.length > 0
-          ? { verification_commands: verification.commands }
-          : {}),
+        ...(verificationCommands.length > 0 ? { verification_commands: verificationCommands } : {}),
         ...(verification.repository_manifest
           ? { repository_verification_manifest: ".norns/verification.json" as const }
           : {}),

@@ -1719,6 +1719,23 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     });
 
     const real = await productionExecutionKickoff();
+    await pg.query(
+      `INSERT INTO project_memory_entries (
+         id, project_id, category, content, provenance, confidence, version, status
+       ) VALUES (
+         'conversation-package-language',$1,'repository_fact','language: TypeScript',
+         'repository_ingestion',1,1,'active'
+       ) ON CONFLICT (id) DO NOTHING`,
+      [projectId],
+    );
+    await pg.query(
+      `DELETE FROM project_memory_entries
+        WHERE id IN (
+          'conversation-package-build_command',
+          'conversation-package-test_command',
+          'conversation-package-lint_command'
+        )`,
+    );
     kickoff = (input) => real.kickoff.kickoff(input);
     const ready = await reviewReady(scope, plan(), "production-package");
     if (ready.qc.effect.kind !== "qc_started") throw new Error("expected QC kickoff");
@@ -2006,6 +2023,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
         byte_size: number;
         storage_ref: string;
       };
+      verification_commands: Array<{ name: string; command: string[] }>;
     };
     expect(envelope.task_package_id).toBe(evidence.package_id);
     expect(envelope.task_package_content_hash).toBe(evidence.package_hash);
@@ -2014,6 +2032,12 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
         (reference) => reference.artifact_id === evidence.context_document_id,
       ),
     );
+    expect(envelope.verification_commands).toEqual([
+      {
+        name: "AC-1",
+        command: ["pnpm", "--filter", "@norns/server", "test"],
+      },
+    ]);
 
     const implementationCommit = "f".repeat(40);
     const verifiedAt = "2026-07-27T16:10:00.000Z";

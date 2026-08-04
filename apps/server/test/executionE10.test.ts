@@ -32,6 +32,7 @@ import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
 import { Phase4DispatchRepository } from "../src/coordinator/phase4Dispatcher.js";
 import { Phase4EventProcessor } from "../src/coordinator/phase4EventProcessor.js";
 import { tokenizeVerificationCommand } from "../src/coordinator/verificationCommandSource.js";
+import { verificationCommandsFromTaskPackage } from "../src/execution/verificationPolicy.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 import { AttentionService } from "../src/projects/attentionService.js";
@@ -299,6 +300,27 @@ describe.sequential("EXECUTION E10 — verification commands reach the runner", 
     // that admits it is the same trust that already ran a coding agent with
     // write access in this worktree, not something this function grants.
     expect(tokenizeVerificationCommand("rm -rf /tmp/x")).toEqual(["rm", "-rf", "/tmp/x"]);
+  });
+
+  it("extracts only explicit shell-free verification from an immutable task package", () => {
+    expect(
+      verificationCommandsFromTaskPackage({
+        module: {
+          execution: { test_commands: ["pnpm test", "pnpm test"] },
+          acceptance: [
+            { id: "build", verification_type: "command", verification: "npm run build" },
+            { id: "e2e", verification_type: "test", verification: "npx playwright test" },
+            { id: "inspect", verification_type: "inspection", verification: "Review the UI" },
+            { id: "prose", verification_type: "test", verification: "Review the output" },
+            { id: "shell", verification_type: "command", verification: "npm test && npm build" },
+          ],
+        },
+      }),
+    ).toEqual([
+      { name: "task-package-test-1", command: ["pnpm", "test"] },
+      { name: "build", command: ["npm", "run", "build"] },
+      { name: "e2e", command: ["npx", "playwright", "test"] },
+    ]);
   });
 });
 

@@ -5,14 +5,18 @@ export {
   RelationalTaskContextAssembler,
   TASK_CONTEXT_ROUTE_PREFIX,
   TaskContextAssemblyError,
-  VERIFICATION_COMMAND_KEYS,
-  VERIFICATION_MANIFEST_KEY,
-  VERIFICATION_POLICY_FACT_KEYS,
   type TaskContextAssembler,
   type TaskContextAssemblerOptions,
   type TaskContextAssemblyCode,
   type TaskKnowledgeContextSource,
 } from "./taskContextAssembler.js";
+export {
+  VERIFICATION_COMMAND_KEYS,
+  VERIFICATION_MANIFEST_KEY,
+  VERIFICATION_POLICY_FACT_KEYS,
+  tokenizeVerificationCommand,
+  verificationCommandsFromTaskPackage,
+} from "./verificationPolicy.js";
 export {
   TASK_CONTEXT_MEDIA_TYPE,
   TaskContextStore,
