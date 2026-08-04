@@ -142,6 +142,7 @@ import {
 import {
   type ExecutionModelCapability,
   activateProjectRepository,
+  analyzeProjectRepository,
   getExecutionModelCapabilities,
   retryPlanningRunExecution,
 } from "./phaseTabApi";
@@ -4928,12 +4929,12 @@ function ConversationThread({
     ? ([...actionContext.effects.values()].find(isRecoverableExecutionEffect) ?? null)
     : null;
   const retryApprovedExecution = useCallback(
-    async (reconnectRepository = false) => {
+    async (preparation?: "activate" | "analyze") => {
       if (!recoverableExecutionEffect || executionRetryBusy) return;
       setExecutionRetryBusy(true);
       setExecutionRetryError(null);
       try {
-        if (reconnectRepository) {
+        if (preparation === "activate") {
           const activation = await activateProjectRepository(detail.work_item.project_id);
           if (!activation.activated) {
             setExecutionRetryReport({
@@ -4944,6 +4945,9 @@ function ConversationThread({
             });
             return;
           }
+        }
+        if (preparation === "analyze") {
+          await analyzeProjectRepository(detail.work_item.project_id);
         }
         const result = await retryPlanningRunExecution(
           detail.work_item.project_id,
@@ -5500,9 +5504,16 @@ function ConversationThread({
                         <Button
                           data-testid="conversation-activate-retry-execution"
                           disabled={executionRetryBusy}
-                          onClick={() => void retryApprovedExecution(true)}
+                          onClick={() => void retryApprovedExecution("activate")}
                         >
                           Reconnect GitHub and retry
+                        </Button>
+                        <Button
+                          data-testid="conversation-analyze-retry-execution"
+                          disabled={executionRetryBusy}
+                          onClick={() => void retryApprovedExecution("analyze")}
+                        >
+                          Analyze repository and retry
                         </Button>
                       </div>
                     ) : null}

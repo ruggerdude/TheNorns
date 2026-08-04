@@ -342,6 +342,17 @@ export function activateProjectRepository(projectId: string): Promise<ProjectAct
   return postJson(`/api/v2/projects/${projectId}/activate`, {});
 }
 
+export interface RepositoryAnalysisResult {
+  architecture_revision_id: string;
+  architecture_revision: number;
+  replayed: boolean;
+  repository_revision: string;
+}
+
+export function analyzeProjectRepository(projectId: string): Promise<RepositoryAnalysisResult> {
+  return postJson(`/api/v2/projects/${projectId}/analyze-repository`, {});
+}
+
 /**
  * Poll per-phase execution progress. Project-scoped — the backend's
  * GET /api/v2/projects/:id/execution-status (AttentionService

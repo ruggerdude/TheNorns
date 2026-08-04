@@ -3493,6 +3493,7 @@ describe("conversation workspace", () => {
       updated_at: now,
     };
     let activationCalls = 0;
+    let analysisCalls = 0;
     let retryCalls = 0;
     vi.stubGlobal(
       "fetch",
@@ -3511,11 +3512,28 @@ describe("conversation workspace", () => {
           activationCalls += 1;
           return Response.json({ project_id: projectId, activated: true, blockers: [] });
         }
+        if (url.endsWith(`/projects/${projectId}/analyze-repository`) && init?.method === "POST") {
+          analysisCalls += 1;
+          return Response.json({
+            architecture_revision_id: "architecture-revision-1",
+            architecture_revision: 1,
+            replayed: false,
+            repository_revision: "abc123",
+          });
+        }
         if (
           url.endsWith("/planning-runs/planning-run-retry/execution") &&
           init?.method === "POST"
         ) {
           retryCalls += 1;
+          if (retryCalls === 1) {
+            return Response.json({
+              execution: {
+                started: false,
+                detail: "Repository context recorded. Retry available.",
+              },
+            });
+          }
           return Response.json({
             execution: { started: true, detail: "4 tasks dispatched." },
           });
@@ -3535,14 +3553,22 @@ describe("conversation workspace", () => {
 
     expect(await screen.findByTestId("conversation-retry-execution")).toBeInTheDocument();
     const reconnect = screen.getByTestId("conversation-activate-retry-execution");
+    const analyze = screen.getByTestId("conversation-analyze-retry-execution");
     expect(screen.getByText("Coordinator unavailable.")).toBeInTheDocument();
+    await user.click(analyze);
+
+    expect(
+      await screen.findByText("Repository context recorded. Retry available."),
+    ).toBeInTheDocument();
+    expect(analysisCalls).toBe(1);
+    expect(retryCalls).toBe(1);
     await user.click(reconnect);
 
     expect(await screen.findByText("4 tasks dispatched.")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Development started" })).toBeInTheDocument();
     expect(screen.queryByTestId("conversation-retry-execution")).not.toBeInTheDocument();
     expect(activationCalls).toBe(1);
-    expect(retryCalls).toBe(1);
+    expect(retryCalls).toBe(2);
   });
 
   it("submits the visible parts through the AI SDK stream and hides the welcome immediately", async () => {
