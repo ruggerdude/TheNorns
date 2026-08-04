@@ -139,6 +139,8 @@ interface RuntimeSchemaPosture {
   qc_restart_checkpoint_columns: boolean;
   qc_revision_format_column: boolean;
   qc_finding_decisions_column: boolean;
+  conversation_kickoff_status_supports_held: boolean;
+  conversation_kickoff_lifecycle_supports_held: boolean;
 }
 
 /**
@@ -410,7 +412,33 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
                WHERE table_schema='public'
                  AND table_name='conversation_plan_reviews'
                  AND column_name='finding_decisions'
-            ) AS qc_finding_decisions_column`,
+            ) AS qc_finding_decisions_column,
+            EXISTS (
+              SELECT 1
+                FROM pg_constraint AS constraint_record
+                JOIN pg_class AS relation
+                  ON relation.oid=constraint_record.conrelid
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid=relation.relnamespace
+               WHERE namespace.nspname='public'
+                 AND relation.relname='conversation_kickoff_intents'
+                 AND constraint_record.conname='conversation_kickoff_intents_status_check'
+                 AND constraint_record.contype='c'
+                 AND pg_get_constraintdef(constraint_record.oid) LIKE '%''held''%'
+            ) AS conversation_kickoff_status_supports_held,
+            EXISTS (
+              SELECT 1
+                FROM pg_constraint AS constraint_record
+                JOIN pg_class AS relation
+                  ON relation.oid=constraint_record.conrelid
+                JOIN pg_namespace AS namespace
+                  ON namespace.oid=relation.relnamespace
+               WHERE namespace.nspname='public'
+                 AND relation.relname='conversation_kickoff_intents'
+                 AND constraint_record.conname='conversation_kickoff_intents_lifecycle_check'
+                 AND constraint_record.contype='c'
+                 AND pg_get_constraintdef(constraint_record.oid) LIKE '%''held''%'
+            ) AS conversation_kickoff_lifecycle_supports_held`,
   );
   const posture = result.rows[0];
   const missing = [
@@ -493,6 +521,12 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
     ...(!posture?.qc_revision_format_column ? ["conversation_plan_reviews.revision_format"] : []),
     ...(!posture?.qc_finding_decisions_column
       ? ["conversation_plan_reviews.finding_decisions"]
+      : []),
+    ...(!posture?.conversation_kickoff_status_supports_held
+      ? ["conversation_kickoff_intents_status_check (must allow held)"]
+      : []),
+    ...(!posture?.conversation_kickoff_lifecycle_supports_held
+      ? ["conversation_kickoff_intents_lifecycle_check (must allow held)"]
       : []),
   ];
   if (missing.length > 0) {

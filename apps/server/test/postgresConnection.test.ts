@@ -88,73 +88,99 @@ describe("PostgreSQL connection security", () => {
   });
 });
 
+const currentRuntimeSchemaPosture = {
+  planning_mode: true,
+  knowledge_packages: "knowledge_packages",
+  agent_execution_registrations: "agent_execution_registrations",
+  agent_handoffs: "agent_handoffs",
+  knowledge_deltas: "knowledge_deltas",
+  agent_reasoning_effort: true,
+  global_rule_settings: "global_rule_settings",
+  ai_usage_events: "ai_usage_events",
+  project_owner_user_id: true,
+  project_members: "project_members",
+  usage_budget_policies: "usage_budget_policies",
+  ai_usage_calibration_observations: "ai_usage_calibration_observations",
+  shadow_read_recorded_order: true,
+  onboarding_submissions: "project_onboarding_submissions",
+  onboarding_repository_intents: "project_onboarding_repository_intents",
+  onboarding_candidate_columns: true,
+  conversation_domain_complete: true,
+  conversation_stream_lifecycle: "conversation_stream_lifecycle_v1",
+  conversation_plan_workflow: "conversation_plan_workflow_v1",
+  conversation_execution_handoff: "conversation_execution_handoff_v1",
+  conversation_human_steering: "conversation_human_steering_v1",
+  conversation_mockups_dashboard: "conversation_mockups_dashboard_v1",
+  conversation_inference_reservations: "conversation_inference_reservations",
+  conversation_plan_review_mode: true,
+  conversation_organization: "conversation_organization_v1",
+  conversation_message_branches: "conversation_message_branches_v1",
+  devices: "devices",
+  device_credentials: "device_credentials",
+  device_authorization_requests: "device_authorization_requests",
+  device_repository_registrations: "device_repository_registrations",
+  project_device_repository_grants: "project_device_repository_grants",
+  legacy_repository_binding_claims: "legacy_repository_binding_claims",
+  device_http_request_replays: "device_http_request_replays",
+  dispatch_context_runner_generation: true,
+  dispatch_context_revoked_at: true,
+  device_run_cancellations: "device_run_cancellations",
+  device_run_cancellation_idempotency_key: true,
+  device_revocations: "device_revocations",
+  gateway_authentication_subject: true,
+  gateway_device_credential_id: true,
+  device_os_version: true,
+  device_agent_version: true,
+  device_agent_protocol_version: true,
+  device_agent_capabilities: true,
+  device_last_seen_at: true,
+  device_publication_permits: "device_publication_permits",
+  qc_pause_points_columns: true,
+  work_plan_version_origin: true,
+  qc_adjudication_columns: true,
+  qc_last_human_message_at: true,
+  qc_mode_provenance_columns: true,
+  planning_live_progress_columns: true,
+  qc_restart_checkpoint_columns: true,
+  qc_revision_format_column: true,
+  qc_finding_decisions_column: true,
+  conversation_kickoff_status_supports_held: true,
+  conversation_kickoff_lifecycle_supports_held: true,
+} as const;
+
 describe("PostgreSQL runtime schema compatibility", () => {
   it("accepts the complete current runtime schema", async () => {
     const compatible = {
       query: async () => ({
+        rows: [currentRuntimeSchemaPosture],
+      }),
+    };
+
+    await expect(assertCurrentRuntimeSchema(compatible as never)).resolves.toBeUndefined();
+  });
+
+  it("refuses kickoff constraints that predate held execution intents", async () => {
+    const oldKickoffConstraints = {
+      query: async () => ({
         rows: [
           {
-            planning_mode: true,
-            knowledge_packages: "knowledge_packages",
-            agent_execution_registrations: "agent_execution_registrations",
-            agent_handoffs: "agent_handoffs",
-            knowledge_deltas: "knowledge_deltas",
-            agent_reasoning_effort: true,
-            global_rule_settings: "global_rule_settings",
-            ai_usage_events: "ai_usage_events",
-            project_owner_user_id: true,
-            project_members: "project_members",
-            usage_budget_policies: "usage_budget_policies",
-            ai_usage_calibration_observations: "ai_usage_calibration_observations",
-            shadow_read_recorded_order: true,
-            onboarding_submissions: "project_onboarding_submissions",
-            onboarding_repository_intents: "project_onboarding_repository_intents",
-            onboarding_candidate_columns: true,
-            conversation_domain_complete: true,
-            conversation_stream_lifecycle: "conversation_stream_lifecycle_v1",
-            conversation_plan_workflow: "conversation_plan_workflow_v1",
-            conversation_execution_handoff: "conversation_execution_handoff_v1",
-            conversation_human_steering: "conversation_human_steering_v1",
-            conversation_mockups_dashboard: "conversation_mockups_dashboard_v1",
-            conversation_inference_reservations: "conversation_inference_reservations",
-            conversation_plan_review_mode: true,
-            conversation_organization: "conversation_organization_v1",
-            conversation_message_branches: "conversation_message_branches_v1",
-            devices: "devices",
-            device_credentials: "device_credentials",
-            device_authorization_requests: "device_authorization_requests",
-            device_repository_registrations: "device_repository_registrations",
-            project_device_repository_grants: "project_device_repository_grants",
-            legacy_repository_binding_claims: "legacy_repository_binding_claims",
-            device_http_request_replays: "device_http_request_replays",
-            dispatch_context_runner_generation: true,
-            dispatch_context_revoked_at: true,
-            device_run_cancellations: "device_run_cancellations",
-            device_run_cancellation_idempotency_key: true,
-            device_revocations: "device_revocations",
-            gateway_authentication_subject: true,
-            gateway_device_credential_id: true,
-            device_os_version: true,
-            device_agent_version: true,
-            device_agent_protocol_version: true,
-            device_agent_capabilities: true,
-            device_last_seen_at: true,
-            device_publication_permits: "device_publication_permits",
-            qc_pause_points_columns: true,
-            work_plan_version_origin: true,
-            qc_adjudication_columns: true,
-            qc_last_human_message_at: true,
-            qc_mode_provenance_columns: true,
-            planning_live_progress_columns: true,
-            qc_restart_checkpoint_columns: true,
-            qc_revision_format_column: true,
-            qc_finding_decisions_column: true,
+            ...currentRuntimeSchemaPosture,
+            conversation_kickoff_status_supports_held: false,
+            conversation_kickoff_lifecycle_supports_held: false,
           },
         ],
       }),
     };
 
-    await expect(assertCurrentRuntimeSchema(compatible as never)).resolves.toBeUndefined();
+    await expect(assertCurrentRuntimeSchema(oldKickoffConstraints as never)).rejects.toMatchObject({
+      code: "runtime_schema_outdated",
+    });
+    await expect(assertCurrentRuntimeSchema(oldKickoffConstraints as never)).rejects.toThrow(
+      /conversation_kickoff_intents_status_check \(must allow held\)/,
+    );
+    await expect(assertCurrentRuntimeSchema(oldKickoffConstraints as never)).rejects.toThrow(
+      /conversation_kickoff_intents_lifecycle_check \(must allow held\)/,
+    );
   });
 
   it("refuses to start when the QC pause-point migrations have not been applied", async () => {
@@ -269,7 +295,9 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "conversation_plan_reviews.last_human_message_at, " +
         "conversation_plan_reviews qc_mode provenance columns, planning live_progress columns, " +
         "QC restart checkpoint columns, conversation_plan_reviews.revision_format, " +
-        "conversation_plan_reviews.finding_decisions. " +
+        "conversation_plan_reviews.finding_decisions, " +
+        "conversation_kickoff_intents_status_check (must allow held), " +
+        "conversation_kickoff_intents_lifecycle_check (must allow held). " +
         "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
     });
   });
@@ -345,7 +373,9 @@ describe("PostgreSQL runtime schema compatibility", () => {
           "conversation_plan_reviews.last_human_message_at, " +
           "conversation_plan_reviews qc_mode provenance columns, planning live_progress columns, " +
           "QC restart checkpoint columns, conversation_plan_reviews.revision_format, " +
-          "conversation_plan_reviews.finding_decisions. " +
+          "conversation_plan_reviews.finding_decisions, " +
+          "conversation_kickoff_intents_status_check (must allow held), " +
+          "conversation_kickoff_intents_lifecycle_check (must allow held). " +
           "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
       },
     );
@@ -425,7 +455,9 @@ describe("PostgreSQL runtime schema compatibility", () => {
         "conversation_plan_reviews.last_human_message_at, " +
         "conversation_plan_reviews qc_mode provenance columns, planning live_progress columns, " +
         "QC restart checkpoint columns, conversation_plan_reviews.revision_format, " +
-        "conversation_plan_reviews.finding_decisions. " +
+        "conversation_plan_reviews.finding_decisions, " +
+        "conversation_kickoff_intents_status_check (must allow held), " +
+        "conversation_kickoff_intents_lifecycle_check (must allow held). " +
         "Apply them with: node apps/server/dist/applyMigrations.js (DATABASE_URL must be set).",
     });
   });
