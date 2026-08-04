@@ -3555,9 +3555,9 @@ function ConversationThread({
   initialAttachments?: AttachmentDescriptor[];
   onInitialMessageStarted?: () => void;
   onEditMessage: (sourceMessageId: string, text: string) => Promise<void>;
-  onOpenConversation: (conversationId: string) => void;
+  onOpenConversation: (conversationId: string) => Promise<void>;
   onConversationModelChanged: (conversation: V2WorkConversationT) => void;
-  onRefresh: () => void;
+  onRefresh: () => Promise<void>;
   onRefreshSoft: () => void;
   onUnauthorized: () => void;
 }): React.ReactElement {
@@ -4032,7 +4032,7 @@ function ConversationThread({
             );
           }
         }
-        onRefresh();
+        await onRefresh();
       } catch (caught) {
         if (caught instanceof UnauthorizedError) {
           onUnauthorized();
@@ -4109,7 +4109,7 @@ function ConversationThread({
         } catch {
           // The exact user-authored action is already durable.
         }
-        onRefresh();
+        await onRefresh();
         return true;
       } catch (caught) {
         if (caught instanceof UnauthorizedError) {
@@ -4185,7 +4185,7 @@ function ConversationThread({
           next.delete(review.id);
           return next;
         });
-        onRefresh();
+        await onRefresh();
       } catch (caught) {
         if (caught instanceof UnauthorizedError) {
           onUnauthorized();
@@ -4203,7 +4203,7 @@ function ConversationThread({
             next.delete(review.id);
             return next;
           });
-          onRefresh();
+          await onRefresh();
           return;
         }
         onFailure?.(caught);
@@ -4717,7 +4717,7 @@ function ConversationThread({
         detail.work_item.id,
         detail.conversation.id,
       );
-      onRefresh();
+      await onRefresh();
     } catch (caught) {
       if (caught instanceof UnauthorizedError) {
         onUnauthorized();
@@ -4784,9 +4784,9 @@ function ConversationThread({
           } catch {
             // The exact target came from the approval response, so routing can continue.
           }
-          onOpenConversation(targetId);
+          await onOpenConversation(targetId);
         } else {
-          onRefresh();
+          await onRefresh();
         }
       } catch (caught) {
         if (caught instanceof UnauthorizedError) {
@@ -6134,34 +6134,22 @@ export function ConversationWorkspace({
   const openConversationById = useCallback(
     async (conversationId: string) => {
       setShowNew(false);
+      setConversationListOpen(false);
+      setDetail(null);
+      setSelected(null);
       setLoadingDetail(true);
+      initialSelectionHandled.current = conversationId;
       try {
-        const nextGroups = await loadGroups();
-        const listed = nextGroups
-          ?.flatMap((group) =>
-            group.conversations.map((conversation) => ({
-              workItemId: group.work_item.id,
-              conversation,
-            })),
-          )
-          .find((candidate) => candidate.conversation.id === conversationId);
-        if (listed) {
-          setDetail(null);
-          setSelected({
-            workItemId: listed.workItemId,
-            conversationId: listed.conversation.id,
-          });
-        } else {
-          const resolved = await resolveConversation(projectId, conversationId);
-          setDetail(resolved);
-          setSelected({
-            workItemId: resolved.work_item.id,
-            conversationId: resolved.conversation.id,
-          });
-          setThreadVersion((version) => version + 1);
-        }
+        const resolved = await resolveConversation(projectId, conversationId);
+        setDetail(resolved);
+        setSelected({
+          workItemId: resolved.work_item.id,
+          conversationId: resolved.conversation.id,
+        });
+        setThreadVersion((version) => version + 1);
         callbacks.current.onConversationSelected?.(conversationId);
         setError(null);
+        void loadGroups();
       } catch (caught) {
         handleError(caught);
       } finally {
@@ -6358,8 +6346,8 @@ export function ConversationWorkspace({
     }
   };
 
-  const refresh = useCallback(() => {
-    void Promise.all([loadDetail(true), loadGroups(), loadNavigation()]);
+  const refresh = useCallback(async () => {
+    await Promise.all([loadDetail(true), loadGroups(), loadNavigation()]);
   }, [loadDetail, loadGroups, loadNavigation]);
 
   const refreshSoft = useCallback(() => {
@@ -7251,7 +7239,7 @@ export function ConversationWorkspace({
                 setInitialMessage(null);
               }}
               onEditMessage={editConversationMessage}
-              onOpenConversation={(conversationId) => void openConversationById(conversationId)}
+              onOpenConversation={openConversationById}
               onConversationModelChanged={(conversation) => {
                 setDetail((current) => (current ? { ...current, conversation } : current));
                 setGroups(

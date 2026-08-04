@@ -5091,6 +5091,11 @@ describe("conversation workspace", () => {
     };
     let approved = false;
     let developmentStarted = false;
+    let developmentStartRequests = 0;
+    let releaseDevelopmentRefresh!: () => void;
+    const developmentRefresh = new Promise<void>((resolve) => {
+      releaseDevelopmentRefresh = resolve;
+    });
     const selected = vi.fn();
     vi.stubGlobal(
       "fetch",
@@ -5126,6 +5131,7 @@ describe("conversation workspace", () => {
           url.endsWith(`/conversations/${execution.id}`) &&
           (!init?.method || init.method === "GET")
         ) {
+          if (developmentStarted) await developmentRefresh;
           return detailResponse(executionHistory, null, null, {
             workItem: {
               ...workItem,
@@ -5146,6 +5152,7 @@ describe("conversation workspace", () => {
           });
         }
         if (url.endsWith(`/conversations/${execution.id}/start-development`)) {
+          developmentStartRequests += 1;
           developmentStarted = true;
           return Response.json({
             status: "succeeded",
@@ -5196,6 +5203,15 @@ describe("conversation workspace", () => {
       screen.getByRole("region", { name: "Approved plan ready for development" }),
     ).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Start development" }));
+    await waitFor(() => expect(developmentStartRequests).toBe(1));
+    const busyStart = screen.getByRole("button", { name: "Starting development…" });
+    expect(busyStart).toBeDisabled();
+    fireEvent.click(busyStart);
+    expect(developmentStartRequests).toBe(1);
+    await act(async () => {
+      releaseDevelopmentRefresh();
+      await developmentRefresh;
+    });
     await waitFor(() =>
       expect(
         screen.queryByRole("region", { name: "Approved plan ready for development" }),
