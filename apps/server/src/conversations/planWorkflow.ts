@@ -149,6 +149,7 @@ export interface ConversationDevelopmentStart {
   status: "held" | "pending" | "leased" | "succeeded" | "refused" | "failed";
   execution_started: boolean | null;
   execution_detail: string | null;
+  planning_run_id: string;
 }
 
 interface ActionRow {
@@ -3395,7 +3396,7 @@ export class ConversationPlanWorkflowService {
     return this.transactions.transaction(async (tx) => {
       const result = (
         await tx.query<ConversationDevelopmentStart>(
-          `SELECT status, execution_started, execution_detail
+          `SELECT status, execution_started, execution_detail, planning_run_id
              FROM conversation_kickoff_intents
             WHERE id=$1`,
           [intentId],

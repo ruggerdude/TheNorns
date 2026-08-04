@@ -145,6 +145,7 @@ interface PhaseBindingRow {
   binding_type: "local_runner" | "github" | null;
   binding_status: string | null;
   binding_runner_id: string | null;
+  binding_device_id: string | null;
   installation_ready: boolean | null;
 }
 
@@ -195,12 +196,20 @@ export class PhaseLaunchService {
                 binding.binding_type AS binding_type,
                 binding.status AS binding_status,
                 binding.runner_id AS binding_runner_id,
+                registration.device_id AS binding_device_id,
                 binding.installation_ready AS installation_ready
            FROM phases p
            JOIN projects proj ON proj.id = p.project_id
            LEFT JOIN repository_bindings binding
              ON binding.id = proj.primary_repository_binding_id
             AND binding.project_id = proj.id
+           LEFT JOIN project_device_repository_grants grant_record
+             ON grant_record.id = binding.project_device_repository_grant_id
+            AND grant_record.project_id = binding.project_id
+            AND grant_record.state = 'active'
+           LEFT JOIN device_repository_registrations registration
+             ON registration.id = grant_record.repository_registration_id
+            AND registration.state = 'active'
           WHERE p.id = $2 AND p.project_id = $1`,
         [projectId, phaseId],
       );
@@ -238,7 +247,11 @@ export class PhaseLaunchService {
         "Grant the Norns GitHub App installation access to this repository.",
       );
     }
-    if (row.binding_status !== "connected") {
+    const deviceBackedLocal = row.binding_type === "local_runner" && row.binding_device_id !== null;
+    const bindingReady =
+      row.binding_status === "connected" ||
+      (deviceBackedLocal && ["degraded", "disconnected"].includes(row.binding_status ?? ""));
+    if (!bindingReady) {
       throw new PhaseLaunchError(
         "unverified_binding",
         `the project's execution binding is ${row.binding_status ?? "unknown"}, not connected.`,
@@ -479,14 +492,15 @@ export class PhaseLaunchService {
           result = withActions;
           runnerId = withActions.actions.runner_id;
         } else {
-          const resolved = this.resolveLocalRunner(row.binding_runner_id ?? "");
+          const lookupRunnerId = row.binding_device_id ?? row.binding_runner_id ?? "";
+          const resolved = this.resolveLocalRunner(lookupRunnerId);
           if (!resolved) {
             blocked.push({
               task_id: task.task_id,
               task_title: task.task_title,
               outcome: "blocked",
               blocked_code: "unverified_binding",
-              blocked_reason: `local runner ${row.binding_runner_id ?? "(none)"} has never paired with this relay.`,
+              blocked_reason: `local runner ${lookupRunnerId || "(none)"} is not connected to this relay.`,
             });
             continue;
           }

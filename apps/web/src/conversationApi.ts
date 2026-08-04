@@ -382,6 +382,7 @@ export interface ConversationDevelopmentStart {
   status: "held" | "pending" | "leased" | "succeeded" | "refused" | "failed";
   execution_started: boolean | null;
   execution_detail: string | null;
+  planning_run_id: string;
 }
 
 export function startConversationDevelopment(

@@ -295,6 +295,7 @@ describe.sequential("conversation plan workflow", () => {
         status: "refused",
         execution_started: false,
         execution_detail: "Execution kickoff is not configured.",
+        planning_run_id: sent.effect.planning_run_id,
       });
     }
     const work = await pg.query<{

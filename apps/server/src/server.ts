@@ -261,7 +261,10 @@ import {
   AllocationRecommendationError,
   recommendProjectAllocation,
 } from "./planning/allocationRecommendation.js";
-import { conversationHandoffIdForPlanningRun } from "./planning/executionRecovery.js";
+import {
+  conversationHandoffIdForPlanningRun,
+  reconcileConversationExecutionRetry,
+} from "./planning/executionRecovery.js";
 import {
   PLANNING_RUN_DEFAULT_PM_MODEL,
   PLANNING_RUN_DEFAULT_REVIEWER_MODEL,
@@ -7169,16 +7172,15 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             });
           }
           let execution: { started: boolean; detail: string } | null = null;
-          const kickoff = options.planningRuns?.executionKickoff;
-          if (kickoff) {
+          const planningRuns = options.planningRuns;
+          const kickoff = planningRuns?.executionKickoff;
+          if (kickoff && planningRuns) {
             try {
-              const handoffId = options.planningRuns
-                ? await conversationHandoffIdForPlanningRun(
-                    options.planningRuns.transactions,
-                    id,
-                    runId,
-                  )
-                : undefined;
+              const handoffId = await conversationHandoffIdForPlanningRun(
+                planningRuns.transactions,
+                id,
+                runId,
+              );
               execution = await kickoff.kickoff({
                 projectId: id,
                 planningRunId: runId,
@@ -7186,6 +7188,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                 staffing: run.decision.staffing ?? null,
                 decidedBy: user.id,
               });
+              execution = await reconcileConversationExecutionRetry(
+                planningRuns.transactions,
+                id,
+                runId,
+                execution,
+              );
             } catch (error) {
               execution = {
                 started: false,

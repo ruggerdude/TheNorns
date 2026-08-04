@@ -4388,6 +4388,31 @@
   background: color-mix(in srgb, var(--accent) 7%, var(--surface));
 }
 
+.conversation-development-running {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.55rem 1rem 0;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--success) 35%, var(--line));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--success) 7%, var(--surface));
+}
+
+.conversation-development-running > span:last-child {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.conversation-development-running strong {
+  font-size: var(--text-sm);
+}
+
+.conversation-development-running small {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
 .conversation-development-start > div {
   display: grid;
   gap: 0.25rem;

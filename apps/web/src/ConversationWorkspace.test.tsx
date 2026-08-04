@@ -5098,6 +5098,7 @@ describe("conversation workspace", () => {
     let approved = false;
     let developmentStarted = false;
     let developmentStartRequests = 0;
+    let developmentRetryRequests = 0;
     let releaseDevelopmentRefresh!: () => void;
     const developmentRefresh = new Promise<void>((resolve) => {
       releaseDevelopmentRefresh = resolve;
@@ -5159,11 +5160,34 @@ describe("conversation workspace", () => {
         }
         if (url.endsWith(`/conversations/${execution.id}/start-development`)) {
           developmentStartRequests += 1;
+          return Response.json({
+            status: "refused",
+            execution_started: false,
+            execution_detail: "The first kickoff could not reach the execution target.",
+            planning_run_id: "planning-run-1",
+          });
+        }
+        if (url.endsWith("/planning-runs/planning-run-1/execution")) {
+          developmentRetryRequests += 1;
           developmentStarted = true;
           return Response.json({
-            status: "succeeded",
-            execution_started: true,
-            execution_detail: "Development started.",
+            execution: { started: true, detail: "Development started." },
+          });
+        }
+        if (url.endsWith(`/api/projects/${projectId}/conversations/${execution.id}/execution`)) {
+          return Response.json({
+            project_id: projectId,
+            conversation_id: execution.id,
+            presentation: developmentStarted ? "active" : "idle",
+            target: { execution_target_id: "target-1", name: "This computer" },
+            run: developmentStarted
+              ? {
+                  run_id: "run-1",
+                  state: "running",
+                  can_stop: true,
+                  cancellation: null,
+                }
+              : null,
           });
         }
         throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
@@ -5210,6 +5234,7 @@ describe("conversation workspace", () => {
     ).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Start development" }));
     await waitFor(() => expect(developmentStartRequests).toBe(1));
+    await waitFor(() => expect(developmentRetryRequests).toBe(1));
     const busyStart = screen.getByRole("button", { name: "Starting development…" });
     expect(busyStart).toBeDisabled();
     fireEvent.click(busyStart);
@@ -5224,6 +5249,9 @@ describe("conversation workspace", () => {
       ).not.toBeInTheDocument(),
     );
     expect(developmentStarted).toBe(true);
+    const running = await screen.findByTestId("conversation-development-running");
+    expect(running).toHaveTextContent("Development is running");
+    expect(running).toHaveTextContent("This computer");
     await user.click(screen.getByRole("button", { name: "Chat options" }));
     expect(screen.getByRole("combobox", { name: "Conversation model" })).toHaveValue("gpt-5.6-sol");
   });

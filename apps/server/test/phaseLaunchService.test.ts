@@ -15,6 +15,7 @@ import {
   DEFAULT_PHASE_LAUNCH_POLICY,
   PhaseLaunchService,
 } from "../src/coordinator/phaseLaunchService.js";
+import { PostgresDeviceActionAuthorization } from "../src/devices/actionAuthorization.js";
 import { RelationalTaskContextAssembler, TaskContextStore } from "../src/execution/index.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
@@ -36,6 +37,7 @@ const HASH_64 = "a".repeat(64);
 interface SeedOptions {
   bindingType?: "local_runner" | "github";
   bindingStatus?: string;
+  deviceBacked?: boolean;
   installationReady?: boolean | null;
   approvedBudgetUsd?: number;
   taskBudgetLimitUsd?: number;
@@ -68,23 +70,53 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
                 'scrypt-v1', 'admin', 'active');
       INSERT INTO projects (
         id, name, description, status, current_architecture_revision_id,
-        assignment_policy_ref, verification_policy_ref, budget_policy_ref
+        assignment_policy_ref, verification_policy_ref, budget_policy_ref, owner_user_id
       ) VALUES (
         '${PROJECT}', 'Norns Demo', 'A demo project for E2.', 'active', NULL,
-        'assignment/default', 'verification/strict', 'budget/default'
+        'assignment/default', 'verification/strict', 'budget/default', '${USER}'
       );
     `);
 
     if (bindingType === "local_runner") {
+      if (options.deviceBacked) {
+        await pg.exec(`
+          INSERT INTO devices (
+            id, owner_user_id, display_name, os_family, architecture, lifecycle,
+            current_generation
+          ) VALUES ('device-e2','${USER}','This computer','macos','arm64','active',0);
+          INSERT INTO device_credentials (
+            id, device_id, generation, public_key_spki_der, public_key_fingerprint, state
+          ) VALUES ('credential-e2','device-e2',1,'\\x01',repeat('d',64),'active');
+          INSERT INTO device_repository_registrations (
+            id, device_id, workspace_id, repository_id, repository_display_name,
+            state, approved_by_user_id, approved_at, default_branch, observed_head,
+            approved_credential_id, approved_generation
+          ) VALUES (
+            'registration-e2','device-e2','workspace-e2','repository-e2','Norns Demo',
+            'active','${USER}',now(),'main','commit-e2','credential-e2',1
+          );
+          INSERT INTO project_device_repository_grants (
+            id, project_id, repository_registration_id, state, granted_by_user_id
+          ) VALUES ('grant-e2','${PROJECT}','registration-e2','active','${USER}');
+        `);
+      }
       await pg.query(
         `INSERT INTO repository_bindings (
            id, project_id, binding_type, status, runner_id, workspace_id,
            repository_id, repository_display_name, granted_permissions,
            default_branch, observed_head, verification_policy_ref,
-           repository_health, created_by_actor_type, created_by_actor_id
+           repository_health, created_by_actor_type, created_by_actor_id,
+           project_device_repository_grant_id
          ) VALUES ($1,$2,'local_runner',$3,$4,'workspace-e2','repository-e2','Norns Demo',
-           '{}'::jsonb,'main','commit-e2','verification/strict','healthy','human',$5)`,
-        [BINDING, PROJECT, bindingStatus, RUNNER, USER],
+           '{}'::jsonb,'main','commit-e2','verification/strict','healthy','human',$5,$6)`,
+        [
+          BINDING,
+          PROJECT,
+          bindingStatus,
+          options.deviceBacked ? null : RUNNER,
+          USER,
+          options.deviceBacked ? "grant-e2" : null,
+        ],
       );
     } else {
       await pg.query(
@@ -162,12 +194,12 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
          deliverables, acceptance_criteria, complexity, risk, required_roles,
          required_capabilities, required_inputs, expected_outputs,
          environment_policy_ref, verification_policy_ref, state, lifecycle_version,
-         created_at
+         initiated_by_user_id, created_at
        ) VALUES ($1,$2,$3,$4,$5,'Assemble task context','Do the described work.',
                  '["change implemented"]'::jsonb,'["change has tests","build is green"]'::jsonb,
                  'M','medium','["implementer"]'::jsonb,'[]'::jsonb,'[]'::jsonb,'["commit"]'::jsonb,
-                 'env/default','verification/strict','ready',1,'2026-01-02T00:00:00Z')`,
-      [TASK, PROJECT, PHASE, OBJECTIVE, STRATEGY],
+                 'env/default','verification/strict','ready',1,$6,'2026-01-02T00:00:00Z')`,
+      [TASK, PROJECT, PHASE, OBJECTIVE, STRATEGY, USER],
     );
     await pg.query(
       `INSERT INTO agent_assignments (
@@ -231,7 +263,9 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
     await pg.exec("CREATE ROLE norns_app NOLOGIN");
     await runCurrentV2Migrations(pg as unknown as V2MigrationDatabase);
     transactions = new PGliteTransactionRunner(pg);
-    coordinator = new Phase4Coordinator(transactions);
+    coordinator = new Phase4Coordinator(transactions, {
+      deviceAuthorization: new PostgresDeviceActionAuthorization({ deviceDispatchEnabled: true }),
+    });
     taskContext = new RelationalTaskContextAssembler(
       transactions,
       new TaskContextStore(transactions),
@@ -299,6 +333,28 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
       [RUNNER],
     );
     expect(Number(scopeRows.rows[0]?.count)).toBe(contextRefs.length);
+  });
+
+  it("schedules a selected device-backed target through its live device identity", async () => {
+    await seed({ bindingStatus: "disconnected", deviceBacked: true });
+    const result = await service({
+      resolveLocalRunner: (runnerId) =>
+        runnerId === "device-e2" ? { runner_id: runnerId, runner_generation: 1 } : null,
+    }).startPhase({
+      project_id: PROJECT,
+      phase_id: PHASE,
+      authorized_by: { actor_type: "human", actor_id: USER },
+      authorized_by_session_id: "session-device-e2",
+      issued_at: issuedAt(),
+    });
+
+    expect(result.blocked).toEqual([]);
+    expect(result.scheduled).toHaveLength(1);
+    const dispatch = await pg.query<{ runner_id: string }>(
+      "SELECT runner_id FROM dispatch_jobs WHERE id = $1",
+      [result.scheduled[0]?.dispatch_job_id],
+    );
+    expect(dispatch.rows[0]?.runner_id).toBe("device-e2");
   });
 
   it("readiness() reports ready without scheduling anything", async () => {

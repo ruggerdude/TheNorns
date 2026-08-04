@@ -3604,6 +3604,7 @@ function ConversationThread({
   const [pmSettingsError, setPmSettingsError] = useState<string | null>(null);
   const [developmentStartBusy, setDevelopmentStartBusy] = useState(false);
   const [developmentStartError, setDevelopmentStartError] = useState<string | null>(null);
+  const [developmentStartReport, setDevelopmentStartReport] = useState<string | null>(null);
   const [executionRetryBusy, setExecutionRetryBusy] = useState(false);
   const [executionRetryError, setExecutionRetryError] = useState<string | null>(null);
   const [executionRetryReport, setExecutionRetryReport] = useState<{
@@ -3710,6 +3711,34 @@ function ConversationThread({
     detail.conversation.id,
     detail.work_item.project_id,
     executionProjection?.run?.cancellation,
+    onUnauthorized,
+  ]);
+  useEffect(() => {
+    if (executionProjection?.presentation !== "active") return;
+    let current = true;
+    const poll = () => {
+      void getConversationExecution(detail.work_item.project_id, detail.conversation.id)
+        .then((next) => {
+          if (!current) return;
+          const stateChanged = next.run?.state !== executionProjection.run?.state;
+          setExecutionProjection(next);
+          if (stateChanged) onRefreshSoft();
+        })
+        .catch((caught) => {
+          if (current && caught instanceof UnauthorizedError) onUnauthorized();
+        });
+    };
+    const timer = window.setInterval(poll, 2_500);
+    return () => {
+      current = false;
+      window.clearInterval(timer);
+    };
+  }, [
+    detail.conversation.id,
+    detail.work_item.project_id,
+    executionProjection?.presentation,
+    executionProjection?.run?.state,
+    onRefreshSoft,
     onUnauthorized,
   ]);
   useEffect(() => {
@@ -4711,12 +4740,33 @@ function ConversationThread({
     if (developmentStartBusy) return;
     setDevelopmentStartBusy(true);
     setDevelopmentStartError(null);
+    setDevelopmentStartReport(null);
     try {
-      await startConversationDevelopment(
+      const result = await startConversationDevelopment(
         detail.work_item.project_id,
         detail.work_item.id,
         detail.conversation.id,
       );
+      let started = result.execution_started === true;
+      let executionDetail = result.execution_detail;
+      if (!started && (result.status === "refused" || result.status === "failed")) {
+        const retry = await retryPlanningRunExecution(
+          detail.work_item.project_id,
+          result.planning_run_id,
+        );
+        started = retry.execution?.started === true;
+        executionDetail = retry.execution?.detail ?? executionDetail;
+      }
+      if (!started) {
+        setDevelopmentStartError(
+          executionDetail ??
+            (result.status === "pending" || result.status === "leased"
+              ? "Development is still starting. Try again in a moment."
+              : "Development could not start."),
+        );
+        return;
+      }
+      setDevelopmentStartReport(executionDetail ?? "Development work was dispatched.");
       await onRefresh();
     } catch (caught) {
       if (caught instanceof UnauthorizedError) {
@@ -5344,6 +5394,23 @@ function ConversationThread({
                       </output>
                     ) : null}
                   </div>
+                ) : null}
+                {isExecution &&
+                (developmentStartReport || executionProjection?.presentation === "active") ? (
+                  <output
+                    className="conversation-development-running"
+                    data-testid="conversation-development-running"
+                    aria-live="polite"
+                  >
+                    <span className="conversation-agent-indicator" aria-hidden="true" />
+                    <span>
+                      <strong>Development is running</strong>
+                      <small>
+                        {developmentStartReport ??
+                          `${executionProjection?.target?.name ?? "Execution target"} · ${executionProjection?.run?.state.replaceAll("_", " ") ?? "active"}`}
+                      </small>
+                    </span>
+                  </output>
                 ) : null}
                 {isExecution && detail.work_item.status === "awaiting_approval" ? (
                   <section
