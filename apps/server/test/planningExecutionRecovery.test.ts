@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { V2SqlExecutor, V2TransactionRunner } from "../src/persistence/v2/database.js";
-import { conversationHandoffIdForPlanningRun } from "../src/planning/executionRecovery.js";
+import {
+  conversationHandoffIdForPlanningRun,
+  reconcileConversationExecutionRetry,
+} from "../src/planning/executionRecovery.js";
 
 function transactionsReturning(rows: { handoff_id: string }[]) {
   const calls: Array<{ sql: string; params?: unknown[] }> = [];
@@ -34,5 +37,38 @@ describe("planning execution recovery", () => {
     await expect(
       conversationHandoffIdForPlanningRun(transactions, "project-1", "planning-run-1"),
     ).resolves.toBeUndefined();
+  });
+
+  it("leaves a settled first-attempt audit untouched when a retry is still refused", async () => {
+    const { calls, transactions } = transactionsReturning([]);
+    const report = { started: false, detail: "The local runner is offline." };
+
+    await expect(
+      reconcileConversationExecutionRetry(transactions, "project-1", "planning-run-1", report),
+    ).resolves.toEqual(report);
+    expect(calls).toEqual([]);
+  });
+
+  it("projects a successful retry onto the work item without rewriting the action effect", async () => {
+    const calls: Array<{ sql: string; params?: unknown[] }> = [];
+    const executor: V2SqlExecutor = {
+      query: async <TRow>(sql: string, params?: unknown[]) => {
+        calls.push({ sql, ...(params ? { params } : {}) });
+        return {
+          rows: (sql.includes("SELECT id FROM phases") ? [{ id: "phase-1" }] : []) as TRow[],
+        };
+      },
+    };
+    const transactions: V2TransactionRunner = {
+      transaction: async (work) => work(executor),
+    };
+    const report = { started: true, detail: "Development started." };
+
+    await expect(
+      reconcileConversationExecutionRetry(transactions, "project-1", "planning-run-1", report),
+    ).resolves.toEqual(report);
+    expect(calls).toHaveLength(2);
+    expect(calls.some(({ sql }) => sql.includes("conversation_plan_action_effects"))).toBe(false);
+    expect(calls[1]?.params).toEqual(["project-1", "planning-run-1", "phase-1"]);
   });
 });

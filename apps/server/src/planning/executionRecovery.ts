@@ -26,8 +26,8 @@ export async function conversationHandoffIdForPlanningRun(
 /**
  * Projects the outcome of an explicit execution retry back into the
  * conversation journey. The original kickoff intent remains immutable as the
- * audit record of its first settled attempt; the action effect and work item
- * describe the latest execution truth.
+ * audit record of its first settled attempt; the work item and linked agent
+ * run describe the latest execution truth.
  */
 export async function reconcileConversationExecutionRetry(
   transactions: V2TransactionRunner,
@@ -35,19 +35,9 @@ export async function reconcileConversationExecutionRetry(
   planningRunId: string,
   report: { started: boolean; detail: string },
 ): Promise<{ started: boolean; detail: string }> {
-  return transactions.transaction(async (tx) => {
-    if (!report.started) {
-      await tx.query(
-        `UPDATE conversation_plan_action_effects
-            SET execution_status='refused', execution_started=false,
-                execution_detail=$3, updated_at=now()
-          WHERE project_id=$1 AND planning_run_id=$2
-            AND effect_kind='plan_approved'`,
-        [projectId, planningRunId, report.detail],
-      );
-      return report;
-    }
+  if (!report.started) return report;
 
+  return transactions.transaction(async (tx) => {
     const phase = (
       await tx.query<{ id: string }>(
         `SELECT id FROM phases
@@ -58,25 +48,9 @@ export async function reconcileConversationExecutionRetry(
     ).rows[0];
     if (!phase) {
       const detail = "Execution retry reported started but created no active execution phase.";
-      await tx.query(
-        `UPDATE conversation_plan_action_effects
-            SET execution_status='failed', execution_started=false,
-                execution_detail=$3, updated_at=now()
-          WHERE project_id=$1 AND planning_run_id=$2
-            AND effect_kind='plan_approved'`,
-        [projectId, planningRunId, detail],
-      );
       return { started: false, detail };
     }
 
-    await tx.query(
-      `UPDATE conversation_plan_action_effects
-          SET execution_status='started', execution_started=true,
-              execution_detail=$3, updated_at=now()
-        WHERE project_id=$1 AND planning_run_id=$2
-          AND effect_kind='plan_approved'`,
-      [projectId, planningRunId, report.detail],
-    );
     await tx.query(
       `UPDATE work_items item
           SET status='executing', phase_id=$3,
