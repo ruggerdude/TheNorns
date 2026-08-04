@@ -190,6 +190,9 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
     phaseId: string,
   ): Promise<void> {
     await this.transactions.transaction(async (tx) => {
+      // Package rows are immutable by database trigger. A row-locking clause
+      // would add no safety and would require UPDATE privilege from the
+      // intentionally least-privileged runtime role.
       const packages = await tx.query<{
         id: string;
         work_item_id: string;
@@ -204,8 +207,7 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
                 canonical_package, content_hash
            FROM conversation_task_packages
           WHERE project_id=$1 AND handoff_id=$2
-          ORDER BY module_id, id
-          FOR SHARE`,
+          ORDER BY module_id, id`,
         [projectId, handoffId],
       );
       if (packages.rows.length === 0) {
