@@ -358,6 +358,33 @@ describe.sequential("POLISH P3: repository analysis", () => {
     expect(adapter.requests).toHaveLength(1);
   });
 
+  it("keeps provider structured output compatible while enforcing collection bounds before persistence", async () => {
+    await createGitHubBinding();
+    adapter.enqueue({
+      ...MODEL_OUTPUT,
+      repository_facts: Array.from({ length: 51 }, (_, index) => ({
+        key: `model_fact_${index}`,
+        value: `value ${index}`,
+        confidence: 0.8,
+      })),
+      constraints: Array.from({ length: 31 }, (_, index) => `Constraint ${index}`),
+    });
+
+    const res = await post();
+    expect(res.statusCode).toBe(200);
+    const counts = await pg.query<{ category: string; count: number }>(
+      `SELECT category, count(*)::int AS count
+         FROM project_memory_entries
+        GROUP BY category
+        ORDER BY category`,
+    );
+    expect(counts.rows).toEqual([
+      { category: "architecture", count: 1 },
+      { category: "constraint", count: 30 },
+      { category: "repository_fact", count: 53 },
+    ]);
+  });
+
   it("backfills deterministic command facts on an already-ingested revision without rerunning the model", async () => {
     fileContent[".norns/verification.json"] = JSON.stringify({
       commands: [

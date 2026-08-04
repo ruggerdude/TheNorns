@@ -88,11 +88,32 @@ export interface RepositoryAnalysisResult {
  * is ADAPTED to the `V2RepositoryIngestionSeed` contract; the contract is
  * never widened to fit the model.
  */
+// Native structured-output providers accept the object/array shape but do
+// not all accept validation keywords such as maxItems, maxLength, or maximum.
+// Keep the provider schema structural, then enforce the product bounds below
+// before anything can be persisted.
+const RepositoryArchitectureAnalysisProvider = z
+  .object({
+    title: z.string(),
+    summary: z.string(),
+    /** Full markdown architecture document — becomes the recorded artifact. */
+    architecture_document: z.string(),
+    repository_facts: z.array(
+      z
+        .object({
+          key: z.string(),
+          value: z.string(),
+          confidence: z.number(),
+        })
+        .strict(),
+    ),
+    constraints: z.array(z.string()),
+  })
+  .strict();
 const RepositoryArchitectureAnalysis = z
   .object({
     title: z.string().min(1).max(120),
     summary: z.string().min(1).max(2_000),
-    /** Full markdown architecture document — becomes the recorded artifact. */
     architecture_document: z.string().min(1).max(40_000),
     repository_facts: z
       .array(
@@ -463,6 +484,7 @@ export class RepositoryAnalysisService {
       "- architecture_document: a markdown document describing structure, key components, how they interact, technology choices, and build/test entry points. Describe only what the provided material supports;",
       "- repository_facts: individually useful key/value facts (language, package manager, test command, deployment target, ...) with your confidence in each;",
       "- constraints: rules future work on this repository must respect, only where the material clearly supports them.",
+      "Return at most 50 repository_facts and at most 30 constraints. Keep title under 120 characters, summary under 2,000 characters, architecture_document under 40,000 characters, fact keys under 120 characters, fact values under 500 characters, and constraints under 300 characters.",
       "Do not invent facts about files you were not shown.",
       "",
       "FILE TREE:",
@@ -477,10 +499,24 @@ export class RepositoryAnalysisService {
         prompt,
         maxTokens: 8_192,
       },
-      RepositoryArchitectureAnalysis,
+      RepositoryArchitectureAnalysisProvider,
       "RepositoryArchitectureAnalysis",
     );
-    return value;
+    const bounded = RepositoryArchitectureAnalysis.safeParse({
+      ...value,
+      repository_facts: value.repository_facts.slice(0, 50),
+      constraints: value.constraints.slice(0, 30),
+    });
+    if (!bounded.success) {
+      throw new RepositoryAnalysisError(
+        "analysis_output_invalid",
+        `The repository analysis model returned invalid content: ${bounded.error.issues
+          .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+          .join("; ")}`,
+        502,
+      );
+    }
+    return bounded.data;
   }
 
   /** GET one file's decoded content; null skips a file that cannot be read. */
