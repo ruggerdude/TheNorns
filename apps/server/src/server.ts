@@ -261,6 +261,7 @@ import {
   AllocationRecommendationError,
   recommendProjectAllocation,
 } from "./planning/allocationRecommendation.js";
+import { conversationHandoffIdForPlanningRun } from "./planning/executionRecovery.js";
 import {
   PLANNING_RUN_DEFAULT_PM_MODEL,
   PLANNING_RUN_DEFAULT_REVIEWER_MODEL,
@@ -7171,9 +7172,17 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           const kickoff = options.planningRuns?.executionKickoff;
           if (kickoff) {
             try {
+              const handoffId = options.planningRuns
+                ? await conversationHandoffIdForPlanningRun(
+                    options.planningRuns.transactions,
+                    id,
+                    runId,
+                  )
+                : undefined;
               execution = await kickoff.kickoff({
                 projectId: id,
                 planningRunId: runId,
+                ...(handoffId ? { handoffId } : {}),
                 staffing: run.decision.staffing ?? null,
                 decidedBy: user.id,
               });
