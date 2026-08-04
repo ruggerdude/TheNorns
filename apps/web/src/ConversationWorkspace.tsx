@@ -272,6 +272,7 @@ interface ConversationWorkspaceProps {
   initialConversationId?: string | null;
   initialNewConversation?: boolean;
   initialBrief?: string | null;
+  onJourneyStageChange?: (stage: 2 | 3 | 4 | 5, skipped?: Array<2 | 3 | 4>) => void;
   onConversationSelected?: (conversationId: string, replace?: boolean) => void;
   onNewConversation?: () => void;
   onUnsupported?: () => void;
@@ -5585,18 +5586,21 @@ export function ConversationWorkspace({
   initialConversationId = null,
   initialNewConversation = false,
   initialBrief = null,
+  onJourneyStageChange,
   onConversationSelected,
   onNewConversation,
   onUnsupported,
   onUnauthorized,
 }: ConversationWorkspaceProps): React.ReactElement {
   const callbacks = useRef({
+    onJourneyStageChange,
     onConversationSelected,
     onNewConversation,
     onUnauthorized,
     onUnsupported,
   });
   callbacks.current = {
+    onJourneyStageChange,
     onConversationSelected,
     onNewConversation,
     onUnauthorized,
@@ -5660,6 +5664,23 @@ export function ConversationWorkspace({
   const initialSelectionHandled = useRef<string | null>(null);
   const createdConversationRoute = useRef<string | null>(null);
   const handleUnauthorized = useCallback(() => callbacks.current.onUnauthorized(), []);
+
+  useEffect(() => {
+    if (showNew || !detail) {
+      callbacks.current.onJourneyStageChange?.(2, []);
+      return;
+    }
+    if (detail.conversation.kind === "execution_pm") {
+      const skipped: Array<3 | 4> = detail.handoff ? (detail.project_runs_qc ? [] : [4]) : [3, 4];
+      callbacks.current.onJourneyStageChange?.(5, skipped);
+      return;
+    }
+    if (detail.plan_reviews.length > 0) {
+      callbacks.current.onJourneyStageChange?.(4, []);
+      return;
+    }
+    callbacks.current.onJourneyStageChange?.(detail.plan_versions.length > 0 ? 3 : 2, []);
+  }, [detail, showNew]);
 
   useEffect(() => {
     if (!conversationListOpen && !conversationMenu && !headerMenuOpen) return;

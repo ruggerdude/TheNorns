@@ -287,6 +287,7 @@ export interface PhaseTabProps {
   onComposerOpened?: () => void;
   onRunStarted?: (runId: string) => void;
   onJourneyChanged?: () => void;
+  onJourneyStageChange?: (stage: 2 | 3 | 4 | 5, skipped?: Array<2 | 3 | 4>) => void;
   onConversationSelected?: (conversationId: string, replace?: boolean) => void;
   onNewConversation?: () => void;
   onUnauthorized: () => void;
@@ -1746,6 +1747,7 @@ export function PhaseTab(props: PhaseTabProps): React.ReactElement {
         initialConversationId={props.initialConversationId}
         initialNewConversation={props.initialNewConversation}
         initialBrief={props.initialBrief}
+        onJourneyStageChange={props.onJourneyStageChange}
         onConversationSelected={props.onConversationSelected}
         onNewConversation={props.onNewConversation}
         onUnsupported={() => setConversationUnsupported(true)}

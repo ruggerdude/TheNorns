@@ -434,6 +434,59 @@ function layout(nodes: GraphNodeDto[]): Map<string, { x: number; y: number }> {
   return positions;
 }
 
+type ProjectJourneyStage = 1 | 2 | 3 | 4 | 5;
+
+interface ProjectJourneyState {
+  current: ProjectJourneyStage;
+  skipped: ProjectJourneyStage[];
+}
+
+const PROJECT_JOURNEY: ReadonlyArray<{ id: ProjectJourneyStage; label: string }> = [
+  { id: 1, label: "Define the project" },
+  { id: 2, label: "Project Manager" },
+  { id: 3, label: "Plan" },
+  { id: 4, label: "Quality Control" },
+  { id: 5, label: "Deployment" },
+];
+
+function ProjectJourney({ current, skipped }: ProjectJourneyState): React.ReactElement {
+  const skippedStages = new Set(skipped);
+  return (
+    <nav className="project-journey" aria-label="Project journey">
+      <ol>
+        {PROJECT_JOURNEY.map((stage) => {
+          const isCurrent = stage.id === current;
+          const isSkipped = skippedStages.has(stage.id);
+          const isComplete = stage.id < current && !isSkipped;
+          const state = isCurrent
+            ? "current"
+            : isSkipped
+              ? "skipped"
+              : isComplete
+                ? "complete"
+                : "next";
+          return (
+            <li
+              className={`is-${state}`}
+              aria-current={isCurrent ? "step" : undefined}
+              key={stage.id}
+            >
+              <span className="project-journey-marker" aria-hidden="true">
+                {isComplete ? "✓" : stage.id}
+              </span>
+              <span className="project-journey-label">
+                <small>Step {stage.id}</small>
+                <strong>{stage.label}</strong>
+              </span>
+              <span className="sr-only">{` — ${state}`}</span>
+            </li>
+          );
+        })}
+      </ol>
+    </nav>
+  );
+}
+
 function ProjectGraph({
   project,
   onBack,
@@ -508,6 +561,10 @@ function ProjectGraph({
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>(
     initialWorkRoute || initialConversationId ? "work" : "overview",
   );
+  const [projectJourney, setProjectJourney] = useState<ProjectJourneyState>(() => ({
+    current: project.status === "planned" ? 3 : initialWorkRoute || initialConversationId ? 2 : 1,
+    skipped: [],
+  }));
   const [mobileWorkspaceNavOpen, setMobileWorkspaceNavOpen] = useState(false);
   const { navigationRailCollapsed, toggleNavigationRail } = useNavigationRail();
   const previousInitialWorkRoute = useRef(initialWorkRoute);
@@ -647,6 +704,11 @@ function ProjectGraph({
   const selectWorkspaceTab = useCallback(
     (nextTab: WorkspaceTab) => {
       setWorkspaceTab(nextTab);
+      if (nextTab === "work") {
+        setProjectJourney((current) =>
+          current.current === 1 ? { current: 2, skipped: [] } : current,
+        );
+      }
       setMobileWorkspaceNavOpen(false);
       if (nextTab !== "work") {
         suppressRouteExitReset.current = true;
@@ -1406,6 +1468,7 @@ function ProjectGraph({
         ) : null}
       </header>
       <main className={`page workspace-page workspace-page-${workspaceTab}`}>
+        <ProjectJourney {...projectJourney} />
         <div className="project-heading workspace-header">
           <h1>{project.name}</h1>
         </div>
@@ -1608,6 +1671,15 @@ function ProjectGraph({
                   void loadLatestRelationalPlanningRun();
                   void loadPhaseExecution();
                 }}
+                onJourneyStageChange={(current, skipped = []) =>
+                  setProjectJourney((previous) =>
+                    previous.current === current &&
+                    previous.skipped.length === skipped.length &&
+                    previous.skipped.every((stage, index) => stage === skipped[index])
+                      ? previous
+                      : { current, skipped },
+                  )
+                }
                 onConversationSelected={onConversationSelected}
                 onNewConversation={onNewConversation}
                 onUnauthorized={() => onLogout("Session expired. Sign in again.")}

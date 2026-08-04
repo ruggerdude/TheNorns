@@ -1585,6 +1585,7 @@ describe("conversation workspace", () => {
 
   it("renders the exact approved and delivered visual evidence for the verified commit", async () => {
     const execution = executionConversation();
+    const onJourneyStageChange = vi.fn();
     const executionWorkItem: V2WorkItemT = {
       ...workItem,
       status: "executing",
@@ -1730,6 +1731,7 @@ describe("conversation workspace", () => {
       <ConversationWorkspace
         projectId={projectId}
         initialConversationId={execution.id}
+        onJourneyStageChange={onJourneyStageChange}
         onConversationSelected={() => undefined}
         onUnsupported={() => undefined}
         onUnauthorized={() => undefined}
@@ -1742,12 +1744,14 @@ describe("conversation workspace", () => {
     expect(await screen.findByAltText("Delivered desktop implementation")).toBeInTheDocument();
     expect(await screen.findByAltText("Approved mobile mockup")).toBeInTheDocument();
     expect(await screen.findByAltText("Delivered mobile implementation")).toBeInTheDocument();
+    await waitFor(() => expect(onJourneyStageChange).toHaveBeenLastCalledWith(5, [3, 4]));
     view.unmount();
   });
 
   it("replaces the planning transcript with the QC-owned decision workspace", async () => {
     const version = planVersion({ status: "in_qc" });
     const review = planReview();
+    const onJourneyStageChange = vi.fn();
     const action = planAction({
       id: "action-approve-after-qc",
       action_type: "approve_plan",
@@ -1793,6 +1797,7 @@ describe("conversation workspace", () => {
         projectId={projectId}
         projectName="Signal Studio"
         initialConversationId={conversationId}
+        onJourneyStageChange={onJourneyStageChange}
         onUnauthorized={() => undefined}
       />,
     );
@@ -1816,6 +1821,7 @@ describe("conversation workspace", () => {
     expect(
       screen.getByRole("button", { name: "Approve plan and start development" }),
     ).toBeInTheDocument();
+    await waitFor(() => expect(onJourneyStageChange).toHaveBeenLastCalledWith(4, []));
   });
 
   it("shows only the live attempt and archives a failed prior run with its retained feedback", async () => {

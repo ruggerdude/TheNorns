@@ -82,55 +82,6 @@
   color: var(--ink);
 }
 
-.qc-new-stage-rail {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin: 0;
-  padding: 0.8rem 0;
-  border-block: 1px solid var(--line);
-  list-style: none;
-}
-
-.qc-new-stage-rail li {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  color: var(--ink-muted);
-  font-size: 0.82rem;
-}
-
-.qc-new-stage-rail li + li {
-  padding-left: 1rem;
-  border-left: 1px solid var(--line);
-}
-
-.qc-new-stage-rail span {
-  display: grid;
-  width: 1.65rem;
-  height: 1.65rem;
-  place-items: center;
-  border: 1px solid var(--line-strong);
-  border-radius: 50%;
-  font-size: 0.72rem;
-}
-
-.qc-new-stage-rail .is-complete,
-.qc-new-stage-rail .is-current {
-  color: var(--ink);
-}
-
-.qc-new-stage-rail .is-complete span {
-  border-color: var(--success);
-  color: white;
-  background: var(--success);
-}
-
-.qc-new-stage-rail .is-current span {
-  border-color: var(--qc-blue);
-  color: var(--qc-blue);
-  background: var(--qc-blue-soft);
-}
-
 .qc-progress-popout {
   position: sticky;
   z-index: 3;
@@ -818,14 +769,6 @@
 
   .qc-new-choice {
     min-height: 3rem;
-  }
-
-  .qc-new-stage-rail strong {
-    display: none;
-  }
-
-  .qc-new-stage-rail li {
-    justify-content: center;
   }
 
   .qc-new-finding.is-selectable .qc-new-finding-main {

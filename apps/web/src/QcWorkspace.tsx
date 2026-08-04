@@ -790,21 +790,6 @@ export function QcWorkspace({
         </div>
       </header>
 
-      <ol className="qc-new-stage-rail" aria-label="Work stages">
-        <li className="is-complete">
-          <span>1</span>
-          <strong>Plan locked</strong>
-        </li>
-        <li className="is-current">
-          <span>2</span>
-          <strong>Quality control</strong>
-        </li>
-        <li>
-          <span>3</span>
-          <strong>Development after approval</strong>
-        </li>
-      </ol>
-
       {!terminal && review.status !== "awaiting_human" ? (
         <QcProgressPopout review={review} accepted={accepted} />
       ) : null}

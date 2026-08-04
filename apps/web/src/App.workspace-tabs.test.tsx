@@ -93,6 +93,21 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     expect(screen.getByRole("region", { name: "Project details" })).toHaveTextContent(
       /Coordinator|Reviewer/i,
     );
+    const journey = screen.getByRole("navigation", { name: "Project journey" });
+    expect(within(journey).getAllByRole("listitem")).toHaveLength(5);
+    for (const label of [
+      "Define the project",
+      "Project Manager",
+      "Plan",
+      "Quality Control",
+      "Deployment",
+    ]) {
+      expect(within(journey).getByText(label)).toBeVisible();
+    }
+    expect(within(journey).getByText("Plan").closest("li")).toHaveAttribute("aria-current", "step");
+    expect(within(journey).getByText("Define the project").closest("li")).toHaveClass(
+      "is-complete",
+    );
 
     const workspaceShell = document.querySelector(".workspace-shell");
     if (!(workspaceShell instanceof HTMLElement)) throw new Error("Workspace shell not found");
@@ -310,6 +325,10 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
 
     await user.click(pointer);
     expect(await screen.findByRole("button", { name: "Work" })).toHaveClass("on");
+    expect(screen.getByText("Project Manager").closest("li")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
     expect(
       await screen.findByTestId("phase-goal", undefined, { timeout: 3_000 }),
     ).toBeInTheDocument();
