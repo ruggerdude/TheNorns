@@ -15,6 +15,7 @@ import {
 // integrator); this file renders and holds state only.
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AttachmentInput } from "./AttachmentInput";
+import type { QcReviewJourney } from "./QcWorkspace";
 import { AI_PROVIDERS, AI_PROVIDER_LABELS } from "./aiProviders";
 import "./PhaseTab.css";
 import { UnauthorizedError } from "./auth";
@@ -287,7 +288,11 @@ export interface PhaseTabProps {
   onComposerOpened?: () => void;
   onRunStarted?: (runId: string) => void;
   onJourneyChanged?: () => void;
-  onJourneyStageChange?: (stage: 2 | 3 | 4 | 5, skipped?: Array<2 | 3 | 4>) => void;
+  onJourneyStageChange?: (
+    stage: 2 | 3 | 4 | 5,
+    skipped?: Array<2 | 3 | 4>,
+    qc?: QcReviewJourney | null,
+  ) => void;
   onConversationSelected?: (conversationId: string, replace?: boolean) => void;
   onNewConversation?: () => void;
   onUnauthorized: () => void;

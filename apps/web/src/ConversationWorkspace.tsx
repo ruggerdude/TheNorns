@@ -90,7 +90,7 @@ import {
   PmUpdateControls,
 } from "./ExecutionConversationControls";
 import { QC_MODE_OPTIONS } from "./Projects";
-import { QcWorkspace } from "./QcWorkspace";
+import { type QcReviewJourney, QcWorkspace, qcReviewJourney } from "./QcWorkspace";
 import {
   AI_PROVIDERS,
   aiProviderLabel,
@@ -279,7 +279,11 @@ interface ConversationWorkspaceProps {
   initialConversationId?: string | null;
   initialNewConversation?: boolean;
   initialBrief?: string | null;
-  onJourneyStageChange?: (stage: 2 | 3 | 4 | 5, skipped?: Array<2 | 3 | 4>) => void;
+  onJourneyStageChange?: (
+    stage: 2 | 3 | 4 | 5,
+    skipped?: Array<2 | 3 | 4>,
+    qc?: QcReviewJourney | null,
+  ) => void;
   onConversationSelected?: (conversationId: string, replace?: boolean) => void;
   onNewConversation?: () => void;
   onUnsupported?: () => void;
@@ -3523,6 +3527,7 @@ function ConversationThread({
   onEditMessage,
   onOpenConversation,
   onConversationModelChanged,
+  onQcJourneyChange,
   onRefresh,
   onRefreshSoft,
   onUnauthorized,
@@ -3541,6 +3546,7 @@ function ConversationThread({
   onEditMessage: (sourceMessageId: string, text: string) => Promise<void>;
   onOpenConversation: (conversationId: string) => Promise<void>;
   onConversationModelChanged: (conversation: V2WorkConversationT) => void;
+  onQcJourneyChange: (qc: QcReviewJourney) => void;
   onRefresh: () => Promise<void>;
   onRefreshSoft: () => void;
   onUnauthorized: () => void;
@@ -3731,6 +3737,16 @@ function ConversationThread({
       ),
     [detail.plan_reviews, optimisticReviewHandoffs],
   );
+  useEffect(() => {
+    const latestReview = [...visiblePlanReviews]
+      .sort(
+        (left, right) =>
+          Date.parse(right.created_at) - Date.parse(left.created_at) ||
+          right.attempt_number - left.attempt_number,
+      )
+      .at(0);
+    if (latestReview) onQcJourneyChange(qcReviewJourney(latestReview));
+  }, [onQcJourneyChange, visiblePlanReviews]);
   const resources = useMemo<ConversationResources>(
     () => ({
       planVersions: new Map(detail.plan_versions.map((version) => [version.id, version])),
@@ -5822,22 +5838,35 @@ export function ConversationWorkspace({
   const initialSelectionHandled = useRef<string | null>(null);
   const createdConversationRoute = useRef<string | null>(null);
   const handleUnauthorized = useCallback(() => callbacks.current.onUnauthorized(), []);
+  const handleQcJourneyChange = useCallback(
+    (qc: QcReviewJourney) => callbacks.current.onJourneyStageChange?.(4, [], qc),
+    [],
+  );
 
   useEffect(() => {
     if (showNew || !detail) {
-      callbacks.current.onJourneyStageChange?.(2, []);
+      callbacks.current.onJourneyStageChange?.(2, [], null);
       return;
     }
     if (detail.conversation.kind === "execution_pm") {
       const skipped: Array<3 | 4> = detail.handoff ? (detail.project_runs_qc ? [] : [4]) : [3, 4];
-      callbacks.current.onJourneyStageChange?.(5, skipped);
+      callbacks.current.onJourneyStageChange?.(5, skipped, null);
       return;
     }
     if (detail.plan_reviews.length > 0) {
-      callbacks.current.onJourneyStageChange?.(4, []);
-      return;
+      const latestReview = [...detail.plan_reviews]
+        .sort(
+          (left, right) =>
+            Date.parse(right.created_at) - Date.parse(left.created_at) ||
+            right.attempt_number - left.attempt_number,
+        )
+        .at(0);
+      if (latestReview) {
+        callbacks.current.onJourneyStageChange?.(4, [], qcReviewJourney(latestReview));
+        return;
+      }
     }
-    callbacks.current.onJourneyStageChange?.(detail.plan_versions.length > 0 ? 3 : 2, []);
+    callbacks.current.onJourneyStageChange?.(detail.plan_versions.length > 0 ? 3 : 2, [], null);
   }, [detail, showNew]);
 
   useEffect(() => {
@@ -7219,6 +7248,7 @@ export function ConversationWorkspace({
               }}
               onEditMessage={editConversationMessage}
               onOpenConversation={openConversationById}
+              onQcJourneyChange={handleQcJourneyChange}
               onConversationModelChanged={(conversation) => {
                 setDetail((current) => (current ? { ...current, conversation } : current));
                 setGroups(

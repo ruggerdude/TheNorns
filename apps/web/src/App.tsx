@@ -15,7 +15,7 @@ import { pmModelOption } from "@norns/contracts";
 // before this change; it renders once `graph` exists and is otherwise
 // dormant behind the "No plan yet" hint.
 import type { Connection, Edge, Node } from "@xyflow/react";
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { SettingsTab } from "./Account";
 import { Debates } from "./Debates";
@@ -23,6 +23,7 @@ import { Login, type LoginMode } from "./Login";
 import { PortfolioMenu } from "./PortfolioMenu";
 import { ProjectMembers } from "./ProjectMembers";
 import { type ProjectOpenOptions, type ProjectSummary, Projects } from "./Projects";
+import type { QcReviewJourney } from "./QcWorkspace";
 import { type StaffingEdit, StrategyReview, type StrategyReviewDto } from "./StrategyReview";
 import { AuthenticatedHeaderActions } from "./UserMenu";
 import { WorkspaceSettings, prefetchProjectRules } from "./WorkspaceSettings";
@@ -439,6 +440,7 @@ type ProjectJourneyStage = 1 | 2 | 3 | 4 | 5;
 interface ProjectJourneyState {
   current: ProjectJourneyStage;
   skipped: ProjectJourneyStage[];
+  qc: QcReviewJourney | null;
 }
 
 const PROJECT_JOURNEY: ReadonlyArray<{ id: ProjectJourneyStage; label: string }> = [
@@ -449,8 +451,13 @@ const PROJECT_JOURNEY: ReadonlyArray<{ id: ProjectJourneyStage; label: string }>
   { id: 5, label: "Deployment" },
 ];
 
-function ProjectJourney({ current, skipped }: ProjectJourneyState): React.ReactElement {
+function ProjectJourney({ current, skipped, qc }: ProjectJourneyState): React.ReactElement {
   const skippedStages = new Set(skipped);
+  const qcStepState = (step: "qc" | "pm"): "current" | "complete" | "next" => {
+    if (qc?.active === "complete") return "complete";
+    if (qc?.active === step) return "current";
+    return step === "qc" || (step === "pm" && (qc?.round ?? 1) > 1) ? "complete" : "next";
+  };
   return (
     <nav className="project-journey" aria-label="Project journey">
       <ol>
@@ -483,6 +490,35 @@ function ProjectJourney({ current, skipped }: ProjectJourneyState): React.ReactE
           );
         })}
       </ol>
+      {current === 4 && qc ? (
+        <fieldset className="project-journey-qc">
+          <legend className="sr-only">
+            Quality control cycle, round {qc.round} of {qc.maxRounds}
+          </legend>
+          {(["qc", "pm"] as const).map((step, index) => {
+            const state = qcStepState(step);
+            return (
+              <Fragment key={step}>
+                {index > 0 ? (
+                  <span className="project-journey-qc-loop" aria-hidden="true">
+                    ↔
+                  </span>
+                ) : null}
+                <span
+                  className={`project-journey-qc-step is-${state}`}
+                  aria-current={state === "current" ? "step" : undefined}
+                >
+                  <span aria-hidden="true">{state === "complete" ? "✓" : index + 1}</span>
+                  <strong>{step === "qc" ? "QC Review" : "PM Review"}</strong>
+                </span>
+              </Fragment>
+            );
+          })}
+          <small>
+            Round {qc.round} of {qc.maxRounds}
+          </small>
+        </fieldset>
+      ) : null}
     </nav>
   );
 }
@@ -564,6 +600,7 @@ function ProjectGraph({
   const [projectJourney, setProjectJourney] = useState<ProjectJourneyState>(() => ({
     current: project.status === "planned" ? 3 : initialWorkRoute || initialConversationId ? 2 : 1,
     skipped: [],
+    qc: null,
   }));
   const [mobileWorkspaceNavOpen, setMobileWorkspaceNavOpen] = useState(false);
   const { navigationRailCollapsed, toggleNavigationRail } = useNavigationRail();
@@ -706,7 +743,7 @@ function ProjectGraph({
       setWorkspaceTab(nextTab);
       if (nextTab === "work") {
         setProjectJourney((current) =>
-          current.current === 1 ? { current: 2, skipped: [] } : current,
+          current.current === 1 ? { current: 2, skipped: [], qc: null } : current,
         );
       }
       setMobileWorkspaceNavOpen(false);
@@ -1671,13 +1708,16 @@ function ProjectGraph({
                   void loadLatestRelationalPlanningRun();
                   void loadPhaseExecution();
                 }}
-                onJourneyStageChange={(current, skipped = []) =>
+                onJourneyStageChange={(current, skipped = [], qc = null) =>
                   setProjectJourney((previous) =>
                     previous.current === current &&
                     previous.skipped.length === skipped.length &&
-                    previous.skipped.every((stage, index) => stage === skipped[index])
+                    previous.skipped.every((stage, index) => stage === skipped[index]) &&
+                    previous.qc?.active === qc?.active &&
+                    previous.qc?.round === qc?.round &&
+                    previous.qc?.maxRounds === qc?.maxRounds
                       ? previous
-                      : { current, skipped },
+                      : { current, skipped, qc },
                   )
                 }
                 onConversationSelected={onConversationSelected}

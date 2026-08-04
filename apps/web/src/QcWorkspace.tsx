@@ -73,10 +73,37 @@ function pausedRoundFindings(
 }
 
 function currentRound(review: V2ConversationPlanReviewT): number {
+  if (TERMINAL.has(review.status)) return Math.max(1, review.rounds_completed);
   if (review.paused_at_round !== null) return review.paused_at_round;
   const live = review.live_progress;
   if (live?.round) return live.round;
   return Math.max(1, Math.min(review.rounds_completed + 1, review.max_rounds));
+}
+
+export interface QcReviewJourney {
+  active: "qc" | "pm" | "complete";
+  round: number;
+  maxRounds: number;
+}
+
+function pmOwnsReviewStep(review: V2ConversationPlanReviewT): boolean {
+  const live = review.live_progress;
+  const liveIsPm =
+    live?.provider === review.pm_provider && live.model !== null && live.model === review.pm_model;
+  const waitingOnHuman = review.status === "awaiting_human";
+  return (
+    liveIsPm ||
+    (waitingOnHuman && review.paused_checkpoint === "after_revision") ||
+    (!waitingOnHuman && !live && (review.finding_decisions?.length ?? 0) > 0)
+  );
+}
+
+export function qcReviewJourney(review: V2ConversationPlanReviewT): QcReviewJourney {
+  return {
+    active: TERMINAL.has(review.status) ? "complete" : pmOwnsReviewStep(review) ? "pm" : "qc",
+    round: currentRound(review),
+    maxRounds: review.max_rounds,
+  };
 }
 
 function activeQcAgent(review: V2ConversationPlanReviewT): {
@@ -85,14 +112,8 @@ function activeQcAgent(review: V2ConversationPlanReviewT): {
   provider: string;
   model: string;
 } {
-  const live = review.live_progress;
-  const liveIsPm =
-    live?.provider === review.pm_provider && live.model !== null && live.model === review.pm_model;
   const waitingOnHuman = review.status === "awaiting_human";
-  const pmOwnsStep =
-    liveIsPm ||
-    (waitingOnHuman && review.paused_checkpoint === "after_revision") ||
-    (!waitingOnHuman && !live && (review.finding_decisions?.length ?? 0) > 0);
+  const pmOwnsStep = pmOwnsReviewStep(review);
   return {
     state: waitingOnHuman
       ? "Waiting on you"

@@ -5,7 +5,7 @@ import {
 } from "@norns/contracts";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { QcWorkspace } from "./QcWorkspace";
+import { QcWorkspace, qcReviewJourney } from "./QcWorkspace";
 import { makeCoreApiModule, makePlan } from "./test/fixtures";
 
 const now = "2026-08-02T12:00:00.000Z";
@@ -179,6 +179,66 @@ function renderWorkspace(
 }
 
 describe("QcWorkspace", () => {
+  it("moves the QC journey from reviewer to PM and back for the next round", () => {
+    const liveProgress = (
+      stage: "reviewing" | "revising",
+      round: number,
+      provider: "openai" | "anthropic",
+      model: string,
+    ) => ({
+      stage,
+      round,
+      attempt: 1,
+      provider,
+      model,
+      completed_items: 0,
+      total_items: 2,
+      output_characters: 0,
+      activity: stage === "revising" ? "Revising the plan" : "Reviewing the plan",
+      output_preview: null,
+      started_at: now,
+      checkpoint_at: now,
+    });
+
+    expect(
+      qcReviewJourney(
+        review({
+          status: "running",
+          paused_checkpoint: null,
+          paused_at_round: null,
+          findings: [],
+          dispositions: [],
+          live_progress: liveProgress("reviewing", 1, "openai", "gpt"),
+        }),
+      ),
+    ).toEqual({ active: "qc", round: 1, maxRounds: 2 });
+    expect(
+      qcReviewJourney(
+        review({
+          status: "running",
+          paused_checkpoint: null,
+          paused_at_round: null,
+          findings: [],
+          dispositions: [],
+          live_progress: liveProgress("revising", 1, "anthropic", "claude"),
+        }),
+      ),
+    ).toEqual({ active: "pm", round: 1, maxRounds: 2 });
+    expect(
+      qcReviewJourney(
+        review({
+          status: "running",
+          rounds_completed: 1,
+          paused_checkpoint: null,
+          paused_at_round: null,
+          findings: [],
+          dispositions: [],
+          live_progress: liveProgress("reviewing", 2, "openai", "gpt"),
+        }),
+      ),
+    ).toEqual({ active: "qc", round: 2, maxRounds: 2 });
+  });
+
   it("makes accept all, choose individually, and accept none the primary gate", () => {
     renderWorkspace();
     expect(screen.getByRole("heading", { name: "Quality control" })).toBeVisible();

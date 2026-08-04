@@ -1744,7 +1744,7 @@ describe("conversation workspace", () => {
     expect(await screen.findByAltText("Delivered desktop implementation")).toBeInTheDocument();
     expect(await screen.findByAltText("Approved mobile mockup")).toBeInTheDocument();
     expect(await screen.findByAltText("Delivered mobile implementation")).toBeInTheDocument();
-    await waitFor(() => expect(onJourneyStageChange).toHaveBeenLastCalledWith(5, [3, 4]));
+    await waitFor(() => expect(onJourneyStageChange).toHaveBeenLastCalledWith(5, [3, 4], null));
     view.unmount();
   });
 
@@ -1819,7 +1819,13 @@ describe("conversation workspace", () => {
     expect(screen.getByText("PM response")).toBeInTheDocument();
     expect(screen.getByText("Added the requested telemetry assertion.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Approve plan" })).toBeInTheDocument();
-    await waitFor(() => expect(onJourneyStageChange).toHaveBeenLastCalledWith(4, []));
+    await waitFor(() =>
+      expect(onJourneyStageChange).toHaveBeenLastCalledWith(4, [], {
+        active: "complete",
+        round: 1,
+        maxRounds: 3,
+      }),
+    );
   });
 
   it("shows only the live attempt and archives a failed prior run with its retained feedback", async () => {

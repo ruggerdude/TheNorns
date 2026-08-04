@@ -7547,6 +7547,64 @@ h4 {
   border-style: dashed;
 }
 
+.project-journey-qc {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+  padding-top: 0.7rem;
+  border: 0;
+  border-top: 1px solid var(--line);
+  color: var(--ink-muted);
+}
+
+.project-journey-qc-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.65rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface);
+  font-size: var(--text-xs);
+}
+
+.project-journey-qc-step > span {
+  display: grid;
+  width: 1.2rem;
+  height: 1.2rem;
+  place-items: center;
+  border: 1px solid currentColor;
+  border-radius: 50%;
+  font-size: 0.62rem;
+  font-weight: 800;
+}
+
+.project-journey-qc-step.is-current {
+  border-color: var(--brand-900);
+  background: var(--brand-wash);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-900) 10%, transparent);
+}
+
+.project-journey-qc-step.is-complete > span {
+  border-color: var(--success);
+  color: white;
+  background: var(--success);
+}
+
+.project-journey-qc-loop {
+  color: var(--brand-ink);
+  font-size: 1rem;
+  font-weight: 800;
+}
+
+.project-journey-qc > small {
+  margin-left: 0.35rem;
+  font-weight: 700;
+}
+
 .workspace-page-work > .project-journey {
   margin-bottom: 0.5rem;
 }
@@ -7750,6 +7808,23 @@ h4 {
 
   .project-journey-label strong {
     font-size: 0.65rem;
+  }
+
+  .project-journey-qc {
+    gap: 0.3rem;
+    margin-top: 0.6rem;
+    padding-top: 0.55rem;
+  }
+
+  .project-journey-qc-step {
+    padding: 0.3rem 0.5rem;
+    font-size: 0.68rem;
+  }
+
+  .project-journey-qc > small {
+    flex-basis: 100%;
+    margin-left: 0;
+    text-align: center;
   }
 
   .global-mobile-navigation,
