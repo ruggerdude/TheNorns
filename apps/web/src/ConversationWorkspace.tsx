@@ -139,7 +139,11 @@ import {
   updateConversationPmSettings,
   updateWorkItemOrganization,
 } from "./conversationApi";
-import { type ExecutionModelCapability, getExecutionModelCapabilities } from "./phaseTabApi";
+import {
+  type ExecutionModelCapability,
+  getExecutionModelCapabilities,
+  retryPlanningRunExecution,
+} from "./phaseTabApi";
 import { Alert, Badge, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 import "./ConversationWorkspace.css";
 
@@ -2796,6 +2800,15 @@ function executionConversationId(effect: ConversationActionEffect): string | nul
   return effect.execution_conversation_id;
 }
 
+function isRecoverableExecutionEffect(
+  effect: ConversationActionEffect,
+): effect is Extract<ConversationActionEffect, { kind: "plan_approved" }> {
+  return (
+    effect.kind === "plan_approved" &&
+    (effect.execution.status === "refused" || effect.execution.status === "failed")
+  );
+}
+
 function createConfirmationKey(actionId: string): string {
   const unique =
     typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Date.now().toString(36);
@@ -3599,6 +3612,12 @@ function ConversationThread({
   const [pmSettingsError, setPmSettingsError] = useState<string | null>(null);
   const [developmentStartBusy, setDevelopmentStartBusy] = useState(false);
   const [developmentStartError, setDevelopmentStartError] = useState<string | null>(null);
+  const [executionRetryBusy, setExecutionRetryBusy] = useState(false);
+  const [executionRetryError, setExecutionRetryError] = useState<string | null>(null);
+  const [executionRetryReport, setExecutionRetryReport] = useState<{
+    started: boolean;
+    detail: string;
+  } | null>(null);
   const [pmSettingsOverride, setPmSettingsOverride] =
     useState<V2ConversationPmUpdateSettingsT | null>(null);
   const [actionOverrides, setActionOverrides] = useState(
@@ -4904,6 +4923,33 @@ function ConversationThread({
   const isReadOnly = detail.conversation.status !== "active";
   const conversationProvider = asAiProvider(detail.conversation.provider) ?? "anthropic";
   const hasEnteredQc = isPlanning && detail.plan_reviews.length > 0;
+  const recoverableExecutionEffect = isPlanning
+    ? ([...actionContext.effects.values()].find(isRecoverableExecutionEffect) ?? null)
+    : null;
+  const retryApprovedExecution = useCallback(async () => {
+    if (!recoverableExecutionEffect || executionRetryBusy) return;
+    setExecutionRetryBusy(true);
+    setExecutionRetryError(null);
+    try {
+      const result = await retryPlanningRunExecution(
+        detail.work_item.project_id,
+        recoverableExecutionEffect.planning_run_id,
+      );
+      const report = result.execution ?? {
+        started: false,
+        detail: "The approved plan is recorded, but no kickoff result was returned.",
+      };
+      setExecutionRetryReport(report);
+    } catch (caught) {
+      if (caught instanceof UnauthorizedError) {
+        onUnauthorized();
+        return;
+      }
+      setExecutionRetryError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setExecutionRetryBusy(false);
+    }
+  }, [detail.work_item.project_id, executionRetryBusy, onUnauthorized, recoverableExecutionEffect]);
   const linkedExecutionConversationId = isPlanning
     ? (detail.handoff?.target_conversation_id ??
       [...actionContext.effects.values()]
@@ -5406,6 +5452,40 @@ function ConversationThread({
                 className="workspace-tab-panel conversation-work-tab-qc"
                 data-testid="conversation-work-tab-qc"
               >
+                {recoverableExecutionEffect ? (
+                  <section
+                    className="conversation-development-start"
+                    aria-label="Development start recovery"
+                    data-testid="conversation-retry-execution-panel"
+                  >
+                    <div>
+                      <span className="eyebrow">Approved plan recovery</span>
+                      <h2>
+                        {executionRetryReport?.started
+                          ? "Development started"
+                          : "Development did not start"}
+                      </h2>
+                      <p>
+                        {executionRetryReport?.detail ??
+                          recoverableExecutionEffect.execution.detail ??
+                          "The prior kickoff did not complete."}
+                      </p>
+                    </div>
+                    {!executionRetryReport?.started ? (
+                      <Button
+                        variant="primary"
+                        data-testid="conversation-retry-execution"
+                        disabled={executionRetryBusy}
+                        onClick={() => void retryApprovedExecution()}
+                      >
+                        {executionRetryBusy ? "Starting development…" : "Retry development start"}
+                      </Button>
+                    ) : null}
+                    {executionRetryError ? (
+                      <output role="alert">{executionRetryError}</output>
+                    ) : null}
+                  </section>
+                ) : null}
                 <ConversationQcActivity
                   reviews={visiblePlanReviews}
                   planVersions={detail.plan_versions}

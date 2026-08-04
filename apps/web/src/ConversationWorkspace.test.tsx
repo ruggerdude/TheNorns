@@ -3443,6 +3443,101 @@ describe("conversation workspace", () => {
     expect(detailCalls).toBe(2);
   });
 
+  it("retries a failed approved-plan kickoff from the QC workspace", async () => {
+    const approvedVersion = planVersion({
+      status: "approved",
+      approved_by_user_id: "user-1",
+      approved_at: now,
+    });
+    const approval = planAction({
+      id: "action-approve-retry",
+      action_type: "approve_plan",
+      status: "applied",
+      payload: {
+        parameters: {
+          plan_version_id: approvedVersion.id,
+          content_hash: approvedVersion.content_hash,
+          plan_review_id: "review-1",
+        },
+      },
+    });
+    const review = planReview({
+      action_id: approval.id,
+      plan_version_id: approvedVersion.id,
+      planning_run_id: "planning-run-retry",
+      result_plan_content_hash: approvedVersion.content_hash,
+    });
+    const effect: V2ConversationPlanActionEffectT = {
+      schema_version: 2,
+      id: "effect-approval-retry",
+      project_id: projectId,
+      work_item_id: workItemId,
+      conversation_id: conversationId,
+      action_id: approval.id,
+      effect: {
+        kind: "plan_approved",
+        plan_version: approvedVersion,
+        plan_review_id: review.id,
+        planning_run_id: review.planning_run_id,
+        transition_status: "created",
+        execution_conversation_id: "execution-conversation-retry",
+        handoff_id: "handoff-retry",
+        kickoff_intent_id: "kickoff-intent-retry",
+        execution: {
+          status: "failed",
+          started: false,
+          detail: "Coordinator unavailable.",
+        },
+      },
+      created_at: now,
+      updated_at: now,
+    };
+    let retryCalls = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) {
+          return detailResponse([], null, null, {
+            planVersions: [approvedVersion],
+            actions: [approval],
+            reviews: [review],
+            effects: [effect],
+          });
+        }
+        if (
+          url.endsWith("/planning-runs/planning-run-retry/execution") &&
+          init?.method === "POST"
+        ) {
+          retryCalls += 1;
+          return Response.json({
+            execution: { started: true, detail: "4 tasks dispatched." },
+          });
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    const retry = await screen.findByTestId("conversation-retry-execution");
+    expect(screen.getByText("Coordinator unavailable.")).toBeInTheDocument();
+    await user.click(retry);
+
+    expect(await screen.findByText("4 tasks dispatched.")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Development started" })).toBeInTheDocument();
+    expect(screen.queryByTestId("conversation-retry-execution")).not.toBeInTheDocument();
+    expect(retryCalls).toBe(1);
+  });
+
   it("submits the visible parts through the AI SDK stream and hides the welcome immediately", async () => {
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     let submitted = false;
