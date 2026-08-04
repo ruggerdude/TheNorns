@@ -2782,7 +2782,9 @@ function executionConversationId(effect: ConversationActionEffect): string | nul
   if (
     effect.kind !== "plan_approved" ||
     effect.transition_status !== "created" ||
-    effect.execution_conversation_id === null
+    effect.execution_conversation_id === null ||
+    effect.execution.status === "refused" ||
+    effect.execution.status === "failed"
   ) {
     return null;
   }

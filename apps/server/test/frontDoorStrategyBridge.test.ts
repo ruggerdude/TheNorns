@@ -113,7 +113,7 @@ async function seedPlanningRun(
   pg: PGlite,
   options: {
     id: string;
-    status: "converged" | "cap_reached" | "queued";
+    status: "converged" | "cap_reached" | "approved" | "queued";
     result: unknown | null;
     transcript: unknown[];
     round?: number;
@@ -333,6 +333,38 @@ describe.sequential("FRONT DOOR P3 strategy bridge (service)", () => {
     await expect(
       bridge.approve({ projectId: "project-1", phaseId: review.phase.id, actor: ACTOR }),
     ).rejects.toThrow();
+  });
+
+  it("honors a later human approval when retrying a cap-reached execution handoff", async () => {
+    await seedPlanningRun(pg, {
+      id: "run-cap-approved",
+      status: "cap_reached",
+      result: convergedResult(),
+      transcript: transcript({ must_fix: 2, should_fix: 1, suggestion: 0 }),
+      round: 1,
+    });
+    const blocked = await bridge.createPhaseFromPlanningRun({
+      projectId: "project-1",
+      planningRunId: "run-cap-approved",
+      actor: ACTOR,
+    });
+    expect(blocked.strategy).toMatchObject({ version: 1, convergence: "cap_reached" });
+
+    await pg.query("UPDATE planning_runs SET status='approved' WHERE id='run-cap-approved'");
+    const approved = await bridge.createPhaseFromPlanningRun({
+      projectId: "project-1",
+      planningRunId: "run-cap-approved",
+      actor: ACTOR,
+    });
+
+    expect(approved.strategy).toMatchObject({ version: 2, convergence: "converged" });
+    expect(approved.outstanding_findings).toEqual([]);
+    expect(approved.strategy?.findings).toContainEqual(
+      expect.objectContaining({ severity: "must_fix", status: "resolved" }),
+    );
+    await expect(
+      bridge.approve({ projectId: "project-1", phaseId: approved.phase.id, actor: ACTOR }),
+    ).resolves.toMatchObject({ tasks: 2 });
   });
 
   it("follows staleness semantics on a post-approval edit (no silent mutation)", async () => {

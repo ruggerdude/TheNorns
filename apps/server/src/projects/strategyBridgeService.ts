@@ -342,9 +342,9 @@ export function assignmentLocalId(moduleId: string): string {
 
 /** Findings the reviewer left on the table, reconstructed from the last review
  *  round's severity counts (the raw finding list is not persisted in the run
- *  result). Must-fix findings stay `open` — for a cap_reached run this is what
- *  keeps approval blocked and tells the UI why it did not converge; for a
- *  converged run the count is zero so nothing blocks approval. */
+ *  result). A cap-reached run remains blocked until a human decides. Once the
+ *  run is `approved`, that explicit decision resolves the bridge's synthetic
+ *  must-fix record instead of reopening it after the approved revision. */
 function synthesizeFindings(
   phaseId: string,
   status: string,
@@ -365,15 +365,18 @@ function synthesizeFindings(
   }
   if (!counts) return [];
   const findings: V2StrategyFindingT[] = [];
+  const approvedByHuman = status === "approved";
   const stoppedBecause =
     status === "cap_reached" ? "the review round cap was reached" : "planning finished";
   if (counts.must_fix > 0) {
     findings.push({
       id: `finding:${phaseId}:must_fix`,
       severity: "must_fix",
-      status: "open",
+      status: approvedByHuman ? "resolved" : "open",
       summary: `${counts.must_fix} must-fix issue(s) were still open when ${stoppedBecause}.`,
-      disposition: null,
+      disposition: approvedByHuman
+        ? "Resolved by explicit human approval of the revised plan."
+        : null,
     });
   }
   if (counts.should_fix > 0) {
@@ -745,7 +748,36 @@ export class StrategyBridgeService {
     const already = await this.transactions.transaction(async (tx) =>
       this.loadLatestStrategy(tx, projectId, phaseId),
     );
-    if (already) return;
+    if (already) {
+      if (run.status === "approved") {
+        const current = this.reconstructStrategy(already);
+        const needsApprovalResolution =
+          current.status === "awaiting_approval" &&
+          (current.convergence !== "converged" ||
+            current.findings.some(
+              (finding) => finding.severity === "must_fix" && finding.status !== "resolved",
+            ));
+        if (needsApprovalResolution) {
+          const resolved: V2StrategyVersionT = {
+            ...current,
+            convergence: "converged",
+            findings: current.findings.map((finding) =>
+              finding.severity === "must_fix" && finding.status !== "resolved"
+                ? {
+                    ...finding,
+                    status: "resolved" as const,
+                    disposition: "Resolved by explicit human approval of the revised plan.",
+                  }
+                : finding,
+            ),
+          };
+          await this.strategies.saveAwaitingApproval(
+            this.buildSupersedingStrategy(resolved, already, resolved.proposed_assignments),
+          );
+        }
+      }
+      return;
+    }
 
     const requiredProfiles = new Map<string, ResolvedProfile>();
     const fallback = fallbackImplementer(transcript);

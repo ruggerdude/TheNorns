@@ -343,10 +343,10 @@ function targetedBatchPrompt(
   batch: TargetedRevisionBatch,
 ): string {
   const batchFindings = batch.findingIndices
-    .map((index) => {
-      const finding = findings[index];
-      if (!finding) throw new Error(`targeted revision batch requires finding ${index}`);
-      return `${index}. [${finding.severity}] (${finding.module_id ?? "plan-level"}) ${finding.finding} — ${finding.recommendation}`;
+    .map((findingIndex, localIndex) => {
+      const finding = findings[findingIndex];
+      if (!finding) throw new Error(`targeted revision batch requires finding ${findingIndex}`);
+      return `${localIndex}. [${finding.severity}] (${finding.module_id ?? "plan-level"}) ${finding.finding} — ${finding.recommendation}`;
     })
     .join("\n");
   const operations =
@@ -361,6 +361,7 @@ function targetedBatchPrompt(
     "Disposition and apply only the QC findings below as one bounded revision batch.",
     batchFindings,
     `Return only JSON { base_plan_content_hash: "${canonicalSha256(plan)}", responses: [{ finding_index, disposition: accept|rebut, rationale }], changes: [...] }.`,
+    "Use the batch-local finding indices shown above, starting at 0. Do not use positions from the full QC report; the server remaps these local indices after validation.",
     "Return exactly one concise disposition for every listed finding. Every accepted finding must be attributed by at least one bounded change; a rebutted finding must not be attributed by a change.",
     `Use only these ${batch.scope}-scope operations: ${operations}.`,
     "Every change requires finding_indices and may reference only the finding indices listed above. Do not return the complete plan.",
@@ -739,6 +740,32 @@ function findingsForTargetedBatch(
   );
 }
 
+function remapTargetedBatchRevision(
+  revision: V2QcTargetedRevisionT,
+  batch: TargetedRevisionBatch,
+): V2QcTargetedRevisionT {
+  const globalIndex = (localIndex: number): number => {
+    const mapped = batch.findingIndices[localIndex];
+    if (mapped === undefined) {
+      targetedRevisionError(
+        `revision batch ${batch.key} returned unknown local finding ${localIndex}`,
+      );
+    }
+    return mapped;
+  };
+  return V2QcTargetedRevision.parse({
+    ...revision,
+    responses: revision.responses.map((response) => ({
+      ...response,
+      finding_index: globalIndex(response.finding_index),
+    })),
+    changes: revision.changes.map((change) => ({
+      ...change,
+      finding_indices: change.finding_indices.map(globalIndex),
+    })),
+  });
+}
+
 function targetedBatchSchemaFor(
   base: V2WorkPlanContractT,
   findings: readonly ReviewFindingT[],
@@ -977,7 +1004,7 @@ async function completeStructuredWithRepair<T>(
     previousResponseOnlyRepair?: boolean;
   },
 ): Promise<StructuredResult<T> & { progress_attempt: number; progress_request_id: string }> {
-  const maxAttempts = Math.min(chat.maxAttempts ?? 2, 2);
+  const maxAttempts = Math.min(chat.maxAttempts ?? 2, 3);
   let prompt = request.prompt;
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     const requestId =
@@ -1168,17 +1195,26 @@ async function runBatchedTargetedRevision(input: {
     progressRequestId: string;
   }> => {
     const requestId = `${input.requestId}:batch:${batch.key}`;
+    const localFindings = batch.findingIndices.map((findingIndex) => {
+      const finding = input.findings[findingIndex];
+      if (!finding) targetedRevisionError(`revision batch ${batch.key} is missing a finding`);
+      return finding;
+    });
+    const localBatch: TargetedRevisionBatch = {
+      ...batch,
+      findingIndices: localFindings.map((_, index) => index),
+    };
     const result = await completeStructuredWithRepair(
       input.pm,
       {
         system: input.system,
-        prompt: targetedBatchPrompt(basePlan, input.findings, batch),
+        prompt: targetedBatchPrompt(basePlan, localFindings, localBatch),
         maxTokens: TARGETED_PATCH_MAX_OUTPUT_TOKENS,
         outputEffort: "low",
         ...input.meter,
         ...(input.signal ? { signal: input.signal } : {}),
       },
-      targetedBatchSchemaFor(basePlan, input.findings, batch),
+      targetedBatchSchemaFor(basePlan, localFindings, localBatch),
       "targeted_plan_revision",
       requestId,
       failedUsage,
@@ -1191,18 +1227,14 @@ async function runBatchedTargetedRevision(input: {
         totalItems: batch.findingIndices.length,
         activity: `Reviewing and applying ${batch.findingIndices.length} QC finding${batch.findingIndices.length === 1 ? "" : "s"} in ${batch.key}`,
         markdown: (value) => {
-          const materialized = applyTargetedQcRevision(
-            basePlan,
-            value,
-            findingsForTargetedBatch(input.findings, batch),
-          );
+          const materialized = applyTargetedQcRevision(basePlan, value, localFindings);
           return targetedRevisionMarkdown(input.round, value, materialized);
         },
-        maxAttempts: 2,
+        maxAttempts: 3,
         repairInstruction:
           batch.scope === "plan"
-            ? "Return a fresh compact targeted envelope with base_plan_content_hash, responses, and changes only. Change only the required plan-level field."
-            : "Return a fresh compact targeted envelope with base_plan_content_hash, responses, and changes only. Use patch_module for existing modules and include only changed fields.",
+            ? "Return a fresh compact targeted envelope with base_plan_content_hash, responses, and changes only. Use the batch-local finding indices starting at 0. Change only the required plan-level field."
+            : "Return a fresh compact targeted envelope with base_plan_content_hash, responses, and changes only. Use the batch-local finding indices starting at 0. Use patch_module for existing modules and include only changed fields.",
         repairMaxTokens: TARGETED_REPAIR_MAX_OUTPUT_TOKENS,
         previousResponseOnlyRepair: true,
       },
@@ -1210,7 +1242,7 @@ async function runBatchedTargetedRevision(input: {
     input.usage.push(result.usage);
     return {
       batch,
-      value: result.value,
+      value: remapTargetedBatchRevision(result.value, batch),
       progressAttempt: result.progress_attempt,
       progressRequestId: result.progress_request_id,
     };
@@ -1615,7 +1647,7 @@ export async function runReviewOnlyPlanning(
           request_id: `${revisionRequestId}:legacy-fallback:transition`,
           channel: "pm",
           round,
-          attempt: 3,
+          attempt: 4,
           speaker: "workflow",
           kind: "error",
           content: `The targeted QC revision failed validation after its repair attempt. Falling back once to the pinned legacy full-envelope format. ${structuredFailureSummary(error)}`,

@@ -70,6 +70,42 @@ function stripFences(text: string): string {
   return match?.[1] ?? trimmed;
 }
 
+/** Models occasionally emit JavaScript-style trailing commas even when asked
+ * for strict JSON. Removing only commas immediately before a closing array or
+ * object is deterministic and does not weaken schema validation. Commas inside
+ * strings, or any other malformed syntax, remain untouched and fail normally. */
+function withoutTrailingCommas(text: string): string {
+  let normalized = "";
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index] as string;
+    if (inString) {
+      normalized += character;
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      normalized += character;
+      continue;
+    }
+    if (character === ",") {
+      let next = index + 1;
+      while (next < text.length && /\s/.test(text[next] as string)) next += 1;
+      if (text[next] === "]" || text[next] === "}") continue;
+    }
+    normalized += character;
+  }
+  return normalized;
+}
+
 /**
  * The single structured-output parse + contract validation. Both the buffered
  * (`completeStructured`) and streamed (`streamStructured`) provider paths call
@@ -83,23 +119,30 @@ export function parseStructured<T>(
   metadata: AdapterFailureMetadata,
 ): T {
   let parsed: unknown;
+  const unfenced = stripFences(text);
   try {
-    parsed = JSON.parse(stripFences(text));
+    parsed = JSON.parse(unfenced);
   } catch (cause) {
-    // A body cut short by the output limit is not a formatting problem, and
-    // retrying the identical prompt just burns the same budget again — say so
-    // in the message, not only in `structured_failure.kind`.
-    const message = outputWasTruncated(metadata.finish_reason)
-      ? `${schemaName}: response was truncated at the output limit`
-      : `${schemaName}: response is not JSON`;
-    throw new AdapterError("invalid_response", message, {
-      cause,
-      metadata: {
-        ...metadata,
-        response_text: text,
-        structured_failure: notJsonDiagnostic(metadata.finish_reason),
-      },
-    });
+    try {
+      const normalized = withoutTrailingCommas(unfenced);
+      if (normalized === unfenced) throw cause;
+      parsed = JSON.parse(normalized);
+    } catch {
+      // A body cut short by the output limit is not a formatting problem, and
+      // retrying the identical prompt just burns the same budget again — say so
+      // in the message, not only in `structured_failure.kind`.
+      const message = outputWasTruncated(metadata.finish_reason)
+        ? `${schemaName}: response was truncated at the output limit`
+        : `${schemaName}: response is not JSON`;
+      throw new AdapterError("invalid_response", message, {
+        cause,
+        metadata: {
+          ...metadata,
+          response_text: text,
+          structured_failure: notJsonDiagnostic(metadata.finish_reason),
+        },
+      });
+    }
   }
   const result = schema.safeParse(parsed);
   if (result.success) return result.data;

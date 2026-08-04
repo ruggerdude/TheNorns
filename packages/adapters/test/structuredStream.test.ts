@@ -58,6 +58,17 @@ describe("streamStructured", () => {
     expect(adapterError.metadata?.request_dispatched).toBe(true);
   });
 
+  it("accepts harmless trailing commas while preserving strict schema validation", async () => {
+    const adapter = new FakeAdapter("anthropic");
+    adapter.enqueue('{"plan":{"modules":[{"id":"one","title":"Comma, inside a string",},],},}');
+
+    const result = await adapter.streamStructured(request, Plan, "plan", () => undefined);
+
+    expect(result.value).toEqual({
+      plan: { modules: [{ id: "one", title: "Comma, inside a string" }] },
+    });
+  });
+
   it("classifies a body cut short by the output limit as output_truncated", async () => {
     const adapter = new FakeAdapter("anthropic");
     adapter.enqueue(FakeAdapter.truncated('{"plan":{"modules":[{"id":"one","title":"First'));

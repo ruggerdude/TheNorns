@@ -1439,11 +1439,11 @@ describe("review-only conversational planning", () => {
       },
       {
         base_plan_content_hash: canonicalSha256(seed),
-        responses: [{ finding_index: 1, disposition: "accept", rationale: "Clarified UI." }],
+        responses: [{ finding_index: 0, disposition: "accept", rationale: "Clarified UI." }],
         changes: [
           {
             op: "patch_module",
-            finding_indices: [1],
+            finding_indices: [0],
             module_id: "ui",
             patch: { description: "Deliver the clarified UI boundary." },
           },
@@ -1488,6 +1488,9 @@ describe("review-only conversational planning", () => {
     expect(maximumActivePatchCalls).toBe(2);
     expect(result.final_plan.plan.modules[0]?.description).toContain("clarified contracts");
     expect(result.final_plan.plan.modules[1]?.description).toContain("clarified UI");
+    expect(result.review_rounds[0]?.responses?.map((response) => response.finding_index)).toEqual([
+      0, 1,
+    ]);
   });
 
   it("runs a complete mixed-scope QC cycle without collapsing every PM change into one oversized batch", async () => {
@@ -1544,7 +1547,7 @@ describe("review-only conversational planning", () => {
     ];
     const contractsRevision = {
       base_plan_content_hash: canonicalSha256(seed),
-      responses: [0, 2, 6].map((findingIndex) => ({
+      responses: [0, 1, 2].map((findingIndex) => ({
         finding_index: findingIndex,
         disposition: "accept" as const,
         rationale: `Applied contracts finding ${findingIndex}.`,
@@ -1552,7 +1555,7 @@ describe("review-only conversational planning", () => {
       changes: [
         {
           op: "patch_module" as const,
-          finding_indices: [0, 2, 6],
+          finding_indices: [0, 1, 2],
           module_id: "contracts",
           patch: { description: "Deliver the fully reviewed contracts boundary." },
         },
@@ -1560,7 +1563,7 @@ describe("review-only conversational planning", () => {
     };
     const uiRevision = {
       base_plan_content_hash: canonicalSha256(seed),
-      responses: [3, 5].map((findingIndex) => ({
+      responses: [0, 1].map((findingIndex) => ({
         finding_index: findingIndex,
         disposition: "accept" as const,
         rationale: `Applied UI finding ${findingIndex}.`,
@@ -1568,7 +1571,7 @@ describe("review-only conversational planning", () => {
       changes: [
         {
           op: "patch_module" as const,
-          finding_indices: [3, 5],
+          finding_indices: [0, 1],
           module_id: "ui",
           patch: { description: "Deliver the fully reviewed UI boundary." },
         },
@@ -1600,12 +1603,12 @@ describe("review-only conversational planning", () => {
         base_plan_content_hash: canonicalSha256(planBase),
         responses: [
           {
-            finding_index: findingIndex,
+            finding_index: 0,
             disposition: "accept" as const,
             rationale: `Applied plan finding ${findingIndex}.`,
           },
         ],
-        changes: [{ op: "set_risks" as const, finding_indices: [findingIndex], value: [risk] }],
+        changes: [{ op: "set_risks" as const, finding_indices: [0], value: [risk] }],
       };
       planBase = V2WorkPlanContract.parse({
         ...planBase,
@@ -1835,6 +1838,11 @@ describe("review-only conversational planning", () => {
           metadata: { usage: failedUsage, response_text: '{"changes":[]}' },
         }),
       )
+      .mockRejectedValueOnce(
+        new AdapterError("invalid_response", "targeted_plan_revision: invalid after retry", {
+          metadata: { usage: failedUsage, response_text: '{"changes":[]}' },
+        }),
+      )
       .mockImplementation(originalComplete);
     const chat: ReviewOnlyChatEvent[] = [];
 
@@ -1855,7 +1863,7 @@ describe("review-only conversational planning", () => {
 
     assertTerminal(result);
     expect(result.final_plan).toEqual(revised);
-    expect(completion).toHaveBeenCalledTimes(3);
+    expect(completion).toHaveBeenCalledTimes(4);
     expect(pm.requests).toHaveLength(1);
     expect(pm.requests[0]?.telemetryRequestId).toContain(":legacy-fallback");
     expect(
