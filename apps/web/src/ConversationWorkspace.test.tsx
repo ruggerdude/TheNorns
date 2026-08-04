@@ -5569,6 +5569,7 @@ describe("conversation workspace", () => {
     expect(screen.queryByText(/PLANNING_SENTINEL/)).not.toBeInTheDocument();
     expect(planningReads).toBe(0);
 
+    await user.click(screen.getByText("Planning context"));
     await user.click(screen.getByRole("button", { name: "Retrieve planning excerpt" }));
     expect(planningReads).toBe(0);
     await user.click(screen.getByRole("button", { name: "Load planning messages" }));

@@ -2115,36 +2115,28 @@ function HandoffCard({
     >
       <header>
         <div>
-          <div className="eyebrow">
-            {isTarget ? "Compact execution handoff" : "Planning handoff"}
-          </div>
-          <h3 id={`conversation-handoff-${handoff.id}`}>{handoff.package.objective}</h3>
+          <div className="eyebrow">{isTarget ? "Approved handoff" : "Planning handoff"}</div>
+          <h3 id={`conversation-handoff-${handoff.id}`}>
+            {handoff.package.task_sequence.length} task
+            {handoff.package.task_sequence.length === 1 ? "" : "s"} ·{" "}
+            {handoff.package.budget.currency} {handoff.package.budget.amount.toFixed(2)} budget
+          </h3>
         </div>
         <Badge tone="success">Immutable</Badge>
       </header>
-      <dl>
-        <div>
-          <dt>Approved plan</dt>
-          <dd>
+      <details>
+        <summary>View scope and plan details</summary>
+        <div className="conversation-handoff-details">
+          <section>
+            <strong>Approved scope</strong>
+            <p>{handoff.package.objective}</p>
+          </section>
+          <section>
+            <strong>Approved plan</strong>
             <code title={handoff.package.approved_plan_content_hash}>
               {handoff.package.approved_plan_content_hash.slice(0, 12)}
             </code>
-          </dd>
-        </div>
-        <div>
-          <dt>Task sequence</dt>
-          <dd>{handoff.package.task_sequence.length}</dd>
-        </div>
-        <div>
-          <dt>Budget</dt>
-          <dd>
-            {handoff.package.budget.currency} {handoff.package.budget.amount.toFixed(2)}
-          </dd>
-        </div>
-      </dl>
-      <details>
-        <summary>Review compact handoff</summary>
-        <div className="conversation-handoff-details">
+          </section>
           <section>
             <strong>Decisions retained</strong>
             <p>
@@ -2164,15 +2156,15 @@ function HandoffCard({
             <strong>Referenced artifacts</strong>
             <p>{handoff.package.artifact_ids.join(", ") || "No artifacts were carried forward."}</p>
           </section>
+          <Button
+            className="btn-small"
+            aria-label={isTarget ? "Open archived planning conversation" : "Open development chat"}
+            onClick={() => onOpenConversation(linkedConversationId)}
+          >
+            {isTarget ? "Archived planning" : "Development chat"}
+          </Button>
         </div>
       </details>
-      <Button
-        className="btn-small"
-        aria-label={isTarget ? "Open archived planning conversation" : "Open development chat"}
-        onClick={() => onOpenConversation(linkedConversationId)}
-      >
-        {isTarget ? "Open archived planning" : "Open development chat"}
-      </Button>
     </article>
   );
 }
@@ -2307,122 +2299,114 @@ function PlanningExcerptControl({
   };
 
   return (
-    <section
+    <details
       className="conversation-excerpt-control"
       aria-labelledby={`conversation-excerpt-${detail.conversation.id}`}
     >
-      <div>
-        <strong id={`conversation-excerpt-${detail.conversation.id}`}>
-          Need planning context?
-        </strong>
-        <p>
-          The planning transcript is not in this execution conversation. Retrieve only the specific
-          visible messages needed for the work.
-        </p>
-      </div>
-      {!armed ? (
-        <Button className="btn-small" onClick={() => setArmed(true)}>
-          Retrieve planning excerpt
-        </Button>
-      ) : sourceMessages === null ? (
-        <div className="conversation-excerpt-confirm">
-          <p>
-            Loading the archived planning conversation is an explicit read. Nothing will be added to
-            execution until you select messages and confirm.
-          </p>
-          <div className="actions">
-            <Button
-              className="btn-small"
-              disabled={loading}
-              onClick={() => void loadPlanningMessages()}
-            >
-              {loading ? "Loading planning messages…" : "Load planning messages"}
-            </Button>
-            <Button className="btn-small" variant="ghost" onClick={() => setArmed(false)}>
-              Cancel
-            </Button>
-            <Button
-              className="btn-small"
-              variant="ghost"
-              onClick={() => onOpenConversation(handoff.source_conversation_id)}
-            >
-              Open full planning conversation
-            </Button>
-          </div>
-        </div>
-      ) : (
-        <fieldset>
-          <legend>Select planning messages to add</legend>
-          {sourceMessages.length === 0 ? (
-            <p>No visible planning messages are available.</p>
-          ) : (
-            <div className="conversation-excerpt-options">
-              {sourceMessages.map((message) => {
-                const selected = selectedIds.has(message.id);
-                return (
-                  <label key={message.id}>
-                    <input
-                      type="checkbox"
-                      checked={selected}
-                      disabled={!selected && selectedIds.size >= 20}
-                      onChange={(event) => {
-                        setSelectedIds((current) => {
-                          const next = new Set(current);
-                          if (event.target.checked && next.size < 20) next.add(message.id);
-                          else if (!event.target.checked) next.delete(message.id);
-                          return next;
-                        });
-                      }}
-                    />
-                    <span>
-                      <strong>
-                        {message.role === "user"
-                          ? "You"
-                          : message.role === "assistant"
-                            ? "PM"
-                            : "System"}{" "}
-                        · message {message.sequence}
-                      </strong>
-                      <small>{planningMessagePreview(message)}</small>
-                    </span>
-                  </label>
-                );
-              })}
+      <summary id={`conversation-excerpt-${detail.conversation.id}`}>Planning context</summary>
+      <div className="conversation-excerpt-body">
+        <p>Retrieve only the archived planning messages needed for development.</p>
+        {!armed ? (
+          <Button className="btn-small" onClick={() => setArmed(true)}>
+            Retrieve planning excerpt
+          </Button>
+        ) : sourceMessages === null ? (
+          <div className="conversation-excerpt-confirm">
+            <p>Nothing will be added to execution until you select messages and confirm.</p>
+            <div className="actions">
+              <Button
+                className="btn-small"
+                disabled={loading}
+                onClick={() => void loadPlanningMessages()}
+              >
+                {loading ? "Loading planning messages…" : "Load planning messages"}
+              </Button>
+              <Button className="btn-small" variant="ghost" onClick={() => setArmed(false)}>
+                Cancel
+              </Button>
+              <Button
+                className="btn-small"
+                variant="ghost"
+                onClick={() => onOpenConversation(handoff.source_conversation_id)}
+              >
+                Open full planning conversation
+              </Button>
             </div>
-          )}
-          <small className="muted" aria-live="polite">
-            {selectedIds.size} of 20 messages selected
-          </small>
-          <div className="actions">
-            <Button
-              className="btn-small"
-              variant="primary"
-              disabled={selectedIds.size === 0 || submitting}
-              onClick={() => void retrieve()}
-            >
-              {submitting ? "Adding excerpt…" : "Add selected excerpt to execution"}
-            </Button>
-            <Button
-              className="btn-small"
-              variant="ghost"
-              disabled={submitting}
-              onClick={() => {
-                setArmed(false);
-                setSourceMessages(null);
-                setSelectedIds(new Set());
-              }}
-            >
-              Cancel
-            </Button>
           </div>
-        </fieldset>
-      )}
-      {error ? (
-        <output className="conversation-action-error" role="alert">
-          {error}
-        </output>
-      ) : null}
-    </section>
+        ) : (
+          <fieldset>
+            <legend>Select planning messages to add</legend>
+            {sourceMessages.length === 0 ? (
+              <p>No visible planning messages are available.</p>
+            ) : (
+              <div className="conversation-excerpt-options">
+                {sourceMessages.map((message) => {
+                  const selected = selectedIds.has(message.id);
+                  return (
+                    <label key={message.id}>
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        disabled={!selected && selectedIds.size >= 20}
+                        onChange={(event) => {
+                          setSelectedIds((current) => {
+                            const next = new Set(current);
+                            if (event.target.checked && next.size < 20) next.add(message.id);
+                            else if (!event.target.checked) next.delete(message.id);
+                            return next;
+                          });
+                        }}
+                      />
+                      <span>
+                        <strong>
+                          {message.role === "user"
+                            ? "You"
+                            : message.role === "assistant"
+                              ? "PM"
+                              : "System"}{" "}
+                          · message {message.sequence}
+                        </strong>
+                        <small>{planningMessagePreview(message)}</small>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            <small className="muted" aria-live="polite">
+              {selectedIds.size} of 20 messages selected
+            </small>
+            <div className="actions">
+              <Button
+                className="btn-small"
+                variant="primary"
+                disabled={selectedIds.size === 0 || submitting}
+                onClick={() => void retrieve()}
+              >
+                {submitting ? "Adding excerpt…" : "Add selected excerpt to execution"}
+              </Button>
+              <Button
+                className="btn-small"
+                variant="ghost"
+                disabled={submitting}
+                onClick={() => {
+                  setArmed(false);
+                  setSourceMessages(null);
+                  setSelectedIds(new Set());
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+          </fieldset>
+        )}
+        {error ? (
+          <output className="conversation-action-error" role="alert">
+            {error}
+          </output>
+        ) : null}
+      </div>
+    </details>
   );
 }
 
@@ -5347,16 +5331,11 @@ function ConversationThread({
                 ) : null}
                 {isExecution && detail.work_item.status === "awaiting_approval" ? (
                   <section
-                    className="conversation-development-start"
+                    className="conversation-development-start is-compact"
                     aria-label="Approved plan ready for development"
                   >
                     <div>
-                      <span className="eyebrow">Plan approved</span>
-                      <h2>Review the handoff, then start development</h2>
-                      <p>
-                        The approved design is locked. No implementation agents will run until you
-                        start development here.
-                      </p>
+                      <h2>Plan approved and locked</h2>
                     </div>
                     <Button
                       variant="primary"

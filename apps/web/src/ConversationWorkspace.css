@@ -435,10 +435,10 @@
 
 .conversation-context-receipt {
   display: grid;
-  gap: 0.7rem;
-  padding: 0.8rem 1rem;
+  gap: 0.45rem;
+  padding: 0.55rem 1rem;
   border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--surface-2) 46%, transparent);
+  background: color-mix(in srgb, var(--surface-2) 24%, transparent);
 }
 
 .conversation-context-indicators {
@@ -486,18 +486,18 @@
 
 .conversation-handoff-card {
   display: grid;
-  gap: 0.75rem;
-  padding: 0.9rem;
-  border: 1px solid color-mix(in srgb, var(--success) 38%, var(--line));
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--success) 7%, var(--surface));
+  gap: 0.35rem;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
 }
 
 .conversation-handoff-card > header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.75rem;
 }
 
 .conversation-handoff-card h3,
@@ -506,45 +506,23 @@
 }
 
 .conversation-handoff-card h3 {
-  margin-top: 0.16rem;
-  font-size: var(--text-base);
+  margin-top: 0.08rem;
+  font-size: var(--text-sm);
 }
 
-.conversation-handoff-card > dl {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  margin: 0;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-sm);
-}
-
-.conversation-handoff-card > dl > div {
-  display: grid;
-  gap: 0.12rem;
-  padding: 0.55rem 0.65rem;
-}
-
-.conversation-handoff-card > dl > div + div {
-  border-left: 1px solid var(--line);
-}
-
-.conversation-handoff-card dt {
+.conversation-handoff-card > details > summary {
+  width: fit-content;
   color: var(--ink-muted);
   font-size: var(--text-xs);
   font-weight: 700;
-  text-transform: uppercase;
-}
-
-.conversation-handoff-card dd {
-  margin: 0;
-  font-size: var(--text-sm);
 }
 
 .conversation-handoff-details {
   display: grid;
   gap: 0.55rem;
+  margin-top: 0.5rem;
   padding-top: 0.6rem;
+  border-top: 1px solid var(--line);
 }
 
 .conversation-handoff-details section {
@@ -559,22 +537,30 @@
   line-height: 1.5;
 }
 
-.conversation-handoff-card > .btn {
+.conversation-handoff-details > .btn {
   width: fit-content;
 }
 
 .conversation-excerpt-control {
-  display: grid;
-  gap: 0.65rem;
-  padding: 0.75rem;
-  border: 1px solid color-mix(in srgb, var(--info) 32%, var(--line));
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--info) 6%, var(--surface));
+  border: 0;
+  color: var(--ink-muted);
 }
 
-.conversation-excerpt-control > div:first-child {
+.conversation-excerpt-control > summary {
+  width: fit-content;
+  cursor: pointer;
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.conversation-excerpt-body {
   display: grid;
-  gap: 0.15rem;
+  gap: 0.55rem;
+  margin-top: 0.45rem;
+  padding: 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
 }
 
 .conversation-excerpt-control p {
@@ -584,7 +570,7 @@
   line-height: 1.5;
 }
 
-.conversation-excerpt-control > .btn {
+.conversation-excerpt-body > .btn {
   width: fit-content;
 }
 
@@ -2179,11 +2165,13 @@
 }
 
 .execution-conversation-controls {
-  display: grid;
-  gap: 0.7rem;
-  padding: 0.75rem 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.5rem 1rem;
   border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--accent) 3%, var(--surface));
+  background: color-mix(in srgb, var(--accent) 2%, var(--surface));
 }
 
 .project-run-stop {
@@ -2242,14 +2230,21 @@
 
 .execution-conversation-controls > details,
 .pm-update-controls {
+  flex: 0 1 auto;
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   background: var(--surface);
+}
+
+.execution-conversation-controls > details[open],
+.execution-conversation-controls > .pm-update-controls[open],
+.execution-conversation-controls > .execution-action-history {
+  flex-basis: 100%;
 }
 
 .execution-conversation-controls > details > summary,
 .pm-update-controls > summary {
-  padding: 0.7rem 0.8rem;
+  padding: 0.5rem 0.65rem;
   cursor: pointer;
   font-size: var(--text-sm);
   font-weight: 700;
@@ -4103,8 +4098,8 @@
     display: grid;
   }
 
-  .conversation-handoff-card > .btn,
-  .conversation-excerpt-control > .btn,
+  .conversation-handoff-details > .btn,
+  .conversation-excerpt-body > .btn,
   .conversation-excerpt-control .actions .btn {
     width: 100%;
   }
@@ -4294,6 +4289,11 @@
     padding-inline: 0.75rem;
   }
 
+  .execution-conversation-controls > details,
+  .execution-conversation-controls > .pm-update-controls {
+    flex-basis: 100%;
+  }
+
   .conversation-header-target {
     max-width: min(58vw, 24rem);
   }
@@ -4358,14 +4358,22 @@
   }
 }
 
-/* The three-tab split wrapped the thread in .workspace-tab-panel, which is a
-   content-sized flex column. That removed the thread's ability to grow, so the
-   transcript collapsed from full height to ~314px. The panels must inherit the
-   growth .conversation-thread used to hand straight to its children.
-   Caught by e2e (frontdoor.spec.ts) — no unit test measures layout. */
+/* The chat panel owns the available height. The secondary implementation panel
+   is content-sized; allowing it to grow stretches its closed details into the
+   giant empty cards this layout is meant to avoid. */
 .conversation-thread > .workspace-tab-panel {
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-height: 0;
+}
+
+.conversation-thread > .conversation-work-tab-implementation {
+  flex: 0 0 auto;
+}
+
+.conversation-work-tab-development-chat {
+  gap: 0;
 }
 
 .conversation-development-start {
@@ -4392,6 +4400,18 @@
 
 .conversation-development-start h2 {
   font-size: 1.05rem;
+}
+
+.conversation-development-start.is-compact {
+  gap: 0.75rem;
+  margin: 0.55rem 1rem 0;
+  padding: 0.6rem 0.7rem;
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+}
+
+.conversation-development-start.is-compact h2 {
+  font-size: var(--text-sm);
 }
 
 .conversation-development-start p {
