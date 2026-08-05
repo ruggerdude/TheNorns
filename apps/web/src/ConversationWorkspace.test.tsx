@@ -863,7 +863,6 @@ describe("conversation workspace", () => {
       }),
     );
     const user = userEvent.setup();
-
     render(
       <ConversationWorkspace
         projectId={projectId}
@@ -4457,7 +4456,11 @@ describe("conversation workspace", () => {
       ({ url, init }) => url.endsWith("/work-items") && init?.method === "POST",
     );
     expect(JSON.parse(String(create?.init?.body))).toMatchObject({ workflow: "quick" });
-    expect(await screen.findByText("Brief ✓")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Development" })).toBeInTheDocument();
+    expect(screen.getByRole("complementary", { name: "Development phases" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Agent dialogue" })).toHaveTextContent(
+      "Agent activity will appear here",
+    );
     expect(screen.getByRole("button", { name: "Development chat" })).toHaveAttribute(
       "aria-current",
       "page",
@@ -4836,7 +4839,7 @@ describe("conversation workspace", () => {
     );
   });
 
-  it("keeps the target read-only and separates project-run stop from pause proposals", async () => {
+  it("shows live phases and agent dialogue while keeping project-run stop separate from pause proposals", async () => {
     const execution = executionConversation();
     const approvedVersion = planVersion({ status: "approved" });
     const baseHandoff = handoffFor(approvedVersion, execution.id);
@@ -4855,7 +4858,12 @@ describe("conversation workspace", () => {
           return Response.json({
             work_items: [
               {
-                work_item: { ...workItem, status: "executing" },
+                work_item: {
+                  ...workItem,
+                  status: "executing",
+                  phase_id: "phase-1",
+                  execution_started_at: now,
+                },
                 conversations: [execution],
               },
             ],
@@ -4863,7 +4871,12 @@ describe("conversation workspace", () => {
         }
         if (url.endsWith(`/conversations/${execution.id}`)) {
           return detailResponse([], null, null, {
-            workItem: { ...workItem, status: "executing" },
+            workItem: {
+              ...workItem,
+              status: "executing",
+              phase_id: "phase-1",
+              execution_started_at: now,
+            },
             conversation: execution,
             planVersions: [approvedVersion],
             handoff,
@@ -4886,11 +4899,64 @@ describe("conversation workspace", () => {
             },
           });
         }
+        if (url.endsWith("/phases/phase-1/execution")) {
+          return Response.json({
+            schema_version: 2,
+            project_id: projectId,
+            phase: {
+              id: "phase-1",
+              objective_summary: "Deliver conversation-first planning",
+              status: "active",
+              completed_tasks: 0,
+              total_tasks: 1,
+            },
+            tasks: [
+              {
+                id: "task-api",
+                title: "Core API",
+                state: "in_progress",
+                complexity: "moderate",
+                risk: "medium",
+                dependencies: [],
+                assignment: { provider: "openai", model: "gpt-5.6", status: "active" },
+                implementation_agent: {
+                  profile_id: "agent-api",
+                  provider: "openai",
+                  model: "gpt-5.6",
+                  roles: ["implementation"],
+                },
+                reviewer_agent: null,
+                run: {
+                  id: "run-office-1",
+                  state: "running",
+                  attempt: 1,
+                  verification_status: "pending",
+                  commit_sha: null,
+                  failure_detail: null,
+                  published_branch: null,
+                  pull_request_url: null,
+                  publication_note: null,
+                },
+                failed_verification_commands: [],
+                evidence_count: 0,
+                reviews: [],
+              },
+            ],
+          });
+        }
+        if (url.endsWith("/phases/phase-1/tasks/task-api/run-log")) {
+          return Response.json({
+            run_id: "run-office-1",
+            entries: [
+              { sequence: 1, occurred_at: now, chunk: "Implementing the approved API phase.\n" },
+            ],
+            truncated: false,
+            total_entries: 1,
+          });
+        }
         throw new Error(`Unexpected request: ${url}`);
       }),
     );
-    const user = userEvent.setup();
-
     render(
       <ConversationWorkspace
         projectId={projectId}
@@ -4904,29 +4970,23 @@ describe("conversation workspace", () => {
     expect(document.querySelector(".conversation-header-identity")).toContainElement(
       executionTargetLabel,
     );
-    await user.click(screen.getByRole("button", { name: "Chat options" }));
-    const agents = await screen.findByRole("button", { name: "Agents 1" });
-    expect(screen.queryByRole("complementary", { name: "Agent activity" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Agent dialogue" })).toBeVisible();
+    const phases = screen.getByRole("complementary", { name: "Development phases" });
+    expect(phases).toHaveTextContent("Core API");
+    expect(phases).toHaveTextContent("In progress");
+    expect(screen.getByRole("list", { name: "Agent activity transcript" })).toHaveTextContent(
+      "Implementation agent",
+    );
+    expect(screen.getByText("openai · gpt-5.6")).toBeInTheDocument();
+    expect(await screen.findByTestId("task-run-log-output-task-api")).toHaveTextContent(
+      "Implementing the approved API phase.",
+    );
     expect(screen.queryByRole("combobox", { name: "Agent task to stop" })).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /save execution target/i }),
     ).not.toBeInTheDocument();
-    await user.click(agents);
-
-    const drawer = screen.getByRole("complementary", { name: "Agent activity" });
-    expect(drawer).toHaveTextContent("1 planned agent task");
-    expect(drawer).toHaveTextContent("task-api");
-    expect(screen.queryByRole("combobox", { name: "Agent task to stop" })).not.toBeInTheDocument();
     expect(screen.getByRole("textbox", { name: "Stop reason" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Stop project work" })).toBeDisabled();
-    expect(drawer).toHaveTextContent("pause requests remain proposals");
-
-    const closeAgentActivity = screen
-      .getAllByRole("button", { name: "Close agent activity" })
-      .at(0);
-    if (!closeAgentActivity) throw new Error("Expected the agent drawer close control.");
-    await user.click(closeAgentActivity);
-    expect(screen.queryByRole("complementary", { name: "Agent activity" })).not.toBeInTheDocument();
   });
 
   it("offers a truthful status refresh instead of claiming an active stream can resume", async () => {
@@ -5036,7 +5096,7 @@ describe("conversation workspace", () => {
     );
   });
 
-  it("opens the approved Development chat and waits for an explicit start", async () => {
+  it("opens the approved Development chat and starts the approved agents automatically", async () => {
     const approvedVersion = planVersion({
       status: "approved",
       approved_by_user_id: "user-1",
@@ -5229,24 +5289,16 @@ describe("conversation workspace", () => {
       "Compacted summary v1",
     );
     expect(screen.queryByTestId("conversation-total-usage")).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("region", { name: "Approved plan ready for development" }),
-    ).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Start development" }));
+    expect(screen.getByRole("region", { name: "Development launch" })).toBeVisible();
     await waitFor(() => expect(developmentStartRequests).toBe(1));
     await waitFor(() => expect(developmentRetryRequests).toBe(1));
-    const busyStart = screen.getByRole("button", { name: "Starting development…" });
-    expect(busyStart).toBeDisabled();
-    fireEvent.click(busyStart);
-    expect(developmentStartRequests).toBe(1);
+    expect(screen.getByText("Starting development…")).toBeInTheDocument();
     await act(async () => {
       releaseDevelopmentRefresh();
       await developmentRefresh;
     });
     await waitFor(() =>
-      expect(
-        screen.queryByRole("region", { name: "Approved plan ready for development" }),
-      ).not.toBeInTheDocument(),
+      expect(screen.queryByRole("region", { name: "Development launch" })).not.toBeInTheDocument(),
     );
     expect(developmentStarted).toBe(true);
     const running = await screen.findByTestId("conversation-development-running");

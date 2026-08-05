@@ -24,6 +24,7 @@ import type {
   V2HumanWaitAnswerT,
   V2HumanWaitContinuationT,
   V2HumanWaitT,
+  V2PhaseExecutionT,
   V2PlanHandoffPreferenceT,
   V2QcModeT,
   V2WorkConversationT,
@@ -201,6 +202,20 @@ export async function getConversationExecution(
     await requestJson<unknown>(
       `/api/projects/${encodeURIComponent(projectId)}/conversations/${encodeURIComponent(conversationId)}/execution`,
     ),
+  );
+}
+
+/**
+ * The execution conversation's live, task-level view. This is the same
+ * durable phase projection used by the project execution screen, exposed
+ * here so Development can present the agents and their progress in-context.
+ */
+export function getConversationPhaseExecution(
+  projectId: string,
+  phaseId: string,
+): Promise<V2PhaseExecutionT> {
+  return requestJson(
+    `/api/v2/projects/${encodeURIComponent(projectId)}/phases/${encodeURIComponent(phaseId)}/execution`,
   );
 }
 

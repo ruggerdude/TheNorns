@@ -4471,3 +4471,361 @@
     width: 100%;
   }
 }
+
+/* Development is a first-class conversation workspace. Its approved phases
+   stay visible beside the live agent record instead of being split across a
+   build tab and a temporary activity drawer. */
+.conversation-work-tab-development-chat {
+  position: relative;
+  gap: 0.7rem;
+  padding-left: 15rem;
+  background: color-mix(in srgb, var(--surface-2) 28%, var(--surface));
+}
+
+.conversation-development-phases {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 2;
+  display: flex;
+  width: 15rem;
+  min-height: 0;
+  flex-direction: column;
+  gap: 0.9rem;
+  overflow-y: auto;
+  padding: 1rem 0.75rem;
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-2) 76%, var(--surface));
+}
+
+.conversation-development-phases header {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.conversation-development-phases header button {
+  width: fit-content;
+  padding: 0;
+  border: 0;
+  color: var(--ink);
+  background: transparent;
+  font: inherit;
+  font-size: 1.15rem;
+  font-weight: 800;
+  letter-spacing: -0.025em;
+}
+
+.conversation-development-phases header p,
+.conversation-development-phases > p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+
+.conversation-development-phase-progress {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.conversation-development-phase-progress > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.conversation-development-phase-progress strong {
+  color: var(--ink);
+}
+
+.conversation-development-phase-progress progress {
+  width: 100%;
+  height: 0.35rem;
+  accent-color: var(--accent);
+}
+
+.conversation-development-phases ol {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.conversation-development-phases li button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 1.65rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--ink-muted);
+  background: transparent;
+  text-align: left;
+}
+
+.conversation-development-phases li button:hover,
+.conversation-development-phases li button[aria-current="step"] {
+  border-color: color-mix(in srgb, var(--accent) 38%, var(--line));
+  color: var(--ink);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.conversation-development-phase-index {
+  display: grid;
+  width: 1.55rem;
+  height: 1.55rem;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  background: var(--surface);
+  font-size: var(--text-xs);
+  font-weight: 800;
+}
+
+.conversation-development-phases li[data-state="active"] .conversation-development-phase-index,
+.conversation-development-phases li[data-state="verifying"] .conversation-development-phase-index {
+  border-color: var(--accent);
+  color: white;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.conversation-development-phases li[data-state="complete"] .conversation-development-phase-index {
+  border-color: var(--success);
+  color: var(--success);
+}
+
+.conversation-development-phases li[data-state="blocked"] .conversation-development-phase-index,
+.conversation-development-phases li[data-state="waiting"] .conversation-development-phase-index {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.conversation-development-phases li button > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 0.08rem;
+}
+
+.conversation-development-phases li strong,
+.conversation-development-phases li small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-development-phases li strong {
+  color: inherit;
+  font-size: var(--text-sm);
+}
+
+.conversation-development-phases li small {
+  font-size: var(--text-xs);
+}
+
+.conversation-agent-dialogue {
+  display: grid;
+  gap: 0.8rem;
+  margin: 0.8rem 1rem 0;
+  padding: 1rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line));
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: 0 10px 28px color-mix(in srgb, var(--ink) 7%, transparent);
+}
+
+.conversation-agent-dialogue > header,
+.conversation-agent-dialogue-focus,
+.conversation-agent-dialogue-stream li > header {
+  display: flex;
+  align-items: center;
+}
+
+.conversation-agent-dialogue > header {
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.conversation-agent-dialogue > header > div {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.conversation-agent-dialogue h3,
+.conversation-agent-dialogue p {
+  margin: 0;
+}
+
+.conversation-agent-dialogue h3 {
+  font-size: 1.05rem;
+}
+
+.conversation-agent-dialogue > header p,
+.conversation-agent-objective {
+  color: var(--ink-muted);
+  font-size: var(--text-sm);
+}
+
+.conversation-agent-dialogue-body {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.conversation-agent-dialogue-focus {
+  gap: 0.55rem;
+}
+
+.conversation-agent-dialogue-focus > div {
+  display: grid;
+  gap: 0.08rem;
+}
+
+.conversation-agent-dialogue-focus small {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.conversation-agent-dialogue-empty {
+  display: grid;
+  min-height: 6rem;
+  place-items: center;
+  color: var(--ink-muted);
+  text-align: center;
+}
+
+.conversation-agent-dialogue-stream {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.conversation-agent-dialogue-stream li {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-2) 52%, var(--surface));
+}
+
+.conversation-agent-dialogue-stream li.is-reviewer {
+  margin-left: 1.25rem;
+  border-color: color-mix(in srgb, var(--accent) 26%, var(--line));
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+}
+
+.conversation-agent-dialogue-stream li > header {
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.conversation-agent-dialogue-stream time {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.conversation-agent-dialogue-stream p {
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.conversation-agent-dialogue .run-log {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--ink) 2%, var(--surface));
+}
+
+.conversation-agent-dialogue .run-log > summary {
+  padding: 0.6rem 0.75rem;
+  cursor: pointer;
+  font-size: var(--text-sm);
+  font-weight: 750;
+}
+
+.conversation-agent-dialogue .run-log-body {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0 0.75rem 0.75rem;
+}
+
+.conversation-agent-dialogue .run-log-output {
+  max-height: 16rem;
+  overflow: auto;
+  margin: 0;
+  padding: 0.75rem;
+  border-radius: 6px;
+  color: color-mix(in srgb, var(--ink) 92%, white);
+  background: color-mix(in srgb, var(--ink) 94%, black);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+}
+
+.conversation-agent-dialogue .run-log-meta {
+  display: flex;
+  justify-content: space-between;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.conversation-development-stop,
+.conversation-work-tab-development-chat > .conversation-development-running,
+.conversation-work-tab-development-chat > .conversation-development-start,
+.conversation-work-tab-development-chat > .conversation-context-receipt,
+.conversation-work-tab-development-chat > .conversation-thread-root,
+.conversation-work-tab-development-chat > .execution-conversation-controls {
+  min-width: 0;
+}
+
+.conversation-development-stop {
+  padding-inline: 1rem;
+}
+
+.conversation-work-tab-development-chat > .execution-conversation-controls {
+  margin-top: 0;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+
+@media (max-width: 880px) {
+  .conversation-work-tab-development-chat {
+    padding-left: 0;
+  }
+
+  .conversation-development-phases {
+    position: relative;
+    inset: auto;
+    width: auto;
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .conversation-development-phases ol {
+    grid-auto-columns: minmax(10rem, 1fr);
+    grid-auto-flow: column;
+    overflow-x: auto;
+    padding-bottom: 0.25rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .conversation-agent-dialogue {
+    margin-inline: 0.55rem;
+    padding: 0.75rem;
+  }
+
+  .conversation-agent-dialogue > header {
+    align-items: flex-start;
+  }
+
+  .conversation-agent-dialogue-stream li.is-reviewer {
+    margin-left: 0;
+  }
+}
