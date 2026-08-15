@@ -172,6 +172,7 @@ function renderWorkspace(
       onContinueWithoutQc={onContinueWithoutQc}
       onCancel={vi.fn().mockResolvedValue(undefined)}
       onStopAll={vi.fn().mockResolvedValue(undefined)}
+      onChat={vi.fn().mockResolvedValue(undefined)}
       onConfirmAction={vi.fn().mockResolvedValue(undefined)}
     />,
   );
@@ -239,29 +240,38 @@ describe("QcWorkspace", () => {
     ).toEqual({ active: "qc", round: 2, maxRounds: 2 });
   });
 
-  it("makes accept all, choose individually, and accept none the primary gate", () => {
+  it("uses one clear finding-action picker as the primary gate", () => {
     renderWorkspace();
     expect(screen.getByRole("heading", { name: "Quality control" })).toBeVisible();
     expect(screen.getAllByText("Round 1 of 2").length).toBeGreaterThan(0);
     expect(
       screen.getByRole("heading", { name: "Which findings should the PM act on?" }),
     ).toBeVisible();
-    expect(screen.getByRole("button", { name: "Accept all 2" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Choose individually" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Accept none" })).toBeVisible();
+    const picker = screen.getByRole("combobox", { name: "Quality control finding action" });
+    expect(picker).toBeVisible();
+    expect(picker).toHaveValue("all");
+    expect(
+      within(picker).getByRole("option", { name: "Send all 2 findings to the PM" }),
+    ).toBeVisible();
+    expect(within(picker).getByRole("option", { name: "Choose findings to send" })).toBeVisible();
+    expect(
+      within(picker).getByRole("option", {
+        name: "Keep the current plan and skip these findings",
+      }),
+    ).toBeVisible();
     expect(screen.getByText("Waiting on you")).toBeVisible();
-    expect(screen.getByText("Independent reviewer")).toBeVisible();
+    expect(screen.getAllByText("Independent reviewer").length).toBeGreaterThan(0);
     expect(screen.getByText("OpenAI · gpt")).toBeVisible();
     expect(
-      within(screen.getByRole("group", { name: "Quality control actions" }))
-        .getAllByRole("button")
-        .map((button) => button.textContent),
-    ).toEqual(["Stop QC and Agents", "Stop QC", "Send to PM"]);
+      within(screen.getByRole("group", { name: "Quality control actions" })).getByRole("button", {
+        name: "Send all 2 to PM",
+      }),
+    ).toBeVisible();
     expect(screen.queryAllByRole("checkbox")).toHaveLength(0);
-    expect(screen.getByText("Choose and document a deployment target.")).toBeVisible();
+    expect(screen.getAllByText("Choose and document a deployment target.").at(-1)).toBeVisible();
     expect(screen.queryByText("YOUR DECISION")).not.toBeInTheDocument();
     expect(screen.queryByText(/Nothing goes back to the planning manager/)).not.toBeInTheDocument();
-    expect(screen.queryByText("Review record")).not.toBeInTheDocument();
+    expect(screen.getByText("QC record")).toBeVisible();
     expect(screen.queryByText("Need to stop?")).not.toBeInTheDocument();
     expect(screen.queryByText("Plan with PM")).not.toBeInTheDocument();
     expect(screen.queryByText(/No planning manager response/)).not.toBeInTheDocument();
@@ -269,9 +279,8 @@ describe("QcWorkspace", () => {
 
   it("waits for Send to PM after accepting every finding", () => {
     const { onTriage } = renderWorkspace();
-    fireEvent.click(screen.getByRole("button", { name: "Accept all 2" }));
     expect(onTriage).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Send to PM" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send all 2 to PM" }));
     expect(onTriage).toHaveBeenCalledWith(review(), {
       "finding-1": "accept",
       "finding-2": "accept",
@@ -280,11 +289,11 @@ describe("QcWorkspace", () => {
 
   it("sends only the selected findings to the planning manager", () => {
     const { onTriage } = renderWorkspace();
-    fireEvent.click(screen.getByRole("button", { name: "Choose individually" }));
-    expect(screen.getByRole("button", { name: "Accept all 2" })).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Back" })).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("combobox", { name: "Quality control finding action" }), {
+      target: { value: "individual" },
+    });
     fireEvent.click(screen.getByRole("checkbox", { name: /Accuracy tolerance/ }));
-    const decision = screen.getByRole("button", { name: "Send to PM" });
+    const decision = screen.getByRole("button", { name: "Send 1 to PM" });
     fireEvent.click(decision);
     expect(onTriage).toHaveBeenCalledWith(review(), {
       "finding-1": "accept",
@@ -294,12 +303,14 @@ describe("QcWorkspace", () => {
 
   it("waits for an explicit action before overriding every finding", () => {
     const { onContinueWithoutQc } = renderWorkspace();
-    fireEvent.click(screen.getByRole("button", { name: "Accept none" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Quality control finding action" }), {
+      target: { value: "none" },
+    });
     expect(
-      within(screen.getByRole("alert")).getByText(/will not receive any findings/),
+      within(screen.getByRole("alert")).getByText(/will not receive these findings/),
     ).toBeVisible();
     expect(onContinueWithoutQc).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Keep current plan" }));
+    fireEvent.click(screen.getByRole("button", { name: "Keep plan and skip remaining QC" }));
     expect(onContinueWithoutQc).toHaveBeenCalledTimes(1);
   });
 
@@ -348,6 +359,8 @@ describe("QcWorkspace", () => {
         ],
       }),
     );
+    expect(screen.getByText("QC record")).toBeVisible();
+    fireEvent.click(screen.getByText("QC record"));
     expect(screen.getByRole("heading", { name: "Current review record" })).toBeVisible();
     expect(screen.queryByText(/WORK PLAN CONTRACT ENVELOPE/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Full reviewer/)).not.toBeInTheDocument();
@@ -445,6 +458,7 @@ describe("QcWorkspace", () => {
     expect(within(card).getByText("Plan Contract · Version 2")).toBeVisible();
     expect(within(card).getByText("Changes from version 1")).toBeVisible();
     expect(within(card).getByText("Documented the deployment target")).toBeVisible();
+    fireEvent.click(screen.getByText("QC record"));
     expect(screen.getByRole("heading", { name: "Current review record" })).toBeVisible();
     expect(screen.getAllByText("Accepted by PM")).toHaveLength(2);
     expect(screen.getAllByText("Recommendation")).toHaveLength(2);
@@ -498,6 +512,7 @@ describe("QcWorkspace", () => {
     expect(
       screen.getByRole("article", { name: "Ship the revised, measurable deployment plan" }),
     ).toBeVisible();
+    fireEvent.click(screen.getByText("QC record"));
     expect(screen.getByText("Accepted by PM")).toBeVisible();
     expect(screen.getByText("Excluded by you")).toBeVisible();
     expect(
@@ -562,12 +577,14 @@ describe("QcWorkspace", () => {
     });
     const { onTriage } = renderWorkspace(current);
 
-    fireEvent.click(screen.getByRole("button", { name: "Choose individually" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Quality control finding action" }), {
+      target: { value: "individual" },
+    });
     expect(
       screen.queryByRole("checkbox", { name: /Deployment target is undefined/ }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("checkbox", { name: /Accuracy tolerance is unclear/ })).toBeChecked();
-    fireEvent.click(screen.getByRole("button", { name: "Send to PM" }));
+    fireEvent.click(screen.getByRole("button", { name: "Send 1 to PM" }));
 
     expect(onTriage).toHaveBeenCalledWith(current, { "finding-2": "accept" });
   });
@@ -616,7 +633,7 @@ describe("QcWorkspace", () => {
     expect(screen.getByText("4:12 on this step")).toBeVisible();
     expect(screen.getAllByText("gpt").length).toBeGreaterThan(0);
     expect(screen.getByText("Working now")).toBeVisible();
-    expect(screen.getByText("Independent reviewer")).toBeVisible();
+    expect(screen.getAllByText("Independent reviewer").length).toBeGreaterThan(0);
     expect(screen.getByText("OpenAI · gpt")).toBeVisible();
     expect(screen.getByText("2 completed of 5 items")).toBeVisible();
     expect(screen.getByText("1,284 characters received")).toBeVisible();
@@ -628,7 +645,6 @@ describe("QcWorkspace", () => {
       "2",
     );
     expect(screen.getByText(/over its typical time/i)).toBeVisible();
-    fireEvent.click(screen.getByRole("tab", { name: "Live dialogue" }));
     expect(screen.getByText("Visible agent dialogue")).toBeVisible();
     expect(screen.getByText("Response streaming now")).toBeVisible();
     expect(screen.getByText(/"severity":"should_fix"/)).toBeVisible();

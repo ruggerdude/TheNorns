@@ -441,6 +441,31 @@
   background: color-mix(in srgb, var(--surface-2) 24%, transparent);
 }
 
+.conversation-context-drawer {
+  margin: 0 1rem;
+  border: 1px solid var(--line);
+  border-radius: 0.75rem;
+  background: var(--surface);
+}
+
+.conversation-context-drawer > summary {
+  cursor: pointer;
+  padding: 0.8rem 1rem;
+  color: var(--ink-muted);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+
+.conversation-context-drawer[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.conversation-context-drawer > .conversation-context-receipt {
+  margin: 0;
+  border: 0;
+  border-radius: 0 0 0.75rem 0.75rem;
+}
+
 .conversation-context-indicators {
   display: flex;
   flex-wrap: wrap;
@@ -3406,6 +3431,555 @@
   }
 }
 
+/* Planning and QC are durable workspaces, not chat attachments. The stage
+   rail keeps the earlier conversations available without forcing their full
+   transcripts above the current work. */
+.conversation-work-tab-plan.has-plan-workspace,
+.conversation-stage-workspace {
+  position: relative;
+  padding-left: 14.5rem;
+  background: color-mix(in srgb, var(--surface-2) 24%, var(--surface));
+}
+
+.conversation-stage-sidebar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 2;
+  display: grid;
+  width: 14.5rem;
+  align-content: start;
+  gap: 1rem;
+  padding: 1.1rem 0.8rem;
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-2) 78%, var(--surface));
+}
+
+.conversation-stage-sidebar header {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.conversation-stage-sidebar h2 {
+  margin: 0;
+  font-size: 1.08rem;
+  letter-spacing: -0.02em;
+}
+
+.conversation-stage-sidebar nav {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.conversation-stage-sidebar nav button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 1.7rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.65rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--ink-muted);
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.conversation-stage-sidebar nav button:hover,
+.conversation-stage-sidebar nav button[aria-current="page"] {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+  color: var(--ink);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.conversation-stage-sidebar nav button > span:first-child {
+  color: var(--accent);
+  font: 700 var(--text-xs) / 1 "DM Mono", monospace;
+}
+
+.conversation-stage-sidebar nav button > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.conversation-stage-sidebar small {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.conversation-plan-workspace,
+.conversation-archived-pm {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: 1rem;
+  padding: clamp(1rem, 2vw, 1.75rem);
+}
+
+.conversation-plan-workspace > header,
+.conversation-archived-pm > header {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.conversation-plan-workspace > header h2,
+.conversation-plan-workspace > header p,
+.conversation-archived-pm > header h2,
+.conversation-archived-pm > header p {
+  margin: 0;
+}
+
+.conversation-plan-workspace > header h2,
+.conversation-archived-pm > header h2 {
+  font-size: clamp(1.55rem, 2.6vw, 2.3rem);
+  letter-spacing: -0.04em;
+}
+
+.conversation-plan-workspace > header p,
+.conversation-archived-pm > header p {
+  max-width: 56rem;
+  color: var(--ink-muted);
+  font-size: 0.94rem;
+  line-height: 1.5;
+}
+
+.conversation-plan-workspace > .conversation-plan-card,
+.qc-new-plan-review .conversation-plan-card {
+  width: 100%;
+  margin: 0;
+  padding: clamp(1rem, 2vw, 1.5rem);
+  border-color: var(--line);
+  background: var(--surface);
+  box-shadow: 0 14px 36px color-mix(in srgb, var(--ink) 6%, transparent);
+}
+
+.conversation-plan-workspace .conversation-plan-card h3,
+.qc-new-plan-review .conversation-plan-card h3 {
+  max-width: 70rem;
+  font-size: clamp(1.05rem, 1.5vw, 1.28rem);
+  line-height: 1.42;
+  letter-spacing: -0.02em;
+}
+
+.conversation-plan-task {
+  --phase-color: var(--accent);
+  display: block;
+  padding: 0;
+  overflow: hidden;
+  border-left: 5px solid var(--phase-color);
+  background: var(--surface);
+}
+
+.conversation-plan-task[data-phase-tone="0"] {
+  --phase-color: var(--accent);
+}
+.conversation-plan-task[data-phase-tone="1"] {
+  --phase-color: var(--info);
+}
+.conversation-plan-task[data-phase-tone="2"] {
+  --phase-color: var(--success);
+}
+.conversation-plan-task[data-phase-tone="3"] {
+  --phase-color: var(--gold);
+}
+.conversation-plan-task[data-phase-tone="4"] {
+  --phase-color: var(--warn);
+}
+
+.conversation-plan-task > details {
+  padding: 0;
+  border: 0;
+}
+
+.conversation-plan-task > details > .conversation-plan-task-heading {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 2rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem;
+  list-style: none;
+  cursor: pointer;
+}
+
+.conversation-plan-task > details > .conversation-plan-task-heading::-webkit-details-marker {
+  display: none;
+}
+
+.conversation-plan-phase-number {
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--phase-color);
+  background: color-mix(in srgb, var(--phase-color) 12%, var(--surface));
+  font-weight: 850;
+}
+
+.conversation-plan-phase-title {
+  display: grid;
+  min-width: 0;
+  gap: 0.08rem;
+}
+
+.conversation-plan-phase-title small {
+  color: var(--phase-color);
+  font-size: 0.7rem;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.conversation-plan-phase-title strong {
+  font-size: 1rem;
+  line-height: 1.3;
+}
+
+.conversation-plan-phase-title code {
+  color: var(--ink-muted);
+  font-size: 0.72rem;
+}
+
+.conversation-plan-phase-toggle {
+  display: grid;
+  grid-column: 3;
+  grid-row: 1;
+  justify-items: end;
+  gap: 0.2rem;
+}
+
+.conversation-plan-phase-toggle > .badge {
+  white-space: nowrap;
+  text-transform: none;
+}
+
+.conversation-plan-phase-toggle > small {
+  color: var(--ink-muted);
+  font-size: 0.68rem;
+}
+
+.conversation-plan-task-body {
+  display: grid;
+  gap: 1rem;
+  padding: 0 1rem 1rem 3.75rem;
+}
+
+.conversation-plan-task-description {
+  max-width: 72rem;
+  color: var(--ink-muted);
+  font-size: 0.92rem;
+  line-height: 1.58;
+}
+
+.conversation-plan-agent {
+  display: grid;
+  grid-template-columns: minmax(11rem, 0.8fr) minmax(14rem, 1.2fr);
+  align-items: center;
+  gap: 1rem;
+  padding: 0.8rem;
+  border: 1px solid color-mix(in srgb, var(--phase-color) 24%, var(--line));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--phase-color) 5%, var(--surface));
+}
+
+.conversation-plan-agent > div {
+  display: grid;
+  gap: 0.1rem;
+}
+
+.conversation-plan-agent > div > span {
+  font-weight: 800;
+}
+
+.conversation-plan-agent small {
+  color: var(--ink-muted);
+}
+
+.conversation-plan-agent select {
+  width: 100%;
+}
+
+.conversation-plan-acceptance-section {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.conversation-plan-acceptance-section > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.conversation-plan-acceptance-section h5 {
+  margin: 0;
+  font-size: 0.9rem;
+}
+
+.conversation-plan-acceptance-section > header span {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.conversation-plan-acceptance {
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  list-style: none;
+}
+
+.conversation-plan-acceptance li {
+  display: grid;
+  grid-template-columns: 2.4rem minmax(0, 1fr);
+  gap: 0.65rem;
+  padding: 0.7rem 0.8rem;
+}
+
+.conversation-plan-acceptance li + li {
+  border-top: 1px solid var(--line);
+}
+
+.conversation-plan-acceptance li > span {
+  margin: 0;
+  color: var(--phase-color);
+  font: 750 var(--text-xs) / 1.5 "DM Mono", monospace;
+}
+
+.conversation-plan-acceptance li > div {
+  display: grid;
+  gap: 0.16rem;
+}
+
+.conversation-plan-acceptance small {
+  color: var(--ink-muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.conversation-plan-wide-requirements {
+  display: grid;
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.conversation-plan-wide-requirements > section {
+  padding: 0.85rem 1rem;
+}
+
+.conversation-plan-wide-requirements > section + section {
+  border-top: 1px solid var(--line);
+}
+
+.conversation-plan-workspace-actions,
+.conversation-plan-agent-save {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.conversation-plan-agent-save {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.conversation-plan-agent-save span,
+.conversation-plan-decisions > p {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.conversation-plan-decisions {
+  align-items: center;
+  justify-content: flex-end;
+  padding-top: 0.8rem;
+  border-top: 1px solid var(--line);
+}
+
+.conversation-plan-decisions > p {
+  margin-right: auto;
+}
+
+.conversation-plan-main-view .conversation-thread-root {
+  min-height: 0;
+  flex: 0 0 auto;
+  background: transparent;
+}
+
+.conversation-plan-main-view .conversation-thread-viewport {
+  min-height: 0;
+  padding-top: 0;
+}
+
+.conversation-plan-main-view .conversation-message,
+.conversation-plan-main-view .conversation-welcome {
+  display: none;
+}
+
+.conversation-plan-main-view .conversation-composer-footer {
+  position: relative;
+  inset: auto;
+  margin-top: 0;
+  padding: 0.75rem clamp(1rem, 2vw, 1.75rem) 1.5rem;
+  background: transparent;
+}
+
+.conversation-archived-pm ol {
+  display: grid;
+  gap: 0.8rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.conversation-archived-pm li {
+  display: grid;
+  max-width: 62rem;
+  gap: 0.35rem;
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.conversation-archived-pm li[data-role="user"] {
+  justify-self: end;
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+}
+
+.conversation-archived-pm li p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.conversation-development-conversations {
+  display: grid;
+  gap: 0.25rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.conversation-development-conversations button {
+  padding: 0.5rem 0.55rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--ink-muted);
+  background: transparent;
+  font: inherit;
+  font-size: var(--text-sm);
+  font-weight: 750;
+  text-align: left;
+  cursor: pointer;
+}
+
+.conversation-development-conversations button:hover,
+.conversation-development-conversations button[aria-current="page"] {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+  color: var(--ink);
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface));
+}
+
+.conversation-development-phase-list > summary {
+  margin-bottom: 0.45rem;
+  font-size: var(--text-sm);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.conversation-development-phases li {
+  --phase-color: var(--accent);
+}
+
+.conversation-development-phases li[data-phase-tone="0"] {
+  --phase-color: var(--accent);
+}
+.conversation-development-phases li[data-phase-tone="1"] {
+  --phase-color: var(--info);
+}
+.conversation-development-phases li[data-phase-tone="2"] {
+  --phase-color: var(--success);
+}
+.conversation-development-phases li[data-phase-tone="3"] {
+  --phase-color: var(--gold);
+}
+.conversation-development-phases li[data-phase-tone="4"] {
+  --phase-color: var(--warn);
+}
+
+.conversation-development-phases li .conversation-development-phase-index {
+  border-color: color-mix(in srgb, var(--phase-color) 54%, var(--line));
+  color: var(--phase-color);
+}
+
+.conversation-context-receipt {
+  margin-inline: 1rem;
+}
+
+@media (max-width: 880px) {
+  .conversation-work-tab-plan.has-plan-workspace,
+  .conversation-stage-workspace {
+    padding-left: 0;
+  }
+
+  .conversation-stage-sidebar {
+    position: relative;
+    inset: auto;
+    width: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .conversation-stage-sidebar nav {
+    grid-auto-columns: minmax(10rem, 1fr);
+    grid-auto-flow: column;
+    overflow-x: auto;
+  }
+}
+
+@media (max-width: 640px) {
+  .conversation-plan-task > details > .conversation-plan-task-heading {
+    grid-template-columns: 2rem minmax(0, 1fr);
+  }
+
+  .conversation-plan-task-heading > .badge {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+    margin: 0;
+  }
+
+  .conversation-plan-task > details > .conversation-plan-task-heading::after {
+    display: none;
+  }
+
+  .conversation-plan-task-body {
+    padding-left: 1rem;
+  }
+
+  .conversation-plan-agent,
+  .conversation-plan-agent-save {
+    grid-template-columns: 1fr;
+  }
+
+  .conversation-plan-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .conversation-plan-summary > div + div {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+}
+
 .conversation-send-button {
   border-color: var(--accent);
   color: #fff;
@@ -4502,12 +5076,10 @@
   gap: 0.3rem;
 }
 
-.conversation-development-phases header button {
+.conversation-development-phases header h2 {
   width: fit-content;
-  padding: 0;
-  border: 0;
+  margin: 0;
   color: var(--ink);
-  background: transparent;
   font: inherit;
   font-size: 1.15rem;
   font-weight: 800;

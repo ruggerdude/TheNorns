@@ -591,7 +591,10 @@ type ConversationActionContextValue = {
   planChangeBusyId: string | null;
   planChangeErrors: Map<string, string>;
   planChangeLockedIds: Set<string>;
-  proposePlanChanges: (version: V2WorkPlanVersionT, direction: string) => Promise<boolean>;
+  proposePlanChanges: (
+    version: V2WorkPlanVersionT,
+    direction: string,
+  ) => Promise<V2ConversationActionT | null>;
   reviewBusyId: string | null;
   reviewErrors: Map<string, ReviewActionError>;
   cancelReview: (review: V2ConversationPlanReviewT, reason: string) => Promise<void>;
@@ -1578,131 +1581,7 @@ function HumanWaitUpdatePreview({
   );
 }
 
-function planChangeDraftStorageKey(planVersionId: string): string {
-  return `norns:conversation-plan-change-draft:${planVersionId}`;
-}
-
-function storedPlanChangeDraft(planVersionId: string): string {
-  try {
-    return window.sessionStorage.getItem(planChangeDraftStorageKey(planVersionId)) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function PlanChangeControl({
-  reviews,
-  version,
-}: {
-  reviews: V2ConversationPlanReviewT[];
-  version: V2WorkPlanVersionT;
-}): React.ReactElement | null {
-  const context = useContext(ConversationActionContext);
-  const [direction, setDirection] = useState(() => storedPlanChangeDraft(version.id));
-  if (!context || !["candidate", "in_qc"].includes(version.status)) {
-    return null;
-  }
-
-  const pendingAction = [...context.actions.values()].find((action) => {
-    if (action.action_type !== "request_plan_changes" || action.status !== "proposed") return false;
-    const parameters = action.payload.parameters as V2RequestPlanChangesParametersT;
-    return (
-      parameters.plan_version_id === version.id && parameters.content_hash === version.content_hash
-    );
-  });
-  const activeReview = reviews.find(
-    (review) => review.status === "queued" || review.status === "running",
-  );
-  const retryLocked = context.planChangeLockedIds.has(version.id);
-  const titleId = `conversation-plan-change-${version.id}`;
-
-  if (pendingAction) {
-    return (
-      <section className="conversation-plan-change-control is-ready" aria-labelledby={titleId}>
-        <div>
-          <h4 id={titleId}>Request changes ready</h4>
-          <p>
-            The exact direction is recorded in a proposed action. Confirm that action separately to
-            change project state.
-          </p>
-        </div>
-      </section>
-    );
-  }
-
-  return (
-    <section className="conversation-plan-change-control" aria-labelledby={titleId}>
-      <div>
-        <h4 id={titleId}>Request plan changes</h4>
-        <p>
-          Record the exact direction you want the PM to follow. Preparing it creates an inert action
-          for separate confirmation.
-        </p>
-      </div>
-      <label htmlFor={`${titleId}-direction`}>Change direction</label>
-      <TextArea
-        id={`${titleId}-direction`}
-        value={direction}
-        maxLength={2_000}
-        disabled={
-          activeReview !== undefined || retryLocked || context.planChangeBusyId === version.id
-        }
-        placeholder="Describe exactly what should change and why…"
-        onChange={(event) => {
-          const next = event.target.value;
-          setDirection(next);
-          try {
-            window.sessionStorage.setItem(planChangeDraftStorageKey(version.id), next);
-          } catch {
-            // The current component still retains the draft when storage is unavailable.
-          }
-        }}
-      />
-      <div className="conversation-plan-change-actions">
-        <span>
-          {activeReview
-            ? `Unavailable while QC is ${activeReview.status}.`
-            : retryLocked
-              ? "Direction locked until this exact request is safely retried."
-              : `${direction.length.toLocaleString()} / 2,000 characters`}
-        </span>
-        <Button
-          className="btn-small"
-          disabled={
-            activeReview !== undefined ||
-            context.planChangeBusyId === version.id ||
-            !direction.trim()
-          }
-          aria-label="Prepare request changes action"
-          onClick={() => {
-            void context.proposePlanChanges(version, direction.trim()).then((created) => {
-              if (!created) return;
-              setDirection("");
-              try {
-                window.sessionStorage.removeItem(planChangeDraftStorageKey(version.id));
-              } catch {
-                // The durable user-authored action is already server-owned.
-              }
-            });
-          }}
-        >
-          {context.planChangeBusyId === version.id
-            ? "Preparing…"
-            : retryLocked
-              ? "Retry preparing request changes"
-              : "Prepare request changes"}
-        </Button>
-      </div>
-      {context.planChangeErrors.get(version.id) ? (
-        <output className="conversation-action-error" role="alert">
-          {context.planChangeErrors.get(version.id)}
-        </output>
-      ) : null}
-    </section>
-  );
-}
-
-function StaffingReviewControl({
+function PlanningPlanWorkspace({
   reviews,
   version,
 }: {
@@ -1737,122 +1616,123 @@ function StaffingReviewControl({
     };
   }, []);
 
-  if (!context || !["candidate", "in_qc"].includes(version.status)) return null;
+  if (!context) return null;
   const changed = version.plan.staffing.some(
     (staffing) => selection[staffing.module_id] !== `${staffing.provider}:${staffing.model}`,
   );
 
+  const prepareAgentChanges = async (): Promise<void> => {
+    if (!changed) return;
+    const assignments = version.plan.staffing.map((staffing) => {
+      const [provider, ...modelParts] = (
+        selection[staffing.module_id] ?? `${staffing.provider}:${staffing.model}`
+      ).split(":");
+      return `- ${staffing.module_id}: role "${staffing.agent_role}", provider "${provider}", model "${modelParts.join(":")}"`;
+    });
+    const action = await context.proposePlanChanges(
+      version,
+      [
+        "Update only the staffing assignments in the Work Plan Contract to exactly the following:",
+        ...assignments,
+        "Preserve every task, dependency, acceptance check, verification requirement, risk, open decision, and budget unless a staffing change strictly requires a corresponding clarification.",
+      ].join("\n"),
+    );
+    if (action) await context.confirm(action);
+  };
+
   return (
-    <details className="conversation-staffing-review">
-      <summary>Review or change implementation agents</summary>
-      <div>
-        <p>
-          Every plan task already has one pinned role, provider, and model. Changes create a new
-          immutable plan version so the final approval always shows the exact team that will run.
-        </p>
-        <div className="conversation-staffing-grid">
-          {version.plan.staffing.map((staffing) => {
-            const module = version.plan.plan.modules.find(
-              (candidate) => candidate.id === staffing.module_id,
-            );
-            const currentValue = `${staffing.provider}:${staffing.model}`;
-            const options = [...(models ?? [])];
-            if (!options.some((model) => `${model.provider}:${model.id}` === currentValue)) {
-              options.unshift({
-                provider: staffing.provider,
-                id: staffing.model,
-                label: staffing.model,
-                available: true,
-                unavailable_reason: null,
-              });
-            }
-            const selectId = `staffing-agent-${version.id}-${staffing.module_id}`;
-            return (
-              <label key={staffing.module_id} htmlFor={selectId}>
-                <span>
-                  <strong>{module?.title ?? staffing.module_id}</strong>
-                  <small>{staffing.agent_role}</small>
-                </span>
-                <Select
-                  id={selectId}
-                  aria-label={`Agent for ${module?.title ?? staffing.module_id}`}
-                  value={selection[staffing.module_id] ?? currentValue}
-                  disabled={
-                    models === null ||
-                    activeReview !== undefined ||
-                    context.planChangeBusyId === version.id
-                  }
-                  onChange={(event) =>
-                    setSelection((current) => ({
-                      ...current,
-                      [staffing.module_id]: event.target.value,
-                    }))
-                  }
+    <section className="conversation-plan-workspace" aria-labelledby="planning-workspace-title">
+      <header>
+        <div>
+          <span className="eyebrow">Plan · Version {version.version}</span>
+          <h2 id="planning-workspace-title">Implementation plan</h2>
+          <p>
+            Review the phases, choose an agent for each one, then send the plan to quality control.
+          </p>
+        </div>
+      </header>
+      <ConversationPlanCard
+        version={version}
+        renderStaffing={({ module, staffing, phaseNumber }) => {
+          if (!staffing) return <strong>Staffing unavailable</strong>;
+          const currentValue = `${staffing.provider}:${staffing.model}`;
+          const options = [...(models ?? [])];
+          if (!options.some((model) => `${model.provider}:${model.id}` === currentValue)) {
+            options.unshift({
+              provider: staffing.provider,
+              id: staffing.model,
+              label: staffing.model,
+              available: true,
+              unavailable_reason: null,
+            });
+          }
+          const selectId = `phase-${phaseNumber}-agent-${version.id}-${module.id}`;
+          return (
+            <Select
+              id={selectId}
+              aria-label={`Implementation agent for phase ${phaseNumber}: ${module.title}`}
+              value={selection[staffing.module_id] ?? currentValue}
+              disabled={
+                models === null ||
+                activeReview !== undefined ||
+                context.planChangeBusyId === version.id ||
+                !["candidate", "in_qc"].includes(version.status)
+              }
+              onChange={(event) =>
+                setSelection((current) => ({
+                  ...current,
+                  [staffing.module_id]: event.target.value,
+                }))
+              }
+            >
+              {options.map((model) => (
+                <option
+                  key={`${staffing.module_id}:${model.provider}:${model.id}`}
+                  value={`${model.provider}:${model.id}`}
                 >
-                  {options.map((model) => (
-                    <option
-                      key={`${staffing.module_id}:${model.provider}:${model.id}`}
-                      value={`${model.provider}:${model.id}`}
-                    >
-                      {model.label} · {model.provider}
-                    </option>
-                  ))}
-                </Select>
-              </label>
-            );
-          })}
-        </div>
-        <div className="conversation-staffing-actions">
-          <span>
-            {activeReview
-              ? "Stop or finish QC before changing the team."
-              : changed
-                ? "Agent changes are ready to prepare."
-                : "The displayed team is the team encoded in this plan."}
-          </span>
-          <Button
-            disabled={
-              !changed || activeReview !== undefined || context.planChangeBusyId === version.id
-            }
-            onClick={() => {
-              const assignments = version.plan.staffing.map((staffing) => {
-                const [provider, ...modelParts] = (
-                  selection[staffing.module_id] ?? `${staffing.provider}:${staffing.model}`
-                ).split(":");
-                return `- ${staffing.module_id}: role "${staffing.agent_role}", provider "${provider}", model "${modelParts.join(":")}"`;
-              });
-              void context.proposePlanChanges(
-                version,
-                [
-                  "Update only the staffing assignments in the Work Plan Contract to exactly the following:",
-                  ...assignments,
-                  "Preserve every task, dependency, acceptance check, verification requirement, risk, open decision, and budget unless a staffing change strictly requires a corresponding clarification.",
-                ].join("\n"),
-              );
-            }}
-          >
-            {context.planChangeBusyId === version.id
-              ? "Preparing team change…"
-              : "Prepare team change"}
-          </Button>
-        </div>
-      </div>
-    </details>
+                  {model.label} · {aiProviderLabel(model.provider)}
+                </option>
+              ))}
+            </Select>
+          );
+        }}
+        footer={
+          <div className="conversation-plan-workspace-actions">
+            <div className="conversation-plan-agent-save">
+              <span>
+                {activeReview
+                  ? "Agent assignments are locked while QC is running."
+                  : changed
+                    ? "Agent changes will create a new plan version before QC."
+                    : "Each phase keeps its displayed agent through approval."}
+              </span>
+              {changed ? (
+                <Button
+                  disabled={activeReview !== undefined || context.planChangeBusyId === version.id}
+                  onClick={() => void prepareAgentChanges()}
+                >
+                  {context.planChangeBusyId === version.id
+                    ? "Updating agents…"
+                    : "Update phase agents"}
+                </Button>
+              ) : null}
+            </div>
+            <PlanDecisionControls version={version} />
+          </div>
+        }
+      />
+      {context.planChangeErrors.get(version.id) ? (
+        <output className="conversation-action-error" role="alert">
+          {context.planChangeErrors.get(version.id)}
+        </output>
+      ) : null}
+    </section>
   );
 }
 
 function PlanPreview({ data }: DataMessagePartProps<PlanData>): React.ReactElement {
   if (!data.version) return <ReferenceCard data={data} />;
-  return (
-    <>
-      <ConversationPlanCard
-        version={data.version}
-        footer={<PlanDecisionControls version={data.version} />}
-      />
-      <StaffingReviewControl version={data.version} reviews={data.reviews} />
-      <PlanChangeControl version={data.version} reviews={data.reviews} />
-    </>
-  );
+  return <ConversationPlanCard version={data.version} />;
 }
 
 const COMPACT_PLAN_ACTION_STATUSES = new Set([
@@ -1885,7 +1765,6 @@ function PlanDecisionControls({
   const skipsQc =
     send !== null &&
     (send.payload.parameters.review as { mode?: string } | undefined)?.mode === "skip_qc";
-  const qcModeId = `plan-review-cadence-${version.id}`;
 
   useEffect(() => {
     if (!send || skipsQc) return;
@@ -1909,25 +1788,17 @@ function PlanDecisionControls({
 
   return (
     <div className="conversation-plan-decisions" aria-label="Plan review actions">
-      {send && !skipsQc ? (
-        <label htmlFor={qcModeId}>
-          <span>Review cadence</span>
-          <Select
-            id={qcModeId}
-            aria-label="Review cadence"
-            value={qcMode}
-            disabled={busy}
-            onChange={(event) => setQcMode(event.target.value as QcModeT)}
-          >
-            {QC_MODE_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </Select>
-        </label>
-      ) : null}
+      <p>
+        {skipsQc
+          ? "Continue with this exact plan without another quality-control pass."
+          : "Return to the PM to replace this candidate, or send the exact version to quality control."}
+      </p>
       <div>
+        {reject ? (
+          <Button variant="danger" disabled={busy} onClick={() => void context.confirm(reject)}>
+            {context.busyActionId === reject.id ? "Returning…" : "Return to PM"}
+          </Button>
+        ) : null}
         {send ? (
           <Button
             variant="primary"
@@ -1939,11 +1810,6 @@ function PlanDecisionControls({
               : skipsQc
                 ? "Continue without QC"
                 : "Send to QC"}
-          </Button>
-        ) : null}
-        {reject ? (
-          <Button variant="danger" disabled={busy} onClick={() => void context.confirm(reject)}>
-            {context.busyActionId === reject.id ? "Rejecting…" : "Reject plan"}
           </Button>
         ) : null}
       </div>
@@ -2025,6 +1891,7 @@ function ConversationQcActivity({
       onContinueWithoutQc={context.continueWithoutQc}
       onCancel={context.cancelReview}
       onStopAll={context.stopAllWork}
+      onChat={context.continueReviewChat}
       onConfirmAction={context.confirm}
     />
   );
@@ -3292,6 +3159,8 @@ function ConversationComposer({
   planIntentEnabled,
   planIntentBusy,
   onUseAsPlan,
+  planVersion,
+  onRequestPlanChanges,
   prefillText,
   onPrefillConsumed,
 }: {
@@ -3303,6 +3172,8 @@ function ConversationComposer({
   planIntentEnabled: boolean;
   planIntentBusy: boolean;
   onUseAsPlan: (message: string, handoff?: V2PlanHandoffPreferenceT) => void;
+  planVersion: V2WorkPlanVersionT | null;
+  onRequestPlanChanges: (version: V2WorkPlanVersionT, direction: string) => Promise<boolean>;
   prefillText?: string | null;
   onPrefillConsumed?: () => void;
 }): React.ReactElement {
@@ -3361,6 +3232,14 @@ function ConversationComposer({
     composer.setText("");
     onUseAsPlan(message);
   };
+  const requestPlanChanges = async (): Promise<void> => {
+    const state = composer.getState();
+    const direction = state.text.trim();
+    if (!planVersion || !direction || state.attachments.length > 0 || planIntentBusy) return;
+    composer.setText("");
+    const created = await onRequestPlanChanges(planVersion, direction);
+    if (!created) composer.setText(direction);
+  };
 
   return (
     <ComposerPrimitive.AttachmentDropzone asChild>
@@ -3382,7 +3261,9 @@ function ConversationComposer({
           placeholder={
             isExecution
               ? "Message the development chat…"
-              : "Message the PM, or say “Use this as the plan”…"
+              : planVersion
+                ? "Ask the PM a question or describe the plan changes you want…"
+                : "Message the PM, or say “Use this as the plan”…"
           }
           aria-label={isExecution ? "Message the development chat" : "Message the project PM"}
           addAttachmentOnPaste={false}
@@ -3417,7 +3298,7 @@ function ConversationComposer({
               Stop
             </ComposerPrimitive.Cancel>
           ) : null}
-          {isPlanning ? (
+          {isPlanning && !planVersion ? (
             <button
               type="button"
               className="conversation-plan-button"
@@ -3433,9 +3314,19 @@ function ConversationComposer({
               {planIntentBusy ? "Planning…" : "Plan"}
             </button>
           ) : null}
+          {isPlanning && planVersion && !responseRunning ? (
+            <button
+              type="button"
+              className="conversation-plan-button"
+              disabled={planIntentBusy || !hasDraft || hasAttachments}
+              onClick={() => void requestPlanChanges()}
+            >
+              {planIntentBusy ? "Updating…" : "Update plan"}
+            </button>
+          ) : null}
           {!responseRunning ? (
             <ComposerPrimitive.Send className="conversation-send-button" aria-label="Send message">
-              Send
+              {planVersion ? "Ask PM" : "Send"}
             </ComposerPrimitive.Send>
           ) : null}
         </div>
@@ -3532,6 +3423,113 @@ function PlanGenerationProgress({
 type DevelopmentTask = V2PhaseExecutionT["tasks"][number];
 type DevelopmentPhaseState = "complete" | "active" | "verifying" | "waiting" | "blocked" | "queued";
 
+type PlanningStageView = "pm" | "plan" | "qc";
+
+function ConversationStageSidebar({
+  view,
+  hasPlan,
+  hasQc,
+  developmentConversationId,
+  onSelect,
+  onOpenConversation,
+}: {
+  view: PlanningStageView;
+  hasPlan: boolean;
+  hasQc: boolean;
+  developmentConversationId: string | null;
+  onSelect: (view: PlanningStageView) => void;
+  onOpenConversation: (conversationId: string) => Promise<void>;
+}): React.ReactElement {
+  return (
+    <aside className="conversation-stage-sidebar" aria-label="Project conversations">
+      <header>
+        <span className="eyebrow">Project record</span>
+        <h2>Conversations</h2>
+      </header>
+      <nav>
+        <button
+          type="button"
+          aria-current={view === "pm" ? "page" : undefined}
+          onClick={() => onSelect("pm")}
+        >
+          <span>01</span>
+          <span>
+            <strong>Original PM</strong>
+            <small>Project conversation</small>
+          </span>
+        </button>
+        {hasPlan ? (
+          <button
+            type="button"
+            aria-current={view === "plan" ? "page" : undefined}
+            onClick={() => onSelect("plan")}
+          >
+            <span>02</span>
+            <span>
+              <strong>Plan</strong>
+              <small>Phases and agents</small>
+            </span>
+          </button>
+        ) : null}
+        {hasQc ? (
+          <button
+            type="button"
+            aria-current={view === "qc" ? "page" : undefined}
+            onClick={() => onSelect("qc")}
+          >
+            <span>03</span>
+            <span>
+              <strong>Quality control</strong>
+              <small>Reviewer ↔ PM record</small>
+            </span>
+          </button>
+        ) : null}
+        {developmentConversationId ? (
+          <button type="button" onClick={() => void onOpenConversation(developmentConversationId)}>
+            <span>04</span>
+            <span>
+              <strong>Development</strong>
+              <small>Separate live chat</small>
+            </span>
+          </button>
+        ) : null}
+      </nav>
+    </aside>
+  );
+}
+
+function ArchivedPmConversation({
+  messages,
+}: {
+  messages: V2WorkMessageT[];
+}): React.ReactElement {
+  const transcript = messages.flatMap((message) => {
+    if (message.role === "system") return [];
+    const text = message.parts
+      .flatMap((part) => (part.type === "text" ? [part.text.trim()] : []))
+      .filter(Boolean)
+      .join("\n\n");
+    return text ? [{ id: message.id, role: message.role, text }] : [];
+  });
+  return (
+    <section className="conversation-archived-pm" aria-labelledby="archived-pm-title">
+      <header>
+        <span className="eyebrow">Previous conversation</span>
+        <h2 id="archived-pm-title">Original Project Manager chat</h2>
+        <p>This record is collapsed behind its own workspace so the plan can use the page.</p>
+      </header>
+      <ol>
+        {transcript.map((message) => (
+          <li key={message.id} data-role={message.role}>
+            <strong>{message.role === "user" ? "You" : "Project Manager"}</strong>
+            <p>{message.text}</p>
+          </li>
+        ))}
+      </ol>
+    </section>
+  );
+}
+
 type DevelopmentPhaseItem = {
   id: string;
   title: string;
@@ -3606,11 +3604,15 @@ function developmentStateLabel(state: DevelopmentPhaseState): string {
 function DevelopmentPhaseSidebar({
   phases,
   selectedId,
+  planningConversationId,
   onSelect,
+  onOpenConversation,
 }: {
   phases: DevelopmentPhaseItem[];
   selectedId: string | null;
+  planningConversationId: string | null;
   onSelect: (phaseId: string) => void;
+  onOpenConversation: (conversationId: string) => Promise<void>;
 }): React.ReactElement {
   const completed = phases.filter((phase) => phase.state === "complete").length;
   const progress = phases.length === 0 ? 0 : Math.round((completed / phases.length) * 100);
@@ -3618,11 +3620,19 @@ function DevelopmentPhaseSidebar({
     <aside className="conversation-development-phases" aria-label="Development phases">
       <header>
         <span className="eyebrow">Workspace</span>
-        <button type="button" aria-label="Development chat" aria-current="page">
-          Development
-        </button>
+        <h2>Development chat</h2>
         <p>The approved phases update as agents work.</p>
       </header>
+      <nav className="conversation-development-conversations" aria-label="Project conversations">
+        {planningConversationId ? (
+          <button type="button" onClick={() => void onOpenConversation(planningConversationId)}>
+            Original PM &amp; QC
+          </button>
+        ) : null}
+        <button type="button" aria-current="page">
+          Development chat
+        </button>
+      </nav>
       <div className="conversation-development-phase-progress">
         <div>
           <span>{completed} complete</span>
@@ -3631,25 +3641,28 @@ function DevelopmentPhaseSidebar({
         <progress aria-label="Development phases completed" max={100} value={progress} />
       </div>
       {phases.length > 0 ? (
-        <ol>
-          {phases.map((phase, index) => (
-            <li key={phase.id} data-state={phase.state}>
-              <button
-                type="button"
-                aria-current={selectedId === phase.id ? "step" : undefined}
-                onClick={() => onSelect(phase.id)}
-              >
-                <span className="conversation-development-phase-index" aria-hidden="true">
-                  {phase.state === "complete" ? "✓" : index + 1}
-                </span>
-                <span>
-                  <strong>{phase.title}</strong>
-                  <small>{developmentStateLabel(phase.state)}</small>
-                </span>
-              </button>
-            </li>
-          ))}
-        </ol>
+        <details className="conversation-development-phase-list" open>
+          <summary>Development phases</summary>
+          <ol>
+            {phases.map((phase, index) => (
+              <li key={phase.id} data-state={phase.state} data-phase-tone={index % 5}>
+                <button
+                  type="button"
+                  aria-current={selectedId === phase.id ? "step" : undefined}
+                  onClick={() => onSelect(phase.id)}
+                >
+                  <span className="conversation-development-phase-index" aria-hidden="true">
+                    {phase.state === "complete" ? "✓" : index + 1}
+                  </span>
+                  <span>
+                    <strong>{phase.title}</strong>
+                    <small>{developmentStateLabel(phase.state)}</small>
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ol>
+        </details>
       ) : (
         <p className="conversation-list-empty">Preparing the approved phases…</p>
       )}
@@ -3810,6 +3823,9 @@ function ConversationThread({
   const isExecution = detail.conversation.kind === "execution_pm";
   const [workTab, setWorkTab] = useState<"plan" | "implementation">(() =>
     detail.conversation.kind === "execution_pm" ? "implementation" : "plan",
+  );
+  const [planningStageView, setPlanningStageView] = useState<PlanningStageView>(() =>
+    detail.plan_reviews.length > 0 ? "qc" : "plan",
   );
   const [streamError, setStreamError] = useState<string | null>(null);
   const [modelBusy, setModelBusy] = useState(false);
@@ -4411,8 +4427,11 @@ function ConversationThread({
   );
 
   const proposePlanChanges = useCallback(
-    async (version: V2WorkPlanVersionT, direction: string): Promise<boolean> => {
-      if (planChangeBusyId !== null) return false;
+    async (
+      version: V2WorkPlanVersionT,
+      direction: string,
+    ): Promise<V2ConversationActionT | null> => {
+      if (planChangeBusyId !== null) return null;
       const idempotencyKey = planChangeProposalKeyFor(version.id, planChangeKeys.current);
       setPlanChangeBusyId(version.id);
       setPlanChangeErrors((current) => {
@@ -4445,11 +4464,11 @@ function ConversationThread({
           // The exact user-authored action is already durable.
         }
         await onRefresh();
-        return true;
+        return result.action;
       } catch (caught) {
         if (caught instanceof UnauthorizedError) {
           onUnauthorized();
-          return false;
+          return null;
         }
         const uncertain = !(caught instanceof ApiError);
         const prefix = uncertain
@@ -4469,7 +4488,7 @@ function ConversationThread({
             // A fresh request key will be created in component memory.
           }
         }
-        return false;
+        return null;
       } finally {
         setPlanChangeBusyId(null);
       }
@@ -5055,13 +5074,30 @@ function ConversationThread({
       );
       let started = result.execution_started === true;
       let executionDetail = result.execution_detail;
+      let repositoryPrepared = false;
+      const needsRepositoryPreparation = (detail: string | null): boolean =>
+        /architecture revision|repository facts|ingest the repository/i.test(detail ?? "");
+      if (!started && needsRepositoryPreparation(executionDetail)) {
+        await analyzeProjectRepository(detail.work_item.project_id);
+        repositoryPrepared = true;
+      }
       if (!started && (result.status === "refused" || result.status === "failed")) {
-        const retry = await retryPlanningRunExecution(
+        let retry = await retryPlanningRunExecution(
           detail.work_item.project_id,
           result.planning_run_id,
         );
         started = retry.execution?.started === true;
         executionDetail = retry.execution?.detail ?? executionDetail;
+        if (!started && !repositoryPrepared && needsRepositoryPreparation(executionDetail)) {
+          await analyzeProjectRepository(detail.work_item.project_id);
+          repositoryPrepared = true;
+          retry = await retryPlanningRunExecution(
+            detail.work_item.project_id,
+            result.planning_run_id,
+          );
+          started = retry.execution?.started === true;
+          executionDetail = retry.execution?.detail ?? executionDetail;
+        }
       }
       if (!started) {
         setDevelopmentStartError(
@@ -5292,6 +5328,10 @@ function ConversationThread({
   const isReadOnly = detail.conversation.status !== "active";
   const conversationProvider = asAiProvider(detail.conversation.provider) ?? "anthropic";
   const hasEnteredQc = isPlanning && detail.plan_reviews.length > 0;
+  useEffect(() => {
+    if (!isPlanning) return;
+    setPlanningStageView(detail.plan_reviews.length > 0 ? "qc" : "plan");
+  }, [detail.plan_reviews.length, isPlanning]);
   const recoverableExecutionEffect = isPlanning
     ? ([...actionContext.effects.values()].find(isRecoverableExecutionEffect) ?? null)
     : null;
@@ -5559,7 +5599,7 @@ function ConversationThread({
                 </Button>
               </aside>
             ) : null}
-            {!hasEnteredQc && isPlanning ? (
+            {!hasEnteredQc && isPlanning && !latestPlan ? (
               <nav className="conversation-work-tabs" aria-label="Work sections">
                 <button
                   type="button"
@@ -5592,18 +5632,65 @@ function ConversationThread({
                 className={`workspace-tab-panel ${
                   isExecution
                     ? "conversation-work-tab-development-chat"
-                    : "conversation-work-tab-plan"
+                    : `conversation-work-tab-plan${latestPlan ? " has-plan-workspace" : ""}${
+                        planningStageView === "plan" ? " conversation-plan-main-view" : ""
+                      }`
                 }`}
                 data-testid={
                   isExecution ? "conversation-development-chat" : "conversation-work-tab-plan"
                 }
               >
+                {isPlanning && latestPlan ? (
+                  <ConversationStageSidebar
+                    view={planningStageView}
+                    hasPlan
+                    hasQc={false}
+                    developmentConversationId={linkedExecutionConversationId}
+                    onSelect={setPlanningStageView}
+                    onOpenConversation={onOpenConversation}
+                  />
+                ) : null}
+                {isPlanning && latestPlan && planningStageView === "plan" ? (
+                  <PlanningPlanWorkspace version={latestPlan} reviews={visiblePlanReviews} />
+                ) : null}
                 {isExecution ? (
                   <DevelopmentPhaseSidebar
                     phases={developmentPhases}
                     selectedId={selectedDevelopmentPhase?.id ?? null}
+                    planningConversationId={detail.handoff?.source_conversation_id ?? null}
                     onSelect={setSelectedDevelopmentPhaseId}
+                    onOpenConversation={onOpenConversation}
                   />
+                ) : null}
+                {isExecution && detail.work_item.status === "awaiting_approval" ? (
+                  <section
+                    className="conversation-development-start is-compact"
+                    aria-label="Development launch"
+                  >
+                    <div>
+                      <h2>
+                        {developmentStartError
+                          ? "Development needs attention"
+                          : developmentStartBusy
+                            ? "Preparing development"
+                            : "Ready to start development"}
+                      </h2>
+                      <p>
+                        {developmentStartError
+                          ? developmentStartError
+                          : developmentStartBusy
+                            ? "Checking repository context and connecting the approved phase agents."
+                            : "The approved phases and agents are ready."}
+                      </p>
+                    </div>
+                    {developmentStartBusy ? (
+                      <Spinner label="Starting development…" />
+                    ) : (
+                      <Button variant="primary" onClick={() => void startDevelopment()}>
+                        {developmentStartError ? "Try again" : "Start development"}
+                      </Button>
+                    )}
+                  </section>
                 ) : null}
                 {isExecution ? (
                   <DevelopmentAgentDialogue
@@ -5701,61 +5788,38 @@ function ConversationThread({
                     </span>
                   </output>
                 ) : null}
-                {isExecution && detail.work_item.status === "awaiting_approval" ? (
-                  <section
-                    className="conversation-development-start is-compact"
-                    aria-label="Development launch"
-                  >
-                    <div>
-                      <h2>
-                        {developmentStartError
-                          ? "Development needs another start"
-                          : developmentStartBusy
-                            ? "Launching the approved development plan"
-                            : "Approved development plan ready"}
-                      </h2>
-                      <p>
-                        {developmentStartError
-                          ? developmentStartError
-                          : developmentStartBusy
-                            ? "The Development chat is open. Agents are being connected automatically."
-                            : "Start the approved agents from this Development chat."}
-                      </p>
-                    </div>
-                    {developmentStartBusy ? (
-                      <Spinner label="Starting development…" />
-                    ) : (
-                      <Button variant="primary" onClick={() => void startDevelopment()}>
-                        {developmentStartError ? "Try start again" : "Start development"}
-                      </Button>
-                    )}
-                  </section>
-                ) : null}
                 {detail.handoff || detail.latest_summary ? (
-                  <section
-                    className="conversation-context-receipt"
-                    aria-label="Conversation context and usage"
-                  >
-                    {detail.handoff ? (
-                      <HandoffCard
-                        handoff={detail.handoff}
-                        currentConversationId={detail.conversation.id}
-                        onOpenConversation={onOpenConversation}
-                      />
-                    ) : null}
-                    <div className="conversation-context-indicators">
-                      {detail.latest_summary ? (
-                        <ConversationSummaryIndicator summary={detail.latest_summary} />
+                  <details className="conversation-context-drawer">
+                    <summary>
+                      {isExecution
+                        ? "Approved plan and planning context"
+                        : "Project-manager context"}
+                    </summary>
+                    <section
+                      className="conversation-context-receipt"
+                      aria-label="Conversation context and usage"
+                    >
+                      {detail.handoff ? (
+                        <HandoffCard
+                          handoff={detail.handoff}
+                          currentConversationId={detail.conversation.id}
+                          onOpenConversation={onOpenConversation}
+                        />
                       ) : null}
-                    </div>
-                    <PlanningExcerptControl
-                      key={`${detail.conversation.id}:${detail.handoff?.id ?? "no-handoff"}`}
-                      detail={detail}
-                      onOpenConversation={onOpenConversation}
-                      onRefresh={onRefresh}
-                      onUnauthorized={onUnauthorized}
-                    />
-                  </section>
+                      <div className="conversation-context-indicators">
+                        {detail.latest_summary ? (
+                          <ConversationSummaryIndicator summary={detail.latest_summary} />
+                        ) : null}
+                      </div>
+                      <PlanningExcerptControl
+                        key={`${detail.conversation.id}:${detail.handoff?.id ?? "no-handoff"}`}
+                        detail={detail}
+                        onOpenConversation={onOpenConversation}
+                        onRefresh={onRefresh}
+                        onUnauthorized={onUnauthorized}
+                      />
+                    </section>
+                  </details>
                 ) : null}
                 <ThreadPrimitive.Root className="conversation-thread-root">
                   <ThreadPrimitive.Viewport
@@ -5763,28 +5827,32 @@ function ConversationThread({
                     turnAnchor="bottom"
                     scrollToBottomOnThreadSwitch
                   >
-                    <AuiIf condition={(state) => state.thread.messages.length === 0}>
-                      <div className="conversation-welcome" data-testid="conversation-welcome">
-                        <p>
-                          {isExecution
-                            ? detail.handoff
-                              ? "Continue delivery with your PM. Planning context is available from the approved handoff."
-                              : "Work directly with your development PM. The submitted brief defines this quick push."
-                            : "Ask your PM about the work, constraints, risks, or next steps."}
-                        </p>
-                      </div>
-                    </AuiIf>
-                    <ThreadPrimitive.Messages>
-                      {({ message }) =>
-                        message.role === "user" ? (
-                          <UserMessage />
-                        ) : message.role === "system" ? (
-                          <SystemMessage />
-                        ) : (
-                          <AssistantMessage />
-                        )
-                      }
-                    </ThreadPrimitive.Messages>
+                    {!(isPlanning && latestPlan && planningStageView === "plan") ? (
+                      <>
+                        <AuiIf condition={(state) => state.thread.messages.length === 0}>
+                          <div className="conversation-welcome" data-testid="conversation-welcome">
+                            <p>
+                              {isExecution
+                                ? detail.handoff
+                                  ? "Continue delivery with your PM. Planning context is available from the approved handoff."
+                                  : "Work directly with your development PM. The submitted brief defines this quick push."
+                                : "Ask your PM about the work, constraints, risks, or next steps."}
+                            </p>
+                          </div>
+                        </AuiIf>
+                        <ThreadPrimitive.Messages>
+                          {({ message }) =>
+                            message.role === "user" ? (
+                              <UserMessage />
+                            ) : message.role === "system" ? (
+                              <SystemMessage />
+                            ) : (
+                              <AssistantMessage />
+                            )
+                          }
+                        </ThreadPrimitive.Messages>
+                      </>
+                    ) : null}
                     <ThreadPrimitive.ViewportFooter className="conversation-composer-footer">
                       <ThreadPrimitive.ScrollToBottom
                         className="conversation-scroll-button"
@@ -5812,13 +5880,22 @@ function ConversationThread({
                           isPlanning={isPlanning}
                           pmProvider={conversationProvider}
                           planIntentEnabled={planIntentEnabled}
-                          planIntentBusy={proposalBusy || busyActionId !== null}
+                          planIntentBusy={
+                            proposalBusy || busyActionId !== null || planChangeBusyId !== null
+                          }
+                          planVersion={isPlanning ? (latestPlan ?? null) : null}
                           onUseAsPlan={(message, handoff) => {
                             if (pendingSaveAction) {
                               void confirmAction(pendingSaveAction);
                               return;
                             }
                             void generatePlanProposal(message, true, handoff);
+                          }}
+                          onRequestPlanChanges={async (version, direction) => {
+                            const action = await proposePlanChanges(version, direction);
+                            if (!action) return false;
+                            await confirmAction(action);
+                            return true;
                           }}
                           prefillText={null}
                         />
@@ -5876,10 +5953,24 @@ function ConversationThread({
             ) : null}
             {hasEnteredQc ? (
               <div
-                className="workspace-tab-panel conversation-work-tab-qc"
+                className="workspace-tab-panel conversation-work-tab-qc conversation-stage-workspace"
                 data-testid="conversation-work-tab-qc"
               >
-                {recoverableExecutionEffect ? (
+                <ConversationStageSidebar
+                  view={planningStageView}
+                  hasPlan={latestPlan !== undefined}
+                  hasQc
+                  developmentConversationId={linkedExecutionConversationId}
+                  onSelect={setPlanningStageView}
+                  onOpenConversation={onOpenConversation}
+                />
+                {planningStageView === "pm" ? (
+                  <ArchivedPmConversation messages={detail.messages} />
+                ) : null}
+                {planningStageView === "plan" && latestPlan ? (
+                  <PlanningPlanWorkspace version={latestPlan} reviews={visiblePlanReviews} />
+                ) : null}
+                {planningStageView === "qc" && recoverableExecutionEffect ? (
                   <section
                     className="conversation-development-start"
                     aria-label="Development start recovery"
@@ -5929,10 +6020,12 @@ function ConversationThread({
                     ) : null}
                   </section>
                 ) : null}
-                <ConversationQcActivity
-                  reviews={visiblePlanReviews}
-                  planVersions={detail.plan_versions}
-                />
+                {planningStageView === "qc" ? (
+                  <ConversationQcActivity
+                    reviews={visiblePlanReviews}
+                    planVersions={detail.plan_versions}
+                  />
+                ) : null}
               </div>
             ) : null}
             {!hasEnteredQc && workTab === "implementation" && isPlanning ? (

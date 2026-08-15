@@ -1,5 +1,5 @@
 import type { V2WorkPlanContractT, V2WorkPlanVersionT } from "@norns/contracts";
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import { Badge } from "./ui";
 
 const STATUS_LABELS: Record<V2WorkPlanVersionT["status"], string> = {
@@ -85,11 +85,21 @@ export function PlanVersionDiff({
 export function ConversationPlanCard({
   version,
   footer,
+  renderStaffing,
 }: {
   version: V2WorkPlanVersionT;
   footer?: ReactNode;
+  renderStaffing?: PlanStaffingRenderer;
 }): React.ReactElement {
-  return <PlanCard plan={version.plan} version={version} cardId={version.id} footer={footer} />;
+  return (
+    <PlanCard
+      plan={version.plan}
+      version={version}
+      cardId={version.id}
+      footer={footer}
+      renderStaffing={renderStaffing}
+    />
+  );
 }
 
 export function ConversationPlanDraftCard({
@@ -99,7 +109,133 @@ export function ConversationPlanDraftCard({
   actionId: string;
   plan: V2WorkPlanContractT;
 }): React.ReactElement {
-  return <PlanCard plan={plan} version={null} cardId={`draft-${actionId}`} footer={null} />;
+  return (
+    <PlanCard
+      plan={plan}
+      version={null}
+      cardId={`draft-${actionId}`}
+      footer={null}
+      renderStaffing={undefined}
+    />
+  );
+}
+
+type PlanModule = V2WorkPlanContractT["plan"]["modules"][number];
+type PlanStaffing = V2WorkPlanContractT["staffing"][number];
+
+export type PlanStaffingRenderer = (input: {
+  module: PlanModule;
+  staffing: PlanStaffing | undefined;
+  phaseNumber: number;
+}) => ReactNode;
+
+function sentenceCase(value: string): string {
+  const normalized = value.replaceAll("_", " ").trim();
+  return normalized ? `${normalized[0]?.toUpperCase() ?? ""}${normalized.slice(1)}` : "Unknown";
+}
+
+function complexityLabel(value: string | undefined): string {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "s" || normalized === "small" || normalized === "low") {
+    return "Low complexity";
+  }
+  if (normalized === "m" || normalized === "medium") return "Medium complexity";
+  if (normalized === "l" || normalized === "large" || normalized === "high") {
+    return "High complexity";
+  }
+  if (normalized === "xl" || normalized === "extra large" || normalized === "critical") {
+    return "Very high complexity";
+  }
+  return value ? `${sentenceCase(value)} complexity` : "Complexity not estimated";
+}
+
+function PlanPhase({
+  module,
+  staffing,
+  phaseNumber,
+  renderStaffing,
+}: {
+  module: PlanModule;
+  staffing: PlanStaffing | undefined;
+  phaseNumber: number;
+  renderStaffing?: PlanStaffingRenderer;
+}): React.ReactElement {
+  const [expanded, setExpanded] = useState(true);
+  const risk = `${sentenceCase(module.risk)} risk`;
+  return (
+    <li className="conversation-plan-task" data-phase-tone={(phaseNumber - 1) % 5}>
+      <details open={expanded} onToggle={(event) => setExpanded(event.currentTarget.open)}>
+        <summary className="conversation-plan-task-heading">
+          <span className="conversation-plan-phase-number" aria-hidden="true">
+            {phaseNumber}
+          </span>
+          <span className="conversation-plan-phase-title">
+            <small>Phase {phaseNumber}</small>
+            <strong>{module.title}</strong>
+            <code>{module.id}</code>
+          </span>
+          <span className="conversation-plan-phase-toggle">
+            <Badge tone={module.risk === "critical" || module.risk === "high" ? "warn" : "info"}>
+              {risk}
+            </Badge>
+            <small>{expanded ? "Collapse" : "Expand"}</small>
+          </span>
+        </summary>
+        <div className="conversation-plan-task-body">
+          <p className="conversation-plan-task-description">{module.description}</p>
+          <dl className="conversation-plan-task-meta">
+            <div>
+              <dt>Depends on</dt>
+              <dd>{module.dependencies.join(", ") || "No dependencies"}</dd>
+            </div>
+            <div>
+              <dt>Effort</dt>
+              <dd>{complexityLabel(module.estimated_complexity)}</dd>
+            </div>
+          </dl>
+          <section
+            className="conversation-plan-agent"
+            aria-label={`Implementation agent for phase ${phaseNumber}`}
+          >
+            <div>
+              <span>Implementation agent</span>
+              <small>Choose the agent that will own this phase.</small>
+            </div>
+            {renderStaffing ? (
+              renderStaffing({ module, staffing, phaseNumber })
+            ) : (
+              <strong>
+                {staffing
+                  ? `${staffing.agent_role} · ${staffing.provider} · ${staffing.model}`
+                  : "Staffing unavailable"}
+              </strong>
+            )}
+          </section>
+          <section className="conversation-plan-acceptance-section">
+            <header>
+              <h5>Acceptance &amp; verification</h5>
+              <span>{module.acceptance.length} checks</span>
+            </header>
+            <ol className="conversation-plan-acceptance">
+              {module.acceptance.map((criterion, criterionIndex) => (
+                <li key={criterion.id}>
+                  <span>
+                    {phaseNumber}.{criterionIndex + 1}
+                  </span>
+                  <div>
+                    <strong>{criterion.statement}</strong>
+                    <small>
+                      {sentenceCase(criterion.verification_type)} · {criterion.verification}
+                    </small>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </section>
+        </div>
+      </details>
+    </li>
+  );
 }
 
 function PlanCard({
@@ -107,11 +243,13 @@ function PlanCard({
   plan,
   version,
   footer,
+  renderStaffing,
 }: {
   cardId: string;
   plan: V2WorkPlanContractT;
   version: V2WorkPlanVersionT | null;
   footer: ReactNode;
+  renderStaffing: PlanStaffingRenderer | undefined;
 }): React.ReactElement {
   const titleId = `conversation-plan-${cardId}`;
   const staffingByModule = new Map(plan.staffing.map((staffing) => [staffing.module_id, staffing]));
@@ -162,56 +300,22 @@ function PlanCard({
       <section className="conversation-plan-section" aria-labelledby={`${titleId}-tasks`}>
         <h4 id={`${titleId}-tasks`}>Tasks, dependencies, and staffing</h4>
         <ol className="conversation-plan-tasks" aria-label="Plan task sequence">
-          {plan.plan.modules.map((module) => {
+          {plan.plan.modules.map((module, moduleIndex) => {
             const staffing = staffingByModule.get(module.id);
             return (
-              <li key={module.id} className="conversation-plan-task">
-                <div className="conversation-plan-task-heading">
-                  <div>
-                    <strong>{module.title}</strong>
-                    <code>{module.id}</code>
-                  </div>
-                  <Badge
-                    tone={module.risk === "critical" || module.risk === "high" ? "warn" : "info"}
-                  >
-                    {module.estimated_complexity} · {module.risk} risk
-                  </Badge>
-                </div>
-                <p>{module.description}</p>
-                <dl className="conversation-plan-task-meta">
-                  <div>
-                    <dt>Depends on</dt>
-                    <dd>{module.dependencies.join(", ") || "No dependencies"}</dd>
-                  </div>
-                  <div>
-                    <dt>Assigned to</dt>
-                    <dd>
-                      {staffing
-                        ? `${staffing.agent_role} · ${staffing.provider} · ${staffing.model}`
-                        : "Staffing unavailable"}
-                    </dd>
-                  </div>
-                </dl>
-                <details>
-                  <summary>Acceptance and verification ({module.acceptance.length})</summary>
-                  <ul className="conversation-plan-acceptance">
-                    {module.acceptance.map((criterion) => (
-                      <li key={criterion.id}>
-                        <strong>{criterion.statement}</strong>
-                        <span>
-                          {criterion.verification_type} · {criterion.verification}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </details>
-              </li>
+              <PlanPhase
+                key={module.id}
+                module={module}
+                staffing={staffing}
+                phaseNumber={moduleIndex + 1}
+                renderStaffing={renderStaffing}
+              />
             );
           })}
         </ol>
       </section>
 
-      <div className="conversation-plan-columns">
+      <div className="conversation-plan-wide-requirements">
         <section className="conversation-plan-section" aria-labelledby={`${titleId}-verification`}>
           <h4 id={`${titleId}-verification`}>Required verification</h4>
           <List

@@ -1,5 +1,5 @@
 import type { V2WorkPlanVersionT } from "@norns/contracts";
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { ConversationPlanCard } from "./ConversationPlanCard";
 import { makeCoreApiModule, makePlan, makeWebUiModule } from "./test/fixtures";
@@ -84,6 +84,13 @@ describe("conversation Plan Contract card", () => {
     expect(sequence.children[0]).toHaveTextContent("Core API");
     expect(sequence.children[1]).toHaveTextContent("Web UI");
     expect(sequence.children[1]).toHaveTextContent("Depends oncore-api");
+    expect(sequence.children[0]).toHaveTextContent("Phase 1");
+    expect(sequence.children[1]).toHaveTextContent("Phase 2");
+    expect(sequence.children[0]).toHaveTextContent("Medium risk");
+    expect(sequence.children[1]).toHaveTextContent("High risk");
+    expect(sequence.children[0]).toHaveTextContent("1.1");
+    expect(sequence.children[1]).toHaveTextContent("2.1");
+    expect(sequence.children[1]).toHaveTextContent("2.2");
     expect(
       within(card).getByText("implementation · anthropic · claude-sonnet-5"),
     ).toBeInTheDocument();
@@ -103,5 +110,12 @@ describe("conversation Plan Contract card", () => {
     expect(within(card).getByText("Raised API verification coverage")).toBeInTheDocument();
     expect(within(card).getByText("Removed manual retry step")).toBeInTheDocument();
     expect(within(card).getByRole("button", { name: "Send to QC" })).toBeInTheDocument();
+
+    fireEvent.click(within(sequence.children[0] as HTMLElement).getByText("Core API"));
+    expect(
+      within(sequence.children[0] as HTMLElement).getByText(
+        "Implements the core REST API surface.",
+      ),
+    ).not.toBeVisible();
   });
 });
