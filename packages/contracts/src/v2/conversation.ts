@@ -1886,6 +1886,8 @@ export const V2QcRevisionFormat = z.enum([
   "targeted_v1_with_fallback",
 ]);
 export type V2QcRevisionFormatT = z.infer<typeof V2QcRevisionFormat>;
+/** Fast, bounded QC patches are the default; a single legacy retry preserves resilience. */
+export const DEFAULT_QC_REVISION_FORMAT: V2QcRevisionFormatT = "targeted_v1_with_fallback";
 
 const V2QcFindingIndices = z.array(z.number().int().nonnegative()).min(1).max(20);
 const qcFindingAttribution = { finding_indices: V2QcFindingIndices };

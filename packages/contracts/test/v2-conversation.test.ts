@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_QC_REVISION_FORMAT,
   V2ConversationHandoff,
   V2ConversationPlanActionEffectValue,
   V2ConversationPlanReview,
@@ -206,7 +207,8 @@ describe("V2 conversation contracts", () => {
     expect(V2WorkPlanContract.safeParse(cyclic).success).toBe(false);
   });
 
-  it("accepts only closed targeted QC operations and keeps legacy revisions the default", () => {
+  it("accepts only closed targeted QC operations and defaults runtime work to bounded patches", () => {
+    expect(DEFAULT_QC_REVISION_FORMAT).toBe("targeted_v1_with_fallback");
     expect(V2QcRevisionFormat.parse("legacy_full")).toBe("legacy_full");
     expect(
       V2QcTargetedRevision.safeParse({

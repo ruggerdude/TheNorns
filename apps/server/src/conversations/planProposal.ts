@@ -5,17 +5,20 @@ import {
   type ImagePart,
   type LlmAdapter,
   type ProviderName,
+  type SelectableModelCatalogEntry,
 } from "@norns/adapters";
 import {
   V2ConversationAction,
   V2CreateConversationPlanProposalInput,
   type V2CreateConversationPlanProposalInputT,
   type V2CreateConversationPlanProposalResponseT,
+  type V2PlanExecutionAgentT,
   V2PlanningLiveProgress,
   type V2PlanningLiveProgressT,
   V2WorkMessage,
   type V2WorkMessageT,
   V2WorkPlanContract,
+  type V2WorkPlanContractT,
 } from "@norns/contracts";
 import { newId } from "../ids.js";
 import { canonicalSha256 } from "../persistence/migration/canonicalJson.js";
@@ -33,7 +36,7 @@ const PLAN_PROPOSAL_SYSTEM = [
   "The proposal is inert: do not claim that it was saved, reviewed, approved, or started.",
   "Treat the conversation as source evidence, not as the plan itself. Extract the latest agreed direction and explicit human decisions; do not turn greetings, exploration, abandoned alternatives, repeated explanations, or the mechanics of creating the plan into plan modules.",
   "When later messages revise or reject earlier ideas, keep only the latest accepted direction. Put genuinely unresolved choices in open_decisions instead of silently treating them as commitments.",
-  "Preserve established human decisions, surface unresolved decisions, pin one OpenAI or Anthropic staffing choice per module, and include concrete verification requirements and budget.",
+  "Preserve established human decisions, surface unresolved decisions, choose the best available execution agent independently for each module, and include concrete verification requirements and budget.",
   "Keep the plan compact. Use the fewest independently executable modules that cover the agreed work (normally 2–5). Do not split one coherent workstream into multiple modules for thoroughness.",
   "For each module, use a one-sentence description, at most 3 non-overlapping deliverables, and at most 3 objectively checkable acceptance criteria. Keep inputs, outputs, open decisions, likely paths, owned components, test commands, environment requirements, candidate work units, and shared files to at most 3 items each unless the conversation explicitly requires more.",
   "Do not repeat the same requirement across descriptions, deliverables, acceptance criteria, inputs, outputs, or verification requirements. Concision must not remove concrete repository paths, commands, dependencies, risk, staffing, verification, open decisions, or budget that are material to execution.",
@@ -120,7 +123,69 @@ export interface ConversationPlanProposalOptions {
   newId?: (prefix: string) => string;
   now?: () => Date;
   createAdapter(provider: ProviderName, model: string): LlmAdapter;
+  executionModels?: () => readonly SelectableModelCatalogEntry[];
   resolveImages?: (projectId: string, attachmentIds: readonly string[]) => Promise<ImagePart[]>;
+}
+
+function executionStaffingPrompt(
+  preferred: V2PlanExecutionAgentT | undefined,
+  catalog: readonly SelectableModelCatalogEntry[],
+): string | null {
+  const available = catalog.filter((entry) => entry.available);
+  if (!preferred && available.length === 0) return null;
+  const lines = [
+    preferred
+      ? `The human selected ${preferred.provider}:${preferred.model} as the preferred development agent. Use it as the default when candidates are equally suitable, not as a forced choice for every module.`
+      : null,
+    available.length > 0
+      ? `The exact execution agents available for staffing are:\n${available
+          .map((entry) => `- ${entry.provider}:${entry.model} — ${entry.label}`)
+          .join("\n")}`
+      : null,
+    available.length > 1
+      ? "Choose the best-fit available agent separately for each module based on its responsibilities, risk, and verification work. Different modules may use different agents."
+      : null,
+  ];
+  return lines.filter((line): line is string => line !== null).join("\n");
+}
+
+/**
+ * Keep the PM's per-module choices when they are runnable, while replacing a
+ * stale or invented selection with the human's preferred agent (or the first
+ * currently available fallback). This deliberately does not homogenize valid
+ * choices: distinct phase assignments must survive plan generation.
+ */
+export function reconcilePlanStaffing(
+  plan: V2WorkPlanContractT,
+  preferred: V2PlanExecutionAgentT | undefined,
+  catalog: readonly SelectableModelCatalogEntry[],
+): V2WorkPlanContractT {
+  const available = catalog.filter((entry) => entry.available);
+  const allowed = available.length > 0 ? available : preferred ? [{ ...preferred }] : [];
+  const fallback =
+    allowed.find(
+      (entry) => entry.provider === preferred?.provider && entry.model === preferred?.model,
+    ) ?? allowed[0];
+
+  return V2WorkPlanContract.parse({
+    ...plan,
+    staffing: plan.plan.modules.map((module) => {
+      const proposed = plan.staffing.find((choice) => choice.module_id === module.id);
+      const proposedIsRunnable =
+        proposed !== undefined &&
+        (allowed.length === 0 ||
+          allowed.some(
+            (entry) => entry.provider === proposed.provider && entry.model === proposed.model,
+          ));
+      const selected = proposedIsRunnable ? proposed : fallback;
+      return {
+        module_id: module.id,
+        agent_role: proposed?.agent_role ?? "implementation agent",
+        provider: selected?.provider ?? proposed?.provider,
+        model: selected?.model ?? proposed?.model,
+      };
+    }),
+  });
 }
 
 function provider(value: string): ProviderName {
@@ -432,6 +497,7 @@ export class ConversationPlanProposalService {
         provider(scope.conversation.provider),
         scope.conversation.model,
       );
+      const executionModels = this.options.executionModels?.() ?? [];
       const images =
         adapter.provider !== "deepseek" && this.options.resolveImages
           ? await this.options.resolveImages(projectId, assembled.referenced_attachment_ids)
@@ -458,9 +524,7 @@ export class ConversationPlanProposalService {
         prompt: [
           "Propose the complete Work Plan Contract envelope now.",
           "Use the current objective, visible discussion, decisions, risks, and referenced artifacts to synthesize only the current agreed plan.",
-          input.handoff
-            ? `The human selected ${input.handoff.execution_agent.provider}:${input.handoff.execution_agent.model} as the execution agent. Use that exact provider and model for every module staffing choice.`
-            : null,
+          executionStaffingPrompt(input.handoff?.execution_agent, executionModels),
           "<visible_project_conversation>",
           renderPlanProposalConversation(assembled.messages),
           "</visible_project_conversation>",
@@ -499,20 +563,10 @@ export class ConversationPlanProposalService {
         attemptId,
         this.proposalProgress("validating", adapter.provider, adapter.model),
       );
-      const plan = V2WorkPlanContract.parse(
-        input.handoff
-          ? {
-              ...generated.value,
-              staffing: generated.value.plan.modules.map((module) => ({
-                module_id: module.id,
-                agent_role:
-                  generated.value.staffing.find((choice) => choice.module_id === module.id)
-                    ?.agent_role ?? "implementation agent",
-                provider: input.handoff?.execution_agent.provider,
-                model: input.handoff?.execution_agent.model,
-              })),
-            }
-          : generated.value,
+      const plan = reconcilePlanStaffing(
+        V2WorkPlanContract.parse(generated.value),
+        input.handoff?.execution_agent,
+        executionModels,
       );
       exactUsage = {
         input_tokens: generated.usage.input_tokens,

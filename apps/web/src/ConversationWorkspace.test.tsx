@@ -768,6 +768,9 @@ describe("conversation workspace", () => {
     expect(screen.getByText("System event").closest(".conversation-message")).toHaveClass(
       "actor-system",
     );
+    expect(screen.getByTestId("conversation-work-tab-plan")).not.toHaveClass(
+      "conversation-plan-main-view",
+    );
     expect(screen.getByRole("button", { name: "Copy message" })).toBeInTheDocument();
   });
 
@@ -2588,6 +2591,14 @@ describe("conversation workspace", () => {
           name: "Confirm QC Settings",
         });
         expect(handoffDialog.closest(".plan-handoff-backdrop")?.parentElement).toBe(document.body);
+        expect(
+          screen.getByRole("combobox", { name: "Preferred development agent" }),
+        ).toBeInTheDocument();
+        expect(
+          screen.getByText(
+            "The PM assigns the best available agent to each phase. You can change each assignment in the plan.",
+          ),
+        ).toBeInTheDocument();
         const savedQcAgent = await screen.findByRole("combobox", { name: "QC agent" });
         await waitFor(() => expect(savedQcAgent).toHaveValue("gpt-5.6-terra"));
         expect(screen.getByRole("combobox", { name: "QC rounds" })).toHaveValue("2");

@@ -29,6 +29,7 @@ import {
   CommandPayload,
   type CommandStateT,
   DEFAULT_PM_MODEL,
+  DEFAULT_QC_REVISION_FORMAT,
   DEVICE_CANCELLATION_EVIDENCE_WSS_SIGNATURE_PURPOSE,
   DEVICE_CONTEXT_RETRIEVAL_HTTP_SIGNATURE_PURPOSE,
   DEVICE_VISUAL_EVIDENCE_UPLOAD_HTTP_SIGNATURE_PURPOSE,
@@ -791,7 +792,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // startup clearly rather than surfacing only after a user starts a plan.
   const planningModelProfile = planningModelProfileFromEnvironment(integrationEnvironment);
   const qcRevisionFormat = V2QcRevisionFormat.parse(
-    integrationEnvironment.NORNS_QC_REVISION_FORMAT?.trim() || "legacy_full",
+    integrationEnvironment.NORNS_QC_REVISION_FORMAT?.trim() || DEFAULT_QC_REVISION_FORMAT,
   );
   const localAgentDownloads = localAgentDownloadsFromEnvironment(integrationEnvironment);
   const configuredDebateModels = () =>
@@ -6828,6 +6829,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           {
             now,
             createAdapter: (provider, model) => buildPlanningAdapter(provider, model),
+            executionModels: configuredExecutionModels,
             ...(attachmentService
               ? {
                   resolveImages: (projectId: string, attachmentIds: readonly string[]) =>

@@ -1,5 +1,10 @@
 import { PGlite } from "@electric-sql/pglite";
-import { AdapterError, FakeAdapter, type LlmAdapter } from "@norns/adapters";
+import {
+  AdapterError,
+  FakeAdapter,
+  type LlmAdapter,
+  buildSelectableModelCatalog,
+} from "@norns/adapters";
 import {
   type V2ConversationActionT,
   V2SavePlanCandidateParameters,
@@ -12,7 +17,10 @@ import { ConversationContextAssembler } from "../src/conversations/contextAssemb
 import { ExecutionConversationService } from "../src/conversations/executionConversation.js";
 import { ConversationHumanSteeringService } from "../src/conversations/humanSteering.js";
 import { ConversationPlanChangeProposalService } from "../src/conversations/planChangeProposal.js";
-import { ConversationPlanProposalService } from "../src/conversations/planProposal.js";
+import {
+  ConversationPlanProposalService,
+  reconcilePlanStaffing,
+} from "../src/conversations/planProposal.js";
 import {
   type ConversationPlanReviewModels,
   ConversationPlanWorkflowService,
@@ -44,6 +52,10 @@ import { RelayStores } from "../src/stores.js";
 const projectId = "conversation-plan-project";
 const owner = { id: "conversation-plan-owner" };
 const member = { id: "conversation-plan-member" };
+const executionModels = buildSelectableModelCatalog([
+  { provider: "anthropic", model: "claude-sonnet-5", available: true },
+  { provider: "openai", model: "gpt-5.6-sol", available: true },
+]);
 
 function plan(objective = "Deliver the persistent planning conversation"): V2WorkPlanContractT {
   return V2WorkPlanContract.parse({
@@ -197,6 +209,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
         newId,
         now: () => new Date("2026-07-27T16:00:00.000Z"),
         createAdapter: () => proposalAdapter,
+        executionModels: () => executionModels,
         resolveImages: async (_projectId, attachmentIds) =>
           attachmentIds.map((attachmentId) => ({
             type: "image" as const,
@@ -684,15 +697,18 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     expect(adapter.requests[0]?.system).toContain("at most 3 non-overlapping deliverables");
     expect(adapter.requests[0]?.system).toContain("Do not repeat the same requirement");
     expect(adapter.requests[0]?.prompt).toContain(
-      "anthropic:claude-sonnet-5 as the execution agent",
+      "anthropic:claude-sonnet-5 as the preferred development agent",
+    );
+    expect(adapter.requests[0]?.prompt).toContain(
+      "Choose the best-fit available agent separately for each module",
     );
     const proposedParameters = V2SavePlanCandidateParameters.parse(first.action.payload.parameters);
     expect(proposedParameters.plan.staffing).toEqual([
       {
         module_id: "conversation-api",
         agent_role: "implementation",
-        provider: "anthropic",
-        model: "claude-sonnet-5",
+        provider: "openai",
+        model: "gpt-5.6-sol",
       },
     ]);
     expect(proposedParameters.handoff).toEqual(handoff);
@@ -723,6 +739,53 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     expect(saved.effect.kind).toBe("plan_saved");
     const sendToQc = await proposedAction(scope, "send_plan_to_qc");
     expect(sendToQc.payload.parameters.review).toEqual(handoff.review);
+  });
+
+  it("preserves distinct runnable agent choices across plan phases", () => {
+    const base = plan("Staff independent backend and interface phases");
+    const candidate = V2WorkPlanContract.parse({
+      ...base,
+      plan: {
+        ...base.plan,
+        modules: [
+          ...base.plan.modules,
+          {
+            id: "conversation-interface",
+            title: "Conversation planning interface",
+            description: "Build the phase-aware planning workspace.",
+            deliverables: ["apps/web/src/ConversationWorkspace.tsx"],
+            acceptance: [
+              {
+                id: "AC-2",
+                statement: "Each phase shows its assigned implementation agent.",
+                verification_type: "test",
+                verification: "pnpm --filter @norns/web test",
+              },
+            ],
+            dependencies: ["conversation-api"],
+            estimated_complexity: "M",
+            risk: "medium",
+          },
+        ],
+      },
+      staffing: [
+        ...base.staffing,
+        {
+          module_id: "conversation-interface",
+          agent_role: "frontend implementation",
+          provider: "anthropic",
+          model: "claude-sonnet-5",
+        },
+      ],
+    });
+
+    const reconciled = reconcilePlanStaffing(
+      candidate,
+      { provider: "openai", model: "gpt-5.6-sol" },
+      executionModels,
+    );
+
+    expect(reconciled.staffing).toEqual(candidate.staffing);
   });
 
   it("settles adapter-construction failure once and replays the terminal failure without spend", async () => {

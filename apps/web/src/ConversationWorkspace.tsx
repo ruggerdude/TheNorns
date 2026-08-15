@@ -3062,9 +3062,9 @@ function PlanHandoffDialog({
         </div>
 
         <div className="plan-handoff-fields">
-          <Field label="Execution agent">
+          <Field label="Preferred development agent">
             <Select
-              aria-label="Execution agent"
+              aria-label="Preferred development agent"
               value={executionModel}
               disabled={busy || executionModels === null}
               onChange={(event) => setExecutionModel(event.target.value)}
@@ -3079,6 +3079,10 @@ function PlanHandoffDialog({
                 </option>
               ))}
             </Select>
+            <small>
+              The PM assigns the best available agent to each phase. You can change each assignment
+              in the plan.
+            </small>
           </Field>
           {reviewMode === "qc" ? (
             <>
@@ -5633,7 +5637,9 @@ function ConversationThread({
                   isExecution
                     ? "conversation-work-tab-development-chat"
                     : `conversation-work-tab-plan${latestPlan ? " has-plan-workspace" : ""}${
-                        planningStageView === "plan" ? " conversation-plan-main-view" : ""
+                        latestPlan && planningStageView === "plan"
+                          ? " conversation-plan-main-view"
+                          : ""
                       }`
                 }`}
                 data-testid={
