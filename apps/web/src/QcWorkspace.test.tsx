@@ -277,6 +277,56 @@ describe("QcWorkspace", () => {
     expect(screen.queryByText(/No planning manager response/)).not.toBeInTheDocument();
   });
 
+  it("renders structured reviewer JSON as readable finding cards", () => {
+    renderWorkspace(
+      review({
+        chat_messages: [
+          {
+            id: "message-structured-findings",
+            request_id: "request-structured-findings",
+            channel: "reviewer",
+            round: 1,
+            attempt: 1,
+            speaker: "reviewer",
+            kind: "response",
+            content: JSON.stringify({
+              findings: [
+                {
+                  severity: "must_fix",
+                  module_id: "ai-validation-e2e",
+                  finding: "Provider coverage is not verifiable.",
+                  recommendation: "Add contract tests for every advertised provider.",
+                },
+                {
+                  severity: "should_fix",
+                  module_id: "scaffold-settings",
+                  finding: "Key-safety checks are incomplete.",
+                  recommendation: "Test normal and error-path log redaction.",
+                },
+              ],
+            }),
+            error_code: null,
+            created_at: now,
+          },
+        ],
+      }),
+    );
+
+    const reviewerChat = screen.getByRole("region", { name: "Chat with the QC reviewer" });
+    expect(
+      within(reviewerChat).getByRole("region", { name: "Structured QC findings" }),
+    ).toBeVisible();
+    expect(within(reviewerChat).getByText("2 findings")).toBeVisible();
+    expect(within(reviewerChat).getByText("Required")).toBeVisible();
+    expect(within(reviewerChat).getByText("Recommended")).toBeVisible();
+    expect(within(reviewerChat).getByText("Plan phase · ai-validation-e2e")).toBeVisible();
+    expect(within(reviewerChat).getByText("Provider coverage is not verifiable.")).toBeVisible();
+    expect(
+      within(reviewerChat).getByText("Add contract tests for every advertised provider."),
+    ).toBeVisible();
+    expect(within(reviewerChat).queryByText(/\{"findings"/)).not.toBeInTheDocument();
+  });
+
   it("waits for Send to PM after accepting every finding", () => {
     const { onTriage } = renderWorkspace();
     expect(onTriage).not.toHaveBeenCalled();

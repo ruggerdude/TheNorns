@@ -187,7 +187,86 @@ function speakerLabel(
   return "QC workflow";
 }
 
-function QcLiveDialogue({ review }: { review: V2ConversationPlanReviewT }): React.ReactElement {
+type StructuredQcFinding = Pick<
+  V2ConversationPlanReviewFindingT,
+  "severity" | "module_id" | "finding" | "recommendation"
+>;
+
+function structuredQcFindings(content: string): StructuredQcFinding[] | null {
+  let source = content.trim();
+  const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(source);
+  if (fenced?.[1]) source = fenced[1];
+  try {
+    const parsed = JSON.parse(source) as { findings?: unknown };
+    if (!parsed || !Array.isArray(parsed.findings) || parsed.findings.length === 0) return null;
+    const findings = parsed.findings.filter(
+      (candidate): candidate is StructuredQcFinding =>
+        typeof candidate === "object" &&
+        candidate !== null &&
+        ["must_fix", "should_fix", "suggestion"].includes(
+          String((candidate as { severity?: unknown }).severity),
+        ) &&
+        (typeof (candidate as { module_id?: unknown }).module_id === "string" ||
+          (candidate as { module_id?: unknown }).module_id === null) &&
+        typeof (candidate as { finding?: unknown }).finding === "string" &&
+        typeof (candidate as { recommendation?: unknown }).recommendation === "string",
+    );
+    return findings.length === parsed.findings.length ? findings : null;
+  } catch {
+    return null;
+  }
+}
+
+function QcMessageContent({
+  content,
+  phaseNumbers = new Map(),
+}: {
+  content: string;
+  phaseNumbers?: ReadonlyMap<string, number>;
+}): React.ReactElement {
+  const findings = structuredQcFindings(content);
+  if (!findings) return <p className="qc-message-text">{content}</p>;
+  return (
+    <section className="qc-structured-response" aria-label="Structured QC findings">
+      <header>
+        <strong>
+          {findings.length} {findings.length === 1 ? "finding" : "findings"}
+        </strong>
+      </header>
+      <div className="qc-structured-findings" role="list">
+        {findings.map((finding, index) => (
+          <article
+            key={`${finding.module_id ?? "plan"}:${index}`}
+            role="listitem"
+            data-severity={finding.severity}
+          >
+            <header>
+              <span>{severityLabel(finding.severity)}</span>
+              <small>
+                {finding.module_id
+                  ? `${phaseNumbers.has(finding.module_id) ? `Phase ${phaseNumbers.get(finding.module_id)}` : "Plan phase"} · ${finding.module_id}`
+                  : "Plan-wide"}
+              </small>
+            </header>
+            <p>{finding.finding}</p>
+            <div>
+              <strong>Recommendation</strong>
+              <p>{finding.recommendation}</p>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function QcLiveDialogue({
+  review,
+  phaseNumbers,
+}: {
+  review: V2ConversationPlanReviewT;
+  phaseNumbers?: ReadonlyMap<string, number>;
+}): React.ReactElement {
   const messages = review.chat_messages
     .filter(
       (message) =>
@@ -223,7 +302,7 @@ function QcLiveDialogue({ review }: { review: V2ConversationPlanReviewT }): Reac
                   <pre>{message.content}</pre>
                 </details>
               ) : (
-                <pre>{message.content}</pre>
+                <QcMessageContent content={message.content} phaseNumbers={phaseNumbers} />
               )}
             </li>
           ))}
@@ -240,7 +319,7 @@ function QcLiveDialogue({ review }: { review: V2ConversationPlanReviewT }): Reac
                 </strong>
                 <span>Response streaming now</span>
               </header>
-              <pre>{liveOutput}</pre>
+              <QcMessageContent content={liveOutput} phaseNumbers={phaseNumbers} />
             </li>
           ) : null}
         </ol>
@@ -262,11 +341,13 @@ function QcQuestionBox({
   channel,
   busy,
   onChat,
+  phaseNumbers,
 }: {
   review: V2ConversationPlanReviewT;
   channel: "reviewer" | "pm";
   busy: boolean;
   onChat: QcWorkspaceProps["onChat"];
+  phaseNumbers?: ReadonlyMap<string, number>;
 }): React.ReactElement {
   const [question, setQuestion] = useState("");
   const label = channel === "reviewer" ? "QC reviewer" : "Project Manager";
@@ -287,7 +368,7 @@ function QcQuestionBox({
           {messages.map((message) => (
             <li key={message.id} data-speaker={message.speaker}>
               <strong>{message.speaker === "human" ? "You" : label}</strong>
-              <p>{message.content}</p>
+              <QcMessageContent content={message.content} phaseNumbers={phaseNumbers} />
             </li>
           ))}
         </ol>
@@ -320,9 +401,11 @@ function QcQuestionBox({
 function QcProgressPopout({
   review,
   accepted,
+  phaseNumbers,
 }: {
   review: V2ConversationPlanReviewT;
   accepted: number;
+  phaseNumbers: ReadonlyMap<string, number>;
 }): React.ReactElement | null {
   const live = review.live_progress;
   const [now, setNow] = useState(() => Date.now());
@@ -369,7 +452,7 @@ function QcProgressPopout({
             </div>
           </dl>
         </section>
-        <QcLiveDialogue review={review} />
+        <QcLiveDialogue review={review} phaseNumbers={phaseNumbers} />
       </aside>
     );
   }
@@ -469,7 +552,7 @@ function QcProgressPopout({
         </p>
         <small>Progress advances only when QC reports a completed checkpoint.</small>
       </section>
-      <QcLiveDialogue review={review} />
+      <QcLiveDialogue review={review} phaseNumbers={phaseNumbers} />
     </aside>
   );
 }
@@ -699,7 +782,13 @@ function FindingTriage({
         </Select>
       </label>
 
-      <QcQuestionBox review={review} channel="reviewer" busy={busy} onChat={onChat} />
+      <QcQuestionBox
+        review={review}
+        channel="reviewer"
+        busy={busy}
+        onChat={onChat}
+        phaseNumbers={phaseNumbers}
+      />
 
       <fieldset className="qc-new-triage-actions" aria-label="Quality control actions">
         <details className="qc-stop-options">
@@ -905,7 +994,9 @@ function QcReviewRecord({
             <dd>{history.length}</dd>
           </div>
         </dl>
-        {includeDialogue ? <QcLiveDialogue review={review} /> : null}
+        {includeDialogue ? (
+          <QcLiveDialogue review={review} phaseNumbers={phaseNumbers} />
+        ) : null}
         {findings.length > 0 ? (
           <ul className="qc-new-findings is-readonly">
             {findings.map((finding) => (
@@ -1045,7 +1136,7 @@ export function QcWorkspace({
       />
 
       {!terminal && review.status !== "awaiting_human" ? (
-        <QcProgressPopout review={review} accepted={accepted} />
+        <QcProgressPopout review={review} accepted={accepted} phaseNumbers={phaseNumbers} />
       ) : null}
 
       {review.status === "awaiting_human" && review.paused_checkpoint === "after_review" ? (
@@ -1070,7 +1161,13 @@ export function QcWorkspace({
             <p>The plan remains inside QC. Send this revision directly to the reviewer.</p>
           </div>
           <QcPlanVersion planVersion={planVersion} heading="Review the revised plan" />
-          <QcQuestionBox review={review} channel="pm" busy={busy} onChat={onChat} />
+          <QcQuestionBox
+            review={review}
+            channel="pm"
+            busy={busy}
+            onChat={onChat}
+            phaseNumbers={phaseNumbers}
+          />
           <div className="qc-new-decision-bar">
             <span>Plan version {planVersion?.version ?? "updated"}</span>
             <Button disabled={busy} onClick={() => void onContinueWithoutQc(review)}>

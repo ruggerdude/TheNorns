@@ -6329,6 +6329,19 @@ export function ConversationWorkspace({
     callbacks.current.onJourneyStageChange?.(detail.plan_versions.length > 0 ? 3 : 2, [], null);
   }, [detail, showNew]);
 
+  const phaseWorkspaceVisible =
+    !showNew &&
+    detail !== null &&
+    (detail.conversation.kind === "execution_pm" ||
+      detail.plan_versions.length > 0 ||
+      detail.plan_reviews.length > 0);
+
+  useEffect(() => {
+    if (!phaseWorkspaceVisible) return;
+    setConversationSidebarCollapsed(true);
+    setConversationListOpen(false);
+  }, [phaseWorkspaceVisible, detail?.conversation.id]);
+
   useEffect(() => {
     if (!conversationListOpen && !conversationMenu && !headerMenuOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
@@ -6481,6 +6494,7 @@ export function ConversationWorkspace({
     setProjectContext(null);
     setProjectPinError(null);
     setConversationListOpen(false);
+    setConversationSidebarCollapsed(false);
     setConversationSearch("");
     setNavigation(null);
     setOrganizationAvailable(null);
@@ -7160,6 +7174,7 @@ export function ConversationWorkspace({
     setConversationMenu(null);
     setShowNew(true);
     setConversationListOpen(false);
+    setConversationSidebarCollapsed(false);
     callbacks.current.onNewConversation?.();
   };
 

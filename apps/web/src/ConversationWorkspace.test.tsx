@@ -6550,6 +6550,14 @@ describe("conversation workspace", () => {
     expect(
       screen.getByRole("textbox", { name: "Question for the QC reviewer" }),
     ).toBeInTheDocument();
+    const workspace = screen.getByTestId("conversation-workspace");
+    expect(workspace).toHaveClass("is-sidebar-collapsed");
+    const conversationHeader = document.querySelector(".conversation-header");
+    if (!(conversationHeader instanceof HTMLElement)) throw new Error("Header not found");
+    await userEvent.click(
+      within(conversationHeader).getByRole("button", { name: "Expand work items" }),
+    );
+    expect(workspace).not.toHaveClass("is-sidebar-collapsed");
   });
 
   it("opens PM progress on the first Send to PM click while the handoff request is pending", async () => {
