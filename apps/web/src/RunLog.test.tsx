@@ -1,6 +1,6 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { RunLog } from "./RunLog";
+import { RunLog, readableRunActivities } from "./RunLog";
 import { MockFetch } from "./test/mockFetch";
 
 describe("RunLog polling", () => {
@@ -66,9 +66,9 @@ describe("RunLog polling", () => {
 
     render(
       <RunLog
-        projectId="project-1"
-        phaseId="phase-1"
-        taskId="task-1"
+        projectId="project:1"
+        phaseId="phase:1"
+        taskId="task:phase%3Aphase-1:task-1"
         active
         onUnauthorized={vi.fn()}
       />,
@@ -81,8 +81,51 @@ describe("RunLog polling", () => {
 
     expect(screen.queryByText(/old run output/)).not.toBeInTheDocument();
     expect(screen.getByText(/new run second line/)).toBeVisible();
-    expect(screen.getByText(/Run log · 2 lines/)).toBeVisible();
+    expect(screen.getByText(/Agent activity · 2 visible updates/)).toBeVisible();
     expect(mock.calls.some((call) => call.url.endsWith("/run-log?after=100"))).toBe(true);
     expect(mock.calls.filter((call) => call.url.endsWith("/run-log"))).toHaveLength(2);
+    expect(mock.calls[0]?.url).toContain(
+      "/api/v2/projects/project%3A1/phases/phase%3A1/tasks/task%3Aphase%253Aphase-1%3Atask-1/run-log",
+    );
+  });
+});
+
+describe("readable RunLog activity", () => {
+  it("turns runner protocol data into concise human updates", () => {
+    const activities = readableRunActivities([
+      {
+        sequence: 1,
+        occurred_at: "2026-07-25T17:00:00.000Z",
+        chunk: JSON.stringify({ type: "system", subtype: "init" }),
+      },
+      {
+        sequence: 2,
+        occurred_at: "2026-07-25T17:00:01.000Z",
+        chunk: JSON.stringify({ type: "system", subtype: "thinking_tokens", estimated_tokens: 80 }),
+      },
+      {
+        sequence: 3,
+        occurred_at: "2026-07-25T17:00:02.000Z",
+        chunk: JSON.stringify({
+          type: "system",
+          subtype: "thinking_tokens",
+          estimated_tokens: 250,
+        }),
+      },
+      {
+        sequence: 4,
+        occurred_at: "2026-07-25T17:00:03.000Z",
+        chunk: JSON.stringify({
+          type: "assistant",
+          message: { content: [{ type: "tool_use", name: "Bash" }] },
+        }),
+      },
+    ]);
+
+    expect(activities.map((activity) => activity.text)).toEqual([
+      "Agent session started",
+      "Reasoning through the implementation · about 250 tokens",
+      "Running a repository command",
+    ]);
   });
 });

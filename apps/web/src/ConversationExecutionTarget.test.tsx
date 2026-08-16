@@ -125,7 +125,7 @@ describe("conversation execution target", () => {
     }
   });
 
-  it("submits a reasoned stop for only the authoritative selected run", async () => {
+  it("submits a compact stop for only the authoritative selected run", async () => {
     const onCancellation = vi.fn();
     const bodies: unknown[] = [];
     vi.stubGlobal(
@@ -147,21 +147,36 @@ describe("conversation execution target", () => {
       />,
     );
 
-    expect(screen.getByText(runId)).toBeInTheDocument();
+    expect(screen.getByText("Run controls")).toBeInTheDocument();
     expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
-    await user.type(
-      screen.getByRole("textbox", { name: "Stop reason" }),
-      "Stop this selected run for review.",
-    );
-    await user.click(screen.getByRole("button", { name: "Stop project work" }));
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Stop" }));
 
     await waitFor(() => expect(onCancellation).toHaveBeenCalledTimes(1));
     expect(bodies).toEqual([
       {
-        reason: "Stop this selected run for review.",
+        reason: "Stopped by the user from the Development chat.",
         idempotency_key: expect.stringContaining(`stop-${runId}-`),
       },
     ]);
+  });
+
+  it("offers pause beside stop without expanding a reason form", async () => {
+    const onPause = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <ProjectRunStopControl
+        projectId={projectId}
+        run={{ run_id: runId, state: "running", can_stop: true, cancellation: null }}
+        onPause={onPause}
+        onCancellation={vi.fn()}
+        onUnauthorized={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Pause" }));
+    expect(onPause).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
   });
 
   it.each(["network", "5xx"] as const)(
@@ -193,15 +208,12 @@ describe("conversation execution target", () => {
         />,
       );
 
-      const reason = screen.getByRole("textbox", { name: "Stop reason" });
-      await user.type(reason, "Preserve this exact cancellation request.");
-      await user.click(screen.getByRole("button", { name: "Stop project work" }));
+      await user.click(screen.getByRole("button", { name: "Stop" }));
 
       expect(
         await screen.findByText(/exact reason and request are locked for a safe retry/i),
       ).toBeVisible();
-      expect(reason).toBeDisabled();
-      await user.click(screen.getByRole("button", { name: "Retry exact stop request" }));
+      await user.click(screen.getByRole("button", { name: "Retry stop" }));
 
       await waitFor(() => expect(onCancellation).toHaveBeenCalledTimes(1));
       expect(bodies).toHaveLength(2);
@@ -211,7 +223,7 @@ describe("conversation execution target", () => {
 
   it("keeps the destructive control responsive and legible in forced colors", () => {
     expect(styles).toContain(".project-run-stop");
-    expect(styles).toContain(".project-run-stop form .btn");
+    expect(styles).toContain(".project-run-stop-actions");
     expect(styles).toContain("@media (forced-colors: active)");
     expect(styles).toMatch(
       /@media \(forced-colors: active\)[\s\S]*\.project-run-stop,[\s\S]*\.project-run-cancellation-status/,

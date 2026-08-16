@@ -37,7 +37,6 @@ import type {
   V2ConversationPlanReviewFindingT,
   V2ConversationPlanReviewT,
   V2ConversationPlanningExcerptReceiptT,
-  V2ConversationPmUpdateSettingsT,
   V2ConversationSummaryT,
   V2ConversationUsageT,
   V2CreateExecutionActionProposalInputT,
@@ -83,12 +82,9 @@ import { ConversationActionCard } from "./ConversationActionCard";
 import { ProjectRunStopControl, executionTargetHeaderLabel } from "./ConversationExecutionTarget";
 import { ConversationPlanCard } from "./ConversationPlanCard";
 import {
-  ExecutionActionComposer,
-  ExecutionActionHistory,
   HumanWaitCard,
   type HumanWaitView,
   MockupRequestComposer,
-  PmUpdateControls,
 } from "./ExecutionConversationControls";
 import { QC_MODE_OPTIONS } from "./Projects";
 import { type QcReviewJourney, QcWorkspace, qcReviewJourney } from "./QcWorkspace";
@@ -139,7 +135,6 @@ import {
   streamConversationPlanProposal,
   switchConversationModel,
   updateConversationFolder,
-  updateConversationPmSettings,
   updateWorkItemOrganization,
 } from "./conversationApi";
 import {
@@ -3698,29 +3693,6 @@ function developmentRunStatusMessage(task: DevelopmentTask | null): string {
   }
 }
 
-function developmentExecutionHeading(
-  state: NonNullable<ConversationExecutionProjectionT["run"]>["state"] | undefined,
-): string {
-  switch (state) {
-    case "created":
-    case "dispatched":
-      return "Development is preparing";
-    case "running":
-    case "verifying":
-      return "Development is running";
-    case "waiting_for_human":
-      return "Development needs your input";
-    case "succeeded":
-      return "Development is complete";
-    case "failed":
-    case "cancelled":
-    case "expired":
-      return "Development needs attention";
-    default:
-      return "Development is starting";
-  }
-}
-
 function developmentStateLabel(state: DevelopmentPhaseState): string {
   switch (state) {
     case "complete":
@@ -3949,7 +3921,7 @@ function ConversationThread({
   onConversationModelChanged: (conversation: V2WorkConversationT) => void;
   onQcJourneyChange: (qc: QcReviewJourney) => void;
   onRefresh: () => Promise<void>;
-  onRefreshSoft: () => void;
+  onRefreshSoft: () => Promise<void>;
   onUnauthorized: () => void;
 }): React.ReactElement {
   const isPlanning = detail.conversation.kind === "planning";
@@ -4009,20 +3981,17 @@ function ConversationThread({
         ),
       ),
   );
-  const [pmSettingsBusy, setPmSettingsBusy] = useState(false);
-  const [pmSettingsError, setPmSettingsError] = useState<string | null>(null);
   const [developmentStartBusy, setDevelopmentStartBusy] = useState(false);
   const [developmentAutoStartPending, setDevelopmentAutoStartPending] = useState(false);
   const [developmentStartError, setDevelopmentStartError] = useState<string | null>(null);
-  const [developmentStartReport, setDevelopmentStartReport] = useState<string | null>(null);
+  const [developmentPauseBusy, setDevelopmentPauseBusy] = useState(false);
+  const [developmentPauseError, setDevelopmentPauseError] = useState<string | null>(null);
   const [executionRetryBusy, setExecutionRetryBusy] = useState(false);
   const [executionRetryError, setExecutionRetryError] = useState<string | null>(null);
   const [executionRetryReport, setExecutionRetryReport] = useState<{
     started: boolean;
     detail: string;
   } | null>(null);
-  const [pmSettingsOverride, setPmSettingsOverride] =
-    useState<V2ConversationPmUpdateSettingsT | null>(null);
   const [actionOverrides, setActionOverrides] = useState(
     () => new Map<string, V2ConversationActionT>(),
   );
@@ -4133,7 +4102,7 @@ function ConversationThread({
           if (!current) return;
           const stateChanged = next.run?.state !== executionProjection.run?.state;
           setExecutionProjection(next);
-          if (stateChanged) onRefreshSoft();
+          if (stateChanged) void onRefreshSoft();
         })
         .catch((caught) => {
           if (current && caught instanceof UnauthorizedError) onUnauthorized();
@@ -4203,11 +4172,20 @@ function ConversationThread({
       let changed = false;
       for (const [reviewId, handoff] of current) {
         const authoritative = detail.plan_reviews.find((review) => review.id === reviewId);
+        if (!authoritative) continue;
         const stillAtSourceGate =
-          authoritative?.status === "awaiting_human" &&
+          authoritative.status === "awaiting_human" &&
           authoritative.paused_checkpoint === "after_review" &&
           authoritative.paused_at_round === handoff.sourceRound;
-        if (!stillAtSourceGate) {
+        const hasVisibleDestination =
+          authoritative.live_progress !== null && authoritative.live_progress !== undefined;
+        const reachedAnotherGate =
+          authoritative.status === "awaiting_human" &&
+          authoritative.paused_checkpoint !== "after_review";
+        const terminal = ["converged", "cap_reached", "failed", "cancelled"].includes(
+          authoritative.status,
+        );
+        if (!stillAtSourceGate && (hasVisibleDestination || reachedAnotherGate || terminal)) {
           next.delete(reviewId);
           changed = true;
         }
@@ -4674,7 +4652,7 @@ function ConversationThread({
           next.delete(review.id);
           return next;
         });
-        await onRefresh();
+        await onRefreshSoft();
       } catch (caught) {
         if (caught instanceof UnauthorizedError) {
           onUnauthorized();
@@ -4692,7 +4670,7 @@ function ConversationThread({
             next.delete(review.id);
             return next;
           });
-          await onRefresh();
+          await onRefreshSoft();
           return;
         }
         onFailure?.(caught);
@@ -4707,7 +4685,7 @@ function ConversationThread({
         setReviewBusyId(null);
       }
     },
-    [onRefresh, onUnauthorized, reviewBusyId],
+    [onRefreshSoft, onUnauthorized, reviewBusyId],
   );
 
   const cancelReview = useCallback(
@@ -4769,7 +4747,7 @@ function ConversationThread({
             message: caught instanceof Error ? caught.message : String(caught),
           }),
         );
-        onRefreshSoft();
+        void onRefreshSoft();
       } finally {
         setReviewBusyId(null);
       }
@@ -5171,37 +5149,74 @@ function ConversationThread({
     ],
   );
 
-  const savePmSettings = useCallback(
-    async (input: {
-      update_interval_seconds?: number | null;
-      content_level?: "concise" | "standard" | "detailed" | null;
-    }): Promise<void> => {
-      if (pmSettingsBusy) return;
-      setPmSettingsBusy(true);
-      setPmSettingsError(null);
+  const pauseDevelopment = useCallback(async (): Promise<void> => {
+    const run = executionProjection?.run;
+    if (!run || developmentPauseBusy) return;
+    const subjectId = `${detail.conversation.id}:${run.run_id}`;
+    const parameters = { reason: "Paused by the user from the Development chat." };
+    const request: V2CreateExecutionActionProposalInputT = {
+      idempotency_key: durableRequestKey(
+        "development-pause",
+        subjectId,
+        executionActionKeys.current,
+      ),
+      message: parameters.reason,
+      action_type: "pause_work",
+      payload: { parameters },
+    };
+    setDevelopmentPauseBusy(true);
+    setDevelopmentPauseError(null);
+    try {
+      const proposed = await proposeExecutionConversationAction(
+        detail.work_item.project_id,
+        detail.work_item.id,
+        detail.conversation.id,
+        request,
+      );
+      setActionOverrides((current) => new Map(current).set(proposed.action.id, proposed.action));
+      const result = await confirmConversationAction(
+        detail.work_item.project_id,
+        detail.work_item.id,
+        detail.conversation.id,
+        proposed.action.id,
+        confirmationKeyFor(proposed.action, confirmationKeys.current),
+      );
+      setActionOverrides((current) => new Map(current).set(result.action.id, result.action));
+      setEffectOverrides((current) => new Map(current).set(result.action.id, result.effect));
+      clearDurableRequestKey("development-pause", subjectId, executionActionKeys.current);
+      confirmationKeys.current.delete(proposed.action.id);
       try {
-        setPmSettingsOverride(
-          await updateConversationPmSettings(detail.work_item.project_id, input),
-        );
-      } catch (caught) {
-        if (caught instanceof UnauthorizedError) {
-          onUnauthorized();
-          return;
-        }
-        setPmSettingsError(caught instanceof Error ? caught.message : String(caught));
-      } finally {
-        setPmSettingsBusy(false);
+        window.sessionStorage.removeItem(confirmationStorageKey(proposed.action.id));
+      } catch {
+        // The confirmed server action remains authoritative.
       }
-    },
-    [detail.work_item.project_id, onUnauthorized, pmSettingsBusy],
-  );
+      await onRefreshSoft();
+    } catch (caught) {
+      if (caught instanceof UnauthorizedError) {
+        onUnauthorized();
+        return;
+      }
+      setDevelopmentPauseError(
+        caught instanceof Error ? caught.message : "Development could not be paused.",
+      );
+    } finally {
+      setDevelopmentPauseBusy(false);
+    }
+  }, [
+    detail.conversation.id,
+    detail.work_item.id,
+    detail.work_item.project_id,
+    developmentPauseBusy,
+    executionProjection?.run,
+    onRefreshSoft,
+    onUnauthorized,
+  ]);
 
   const startDevelopment = useCallback(async (): Promise<void> => {
     if (developmentStartInFlight.current) return;
     developmentStartInFlight.current = true;
     setDevelopmentStartBusy(true);
     setDevelopmentStartError(null);
-    setDevelopmentStartReport(null);
     try {
       let result = await startConversationDevelopment(
         detail.work_item.project_id,
@@ -5270,7 +5285,6 @@ function ConversationThread({
         );
         return;
       }
-      setDevelopmentStartReport(executionDetail ?? "Development work was dispatched.");
       await onRefresh();
     } catch (caught) {
       if (caught instanceof UnauthorizedError) {
@@ -5619,11 +5633,6 @@ function ConversationThread({
       ...(detail.latest_summary?.summary.artifact_ids ?? []),
     ]),
   ).map((artifactId) => ({ id: artifactId, label: artifactId }));
-  const referencedActionIds = new Set(
-    detail.messages.flatMap((message) =>
-      message.parts.flatMap((part) => (part.type === "action" ? [part.action_id] : [])),
-    ),
-  );
   const pendingSaveAction =
     [...actionContext.actions.values()].find(
       (action) => action.action_type === "save_plan_candidate" && action.status === "proposed",
@@ -5883,6 +5892,15 @@ function ConversationThread({
                       key={executionProjection.run.run_id}
                       projectId={detail.work_item.project_id}
                       run={executionProjection.run}
+                      pauseBusy={developmentPauseBusy}
+                      pauseError={developmentPauseError}
+                      onPause={
+                        ["created", "dispatched", "running", "verifying"].includes(
+                          executionProjection.run.state,
+                        )
+                          ? () => void pauseDevelopment()
+                          : undefined
+                      }
                       onCancellation={applyRunCancellation}
                       onUnauthorized={onUnauthorized}
                     />
@@ -5944,32 +5962,9 @@ function ConversationThread({
                     ) : null}
                   </div>
                 ) : null}
-                {isExecution &&
-                (developmentStartReport || executionProjection?.presentation === "active") ? (
-                  <output
-                    className="conversation-development-running"
-                    data-testid="conversation-development-running"
-                    aria-live="polite"
-                  >
-                    <span className="conversation-agent-indicator" aria-hidden="true" />
-                    <span>
-                      <strong>
-                        {developmentExecutionHeading(executionProjection?.run?.state)}
-                      </strong>
-                      <small>
-                        {developmentStartReport ??
-                          `${executionProjection?.target?.name ?? "Execution target"} · ${executionProjection?.run?.state.replaceAll("_", " ") ?? "active"}`}
-                      </small>
-                    </span>
-                  </output>
-                ) : null}
-                {detail.handoff || detail.latest_summary ? (
+                {!isExecution && (detail.handoff || detail.latest_summary) ? (
                   <details className="conversation-context-drawer">
-                    <summary>
-                      {isExecution
-                        ? "Approved plan and planning context"
-                        : "Project-manager context"}
-                    </summary>
+                    <summary>Project-manager context</summary>
                     <section
                       className="conversation-context-receipt"
                       aria-label="Conversation context and usage"
@@ -6078,52 +6073,6 @@ function ConversationThread({
                     </ThreadPrimitive.ViewportFooter>
                   </ThreadPrimitive.Viewport>
                 </ThreadPrimitive.Root>
-                {isExecution && !isReadOnly ? (
-                  <section
-                    className="execution-conversation-controls"
-                    aria-label="Execution controls"
-                  >
-                    <details>
-                      <summary>Decisions, direction, pause, and artifacts</summary>
-                      <ExecutionActionComposer
-                        actions={[...actionContext.actions.values()]}
-                        planVersions={detail.plan_versions}
-                        busy={executionProposalBusy}
-                        error={executionProposalError}
-                        disabledReason={null}
-                        lockedRequest={lockedExecutionRequest}
-                        onPrepare={proposeExecutionAction}
-                        onRetryLocked={() =>
-                          lockedExecutionRequest
-                            ? submitExecutionAction(lockedExecutionRequest)
-                            : Promise.resolve(false)
-                        }
-                      />
-                    </details>
-                    <ExecutionActionHistory
-                      actions={[...actionContext.actions.values()].filter(
-                        (action) => !referencedActionIds.has(action.id),
-                      )}
-                      deliveryEvents={detail.action_delivery_events ?? []}
-                      effects={actionContext.effects}
-                      busyActionId={busyActionId}
-                      errors={actionErrors}
-                      onConfirm={confirmAction}
-                    />
-                    {(pmSettingsOverride ?? detail.pm_update_settings) ? (
-                      <PmUpdateControls
-                        settings={
-                          (pmSettingsOverride ??
-                            detail.pm_update_settings) as V2ConversationPmUpdateSettingsT
-                        }
-                        updates={detail.pm_updates ?? []}
-                        busy={pmSettingsBusy}
-                        error={pmSettingsError}
-                        onSave={savePmSettings}
-                      />
-                    ) : null}
-                  </section>
-                ) : null}
               </div>
             ) : null}
             {hasEnteredQc ? (
@@ -6792,8 +6741,6 @@ export function ConversationWorkspace({
     async (conversationId: string) => {
       setShowNew(false);
       setConversationListOpen(false);
-      setDetail(null);
-      setSelected(null);
       setLoadingDetail(true);
       initialSelectionHandled.current = conversationId;
       try {
@@ -7007,8 +6954,8 @@ export function ConversationWorkspace({
     await Promise.all([loadDetail(true), loadGroups(), loadNavigation()]);
   }, [loadDetail, loadGroups, loadNavigation]);
 
-  const refreshSoft = useCallback(() => {
-    void loadDetail(false);
+  const refreshSoft = useCallback(async () => {
+    await loadDetail(false);
   }, [loadDetail]);
 
   const sidebarFamilies = useMemo<SidebarConversationFamily[]>(() => {

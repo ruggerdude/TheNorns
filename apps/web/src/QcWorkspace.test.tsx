@@ -748,7 +748,7 @@ describe("QcWorkspace", () => {
     expect(screen.getByText("1,284 characters received")).toBeVisible();
     expect(screen.getByRole("heading", { name: "Quality control" })).toBeVisible();
     expect(screen.getAllByText("Round 1 of 2").length).toBeGreaterThan(0);
-    expect(screen.queryByText("Independent reviewer is checking the plan")).not.toBeInTheDocument();
+    expect(screen.getByText("Independent reviewer is checking the plan")).toBeVisible();
     expect(screen.getByRole("progressbar", { name: "Current QC step progress" })).toHaveAttribute(
       "value",
       "2",

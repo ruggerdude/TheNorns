@@ -5072,7 +5072,7 @@ describe("conversation workspace", () => {
             ],
           });
         }
-        if (url.endsWith(`/phases/phase-1/tasks/${taskId}/run-log`)) {
+        if (url.endsWith(`/phases/phase-1/tasks/${encodeURIComponent(taskId)}/run-log`)) {
           return Response.json({
             run_id: "run-office-1",
             entries: [
@@ -5099,9 +5099,7 @@ describe("conversation workspace", () => {
       executionTargetLabel,
     );
     expect(await screen.findByRole("heading", { name: "Agent dialogue" })).toBeVisible();
-    expect(screen.getByTestId("conversation-development-running")).toHaveTextContent(
-      "Development is preparing",
-    );
+    expect(screen.queryByTestId("conversation-development-running")).not.toBeInTheDocument();
     const phases = screen.getByRole("complementary", { name: "Development phases" });
     expect(phases).toHaveTextContent("Core API");
     expect(phases).toHaveTextContent("In progress");
@@ -5116,8 +5114,9 @@ describe("conversation workspace", () => {
     expect(
       screen.queryByRole("button", { name: /save execution target/i }),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("textbox", { name: "Stop reason" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Stop project work" })).toBeDisabled();
+    expect(screen.queryByRole("textbox", { name: "Stop reason" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
   });
 
   it("matches plan phases to their task ids instead of whichever task row arrives first", async () => {
@@ -5598,14 +5597,10 @@ describe("conversation workspace", () => {
     expect(
       screen.getByRole("region", { name: "Development chat conversation" }),
     ).toBeInTheDocument();
-    await user.click(screen.getByText("Approved plan and planning context"));
-    expect(screen.getByTestId("conversation-handoff-card")).toHaveTextContent(
-      approvedVersion.content_hash.slice(0, 12),
-    );
+    expect(screen.queryByText("Approved plan and planning context")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("conversation-handoff-card")).not.toBeInTheDocument();
     expect(screen.getByTestId("conversation-handoff-receipt")).toBeInTheDocument();
-    expect(screen.getByTestId("conversation-summary-indicator")).toHaveTextContent(
-      "Compacted summary v1",
-    );
+    expect(screen.queryByTestId("conversation-summary-indicator")).not.toBeInTheDocument();
     expect(screen.queryByTestId("conversation-total-usage")).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Development launch" })).toBeVisible();
     await waitFor(() => expect(developmentStartRequests).toBe(2), { timeout: 2_500 });
@@ -5620,9 +5615,10 @@ describe("conversation workspace", () => {
       expect(screen.queryByRole("region", { name: "Development launch" })).not.toBeInTheDocument(),
     );
     expect(developmentStarted).toBe(true);
-    const running = await screen.findByTestId("conversation-development-running");
-    expect(running).toHaveTextContent("Development is running");
-    expect(running).toHaveTextContent("This computer");
+    expect(screen.queryByTestId("conversation-development-running")).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Agent dialogue" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Pause" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Stop" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Chat options" }));
     expect(screen.getByRole("combobox", { name: "Conversation model" })).toHaveValue("gpt-5.6-sol");
   });
@@ -5843,7 +5839,7 @@ describe("conversation workspace", () => {
     expect(selected).toHaveBeenCalledWith(execution.id);
   });
 
-  it("retrieves only explicitly selected planning messages and caps one receipt at 20", async () => {
+  it("does not expose planning-context retrieval controls in Development chat", async () => {
     const approvedVersion = planVersion({
       status: "approved",
       approved_by_user_id: "user-1",
@@ -5974,36 +5970,14 @@ describe("conversation workspace", () => {
     expect(await screen.findByText("Start only from the compact handoff.")).toBeInTheDocument();
     expect(screen.queryByText(/PLANNING_SENTINEL/)).not.toBeInTheDocument();
     expect(planningReads).toBe(0);
-
-    await user.click(screen.getByText("Planning context"));
-    await user.click(screen.getByRole("button", { name: "Retrieve planning excerpt" }));
-    expect(planningReads).toBe(0);
-    await user.click(screen.getByRole("button", { name: "Load planning messages" }));
-    expect(await screen.findByText(/PLANNING_SENTINEL/)).toBeInTheDocument();
-    expect(planningReads).toBe(1);
-
-    const checkboxes = screen.getAllByRole("checkbox");
-    for (const checkbox of checkboxes.slice(0, 20)) {
-      await user.click(checkbox);
-    }
-    expect(screen.getByText("20 of 20 messages selected")).toBeInTheDocument();
-    expect(checkboxes[20]).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "Add selected excerpt to execution" }));
-
+    expect(screen.queryByText("Planning context")).not.toBeInTheDocument();
     expect(
-      await screen.findByText("Explicitly retrieved 20 planning messages."),
-    ).toBeInTheDocument();
-    expect(screen.getByTestId("conversation-planning-excerpt-receipt")).toHaveTextContent(
-      "20 planning messages added",
-    );
-    expect(excerptBody).toMatchObject({
-      idempotency_key: expect.any(String),
-      source_conversation_id: archived.id,
-      message_ids: planningMessages
-        .slice(0, 20)
-        .map((item) => item.id)
-        .sort(),
-    });
+      screen.queryByRole("button", { name: "Retrieve planning excerpt" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Load planning messages" }),
+    ).not.toBeInTheDocument();
+    expect(excerptBody).toBeNull();
   });
 
   it("shows historical approval truthfully without routing to a null execution thread", async () => {
@@ -6276,9 +6250,9 @@ describe("conversation workspace", () => {
     expect(screen.getByText("phase5/wait-deep-link")).toBeInTheDocument();
     expect(screen.getAllByTestId(`human-wait-${baseWait.id}`)).toHaveLength(1);
 
-    // Execution-side controls live in the Development chat stage.
+    // Development keeps operational controls out of the chat surface.
     await user.click(screen.getByRole("button", { name: "Development chat" }));
-    expect(screen.getByTestId("execution-action-composer")).toBeInTheDocument();
+    expect(screen.queryByTestId("execution-action-composer")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Chat options" }));
     await user.click(screen.getByRole("button", { name: "Refresh conversation" }));
@@ -6290,7 +6264,7 @@ describe("conversation workspace", () => {
     expect(screen.getByText("Run it before deployment.")).toBeInTheDocument();
   });
 
-  it("retries a byte-equivalent execution proposal whose action points to its new visible source message", async () => {
+  it("does not render advanced execution proposal boxes in the Development chat", async () => {
     const execution = executionConversation({ next_message_sequence: 3 });
     const exactDirection = "Use the restart-safe adapter and stop at the migration boundary.";
     const sourceMessage = message({
@@ -6364,7 +6338,6 @@ describe("conversation workspace", () => {
         throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
       }),
     );
-    const user = userEvent.setup();
     render(
       <ConversationWorkspace
         projectId={projectId}
@@ -6376,30 +6349,11 @@ describe("conversation workspace", () => {
 
     expect(await screen.findByText("Execution handoff loaded.")).toBeInTheDocument();
     expect(requestBodies).toHaveLength(0);
-    await user.click(screen.getByRole("button", { name: "Development chat" }));
-    await user.click(screen.getByText("Decisions, direction, pause, and artifacts"));
-    await user.type(screen.getByRole("textbox", { name: "Task ID" }), "task-7");
-    await user.type(screen.getByRole("textbox", { name: "Active run ID" }), "run-7");
-    await user.type(screen.getByRole("textbox", { name: "Direction" }), exactDirection);
-    await user.click(screen.getByRole("button", { name: "Prepare action for confirmation" }));
-
-    expect(await screen.findByText("Exact request locked")).toBeInTheDocument();
-    expect(screen.getByText(/byte-equivalent request and idempotency key/i)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Retry exact action proposal" }));
-
     expect(
-      await screen.findByRole("button", { name: "Confirm action: Send task direction" }),
-    ).toBeInTheDocument();
-    expect(requestBodies).toHaveLength(2);
-    expect(requestBodies[1]).toBe(requestBodies[0]);
-    const proposalBody = JSON.parse(requestBodies[0] ?? "{}") as Record<string, unknown>;
-    expect(proposalBody).not.toHaveProperty("source_message_id");
-    expect(proposalBody).toMatchObject({
-      message: exactDirection,
-      action_type: "redirect_agent",
-    });
-    expect(screen.getByText(sourceMessage.id)).toBeInTheDocument();
-    expect(screen.getAllByTestId("conversation-action-redirect_agent")).toHaveLength(1);
+      screen.queryByText("Decisions, direction, pause, and artifacts"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("execution-action-composer")).not.toBeInTheDocument();
+    expect(screen.queryByText("PM updates")).not.toBeInTheDocument();
   });
 
   it("keeps an uncertain execution request locked across reload until its exact source-message receipt appears", async () => {
@@ -6513,17 +6467,14 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await user.click(await screen.findByRole("button", { name: "Development chat" }));
-    expect(await screen.findByText("Exact request locked")).toBeInTheDocument();
+    await screen.findByRole("heading", { name: "Agent dialogue" });
+    expect(screen.queryByText("Exact request locked")).not.toBeInTheDocument();
     expect(window.sessionStorage.getItem(storageKey)).toBe(JSON.stringify(exactRequest));
 
     await user.click(screen.getByRole("button", { name: "Chat options" }));
     await user.click(screen.getByRole("button", { name: "Refresh conversation" }));
 
-    // A hard refresh remounts the conversation thread, which resets the work
-    // tab back to its Plan default.
-    await user.click(await screen.findByRole("button", { name: "Development chat" }));
-    expect(await screen.findByText("Prepare execution action")).toBeInTheDocument();
+    expect(screen.queryByText("Prepare execution action")).not.toBeInTheDocument();
     await waitFor(() => expect(window.sessionStorage.getItem(storageKey)).toBeNull());
   });
 
@@ -6872,6 +6823,18 @@ describe("conversation workspace", () => {
       resolveResume(Response.json({ review: awaitingDecision }));
       await pendingResume;
     });
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter(
+          ([input, init]) =>
+            urlOf(input).endsWith(`/conversations/${conversationId}`) &&
+            (!init?.method || init.method === "GET"),
+        ).length,
+      ).toBeGreaterThan(1),
+    );
+    expect(screen.getByLabelText("Quality control progress")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Send all 1 to PM" })).not.toBeInTheDocument();
+    expect(screen.getByText("Planning manager is reviewing the QC findings")).toBeVisible();
   });
 
   it("refreshes a stale QC decision instead of showing the raw state race", async () => {

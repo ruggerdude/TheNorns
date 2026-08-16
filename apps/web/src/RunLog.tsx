@@ -15,7 +15,7 @@
 // long-lived session watching a chatty agent cannot accumulate an unbounded
 // DOM even if the server-side bound were ever relaxed. Whenever either bound
 // drops something the human hasn't seen, that is disclosed, never silent.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { authHeaders } from "./auth";
 import { useSingleFlightPolling } from "./useSingleFlightPolling";
 
@@ -35,6 +35,150 @@ export interface RunLogTailDto {
 const POLL_MS = 3_000;
 const MAX_CLIENT_ENTRIES = 500;
 const MAX_CLIENT_CHARS = 100_000;
+const MAX_VISIBLE_ACTIVITIES = 60;
+
+type RunActivity = {
+  sequence: number;
+  occurredAt: string;
+  kind: "session" | "reasoning" | "tool" | "message" | "result";
+  text: string;
+};
+
+function toolActivity(name: string): string {
+  if (name === "Read") return "Reading project files";
+  if (name === "Edit" || name === "Write") return "Editing project files";
+  if (name === "Glob" || name === "Grep") return "Searching the codebase";
+  if (name === "Bash") return "Running a repository command";
+  return `Using ${name}`;
+}
+
+function decodedJsonString(value: string): string {
+  try {
+    return JSON.parse(`"${value}"`) as string;
+  } catch {
+    return value;
+  }
+}
+
+function activityFromEntry(entry: RunLogEntryDto): RunActivity | null {
+  const chunk = entry.chunk.trim();
+  if (!chunk) return null;
+  let value: unknown;
+  try {
+    value = JSON.parse(chunk);
+  } catch {
+    const toolName = /"type":"tool_use"[^}]*"name":"([^"]+)"/.exec(chunk)?.[1];
+    if (toolName) {
+      return {
+        sequence: entry.sequence,
+        occurredAt: entry.occurred_at,
+        kind: "tool",
+        text: toolActivity(toolName),
+      };
+    }
+    const text = /"type":"text","text":"((?:\\.|[^"\\])*)"/.exec(chunk)?.[1];
+    if (text) {
+      return {
+        sequence: entry.sequence,
+        occurredAt: entry.occurred_at,
+        kind: "message",
+        text: decodedJsonString(text),
+      };
+    }
+    if (chunk.startsWith("{")) return null;
+    return {
+      sequence: entry.sequence,
+      occurredAt: entry.occurred_at,
+      kind: "message",
+      text: chunk,
+    };
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (record.type === "system" && record.subtype === "thinking_tokens") {
+    const tokens = typeof record.estimated_tokens === "number" ? record.estimated_tokens : null;
+    return {
+      sequence: entry.sequence,
+      occurredAt: entry.occurred_at,
+      kind: "reasoning",
+      text: tokens
+        ? `Reasoning through the implementation · about ${tokens.toLocaleString()} tokens`
+        : "Reasoning through the implementation",
+    };
+  }
+  if (record.type === "system" && record.subtype === "init") {
+    return {
+      sequence: entry.sequence,
+      occurredAt: entry.occurred_at,
+      kind: "session",
+      text: "Agent session started",
+    };
+  }
+  if (record.type === "assistant") {
+    const message = record.message;
+    const content =
+      message && typeof message === "object" && !Array.isArray(message)
+        ? (message as Record<string, unknown>).content
+        : null;
+    if (Array.isArray(content)) {
+      const tool = content.find(
+        (item) =>
+          item &&
+          typeof item === "object" &&
+          !Array.isArray(item) &&
+          (item as Record<string, unknown>).type === "tool_use",
+      ) as Record<string, unknown> | undefined;
+      if (tool && typeof tool.name === "string") {
+        return {
+          sequence: entry.sequence,
+          occurredAt: entry.occurred_at,
+          kind: "tool",
+          text: toolActivity(tool.name),
+        };
+      }
+      const text = content.find(
+        (item) =>
+          item &&
+          typeof item === "object" &&
+          !Array.isArray(item) &&
+          (item as Record<string, unknown>).type === "text",
+      ) as Record<string, unknown> | undefined;
+      if (text && typeof text.text === "string" && text.text.trim()) {
+        return {
+          sequence: entry.sequence,
+          occurredAt: entry.occurred_at,
+          kind: "message",
+          text: text.text.trim(),
+        };
+      }
+    }
+  }
+  if (record.type === "result") {
+    return {
+      sequence: entry.sequence,
+      occurredAt: entry.occurred_at,
+      kind: "result",
+      text: record.is_error ? "Agent run ended with an error" : "Agent finished its implementation",
+    };
+  }
+  return null;
+}
+
+export function readableRunActivities(entries: RunLogEntryDto[]): RunActivity[] {
+  const activities: RunActivity[] = [];
+  for (const entry of entries) {
+    const activity = activityFromEntry(entry);
+    if (!activity) continue;
+    const previous = activities.at(-1);
+    if (previous?.kind === "reasoning" && activity.kind === "reasoning") {
+      activities[activities.length - 1] = activity;
+      continue;
+    }
+    if (previous?.kind === activity.kind && previous.text === activity.text) continue;
+    activities.push(activity);
+  }
+  return activities.slice(-MAX_VISIBLE_ACTIVITIES);
+}
 
 function trimToBudget(entries: RunLogEntryDto[]): {
   entries: RunLogEntryDto[];
@@ -101,7 +245,7 @@ export function RunLog({
       const fetchTail = async (after: number | undefined): Promise<RunLogTailDto> => {
         const query = after !== undefined ? `?after=${after}` : "";
         const res = await fetch(
-          `/api/v2/projects/${projectId}/phases/${phaseId}/tasks/${taskId}/run-log${query}`,
+          `/api/v2/projects/${encodeURIComponent(projectId)}/phases/${encodeURIComponent(phaseId)}/tasks/${encodeURIComponent(taskId)}/run-log${query}`,
           { headers: authHeaders(false), signal },
         );
         if (res.status === 401) {
@@ -146,25 +290,41 @@ export function RunLog({
     },
   });
 
+  const activities = useMemo(() => readableRunActivities(entries), [entries]);
+
   return (
     <details className="run-log" data-testid={`task-run-log-${taskId}`} open={active}>
       <summary>
-        Run log
+        Agent activity
         {totalEntries !== null
-          ? ` · ${totalEntries} line${totalEntries === 1 ? "" : "s"}`
+          ? ` · ${activities.length} visible update${activities.length === 1 ? "" : "s"}`
           : runId
             ? ""
             : " · not available"}
       </summary>
       <div className="run-log-body">
         {runId === null ? (
-          <span className="muted">No run to tail yet.</span>
+          <span className="muted">Connecting this task to its live activity…</span>
         ) : entries.length === 0 ? (
-          <span className="muted">No output recorded yet.</span>
+          <span className="muted">
+            The agent is connected. Waiting for its first visible update.
+          </span>
+        ) : activities.length === 0 ? (
+          <span className="muted">The agent is active. Waiting for its next visible update.</span>
         ) : (
-          <pre className="run-log-output" data-testid={`task-run-log-output-${taskId}`}>
-            {entries.map((entry) => entry.chunk).join("")}
-          </pre>
+          <ol className="run-activity-list" data-testid={`task-run-log-output-${taskId}`}>
+            {activities.map((activity) => (
+              <li key={activity.sequence} data-kind={activity.kind}>
+                <span aria-hidden="true" />
+                <p>{activity.text}</p>
+                <time dateTime={activity.occurredAt}>
+                  {new Intl.DateTimeFormat(undefined, { timeStyle: "short" }).format(
+                    new Date(activity.occurredAt),
+                  )}
+                </time>
+              </li>
+            ))}
+          </ol>
         )}
         {serverTruncated || droppedLocally ? (
           <p className="muted" data-testid={`task-run-log-truncated-${taskId}`}>

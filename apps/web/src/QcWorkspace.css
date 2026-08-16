@@ -97,6 +97,35 @@
   box-shadow: 0 16px 42px color-mix(in srgb, var(--ink) 12%, transparent);
 }
 
+.qc-progress-focus {
+  display: grid;
+  gap: 0.2rem;
+  padding-bottom: 0.8rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--qc-blue) 24%, var(--line));
+}
+
+.qc-progress-focus > span {
+  color: var(--qc-blue);
+  font-size: 0.72rem;
+  font-weight: 850;
+  letter-spacing: 0.09em;
+}
+
+.qc-progress-focus h3,
+.qc-progress-focus p {
+  margin: 0;
+}
+
+.qc-progress-focus h3 {
+  color: var(--ink);
+  font-size: clamp(1.05rem, 2vw, 1.3rem);
+}
+
+.qc-progress-focus p {
+  color: var(--ink-muted);
+  font-size: 0.86rem;
+}
+
 .qc-progress-tabs {
   display: flex;
   gap: 0.25rem;

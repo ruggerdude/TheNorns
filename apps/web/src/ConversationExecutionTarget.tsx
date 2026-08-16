@@ -4,11 +4,11 @@ import type {
   ProjectRunCancellationRequestT,
 } from "@norns/contracts";
 import { ProjectRunCancellationRequest } from "@norns/contracts";
-import { type FormEvent, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { ApiError, UnauthorizedError } from "./auth";
 import { cancelProjectRun } from "./conversationApi";
-import { Badge, Button, Field, TextArea } from "./ui";
+import { Badge, Button } from "./ui";
 
 const CANCELLATION_COPY = {
   cancellation_requested: {
@@ -143,15 +143,20 @@ export function CancellationStatus({
 export function ProjectRunStopControl({
   projectId,
   run,
+  pauseBusy = false,
+  pauseError = null,
+  onPause,
   onCancellation,
   onUnauthorized,
 }: {
   projectId: string;
   run: NonNullable<ConversationExecutionProjectionT["run"]>;
+  pauseBusy?: boolean;
+  pauseError?: string | null;
+  onPause?: () => void;
   onCancellation: (cancellation: ProjectRunCancellationProjectionT) => void;
   onUnauthorized: () => void;
 }): React.ReactElement | null {
-  const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [lockedRequest, setLockedRequest] = useState<ProjectRunCancellationRequestT | null>(() =>
@@ -159,7 +164,6 @@ export function ProjectRunStopControl({
   );
 
   useEffect(() => {
-    setReason("");
     setError(null);
     setLockedRequest(readLockedRequest(projectId, run.run_id));
   }, [projectId, run.run_id]);
@@ -170,17 +174,15 @@ export function ProjectRunStopControl({
     setLockedRequest(null);
   }, [projectId, run.cancellation, run.run_id]);
 
-  if (!run.can_stop && !run.cancellation) return null;
+  if (!run.can_stop && !run.cancellation && !onPause) return null;
 
-  const submit = async (event: FormEvent) => {
-    event.preventDefault();
+  const submit = async () => {
     const request =
       lockedRequest ??
       ({
-        reason: reason.trim(),
+        reason: "Stopped by the user from the Development chat.",
         idempotency_key: newIdempotencyKey(run.run_id),
       } satisfies ProjectRunCancellationRequestT);
-    if (!request.reason) return;
 
     setBusy(true);
     setError(null);
@@ -192,7 +194,6 @@ export function ProjectRunStopControl({
       const cancellation = await cancelProjectRun(projectId, run.run_id, request);
       persistLockedRequest(projectId, run.run_id, null);
       setLockedRequest(null);
-      setReason("");
       onCancellation(cancellation);
     } catch (caught) {
       if (caught instanceof UnauthorizedError) {
@@ -214,48 +215,30 @@ export function ProjectRunStopControl({
   };
 
   return (
-    <section className="project-run-stop" aria-labelledby={`project-run-stop-${run.run_id}`}>
+    <section className="project-run-stop" aria-label="Development run controls">
       <div className="project-run-stop-heading">
-        <div>
-          <span className="eyebrow">Selected run</span>
-          <h3 id={`project-run-stop-${run.run_id}`}>Stop project work</h3>
-        </div>
+        <strong>Run controls</strong>
         <Badge tone={run.state === "running" ? "info" : "default"}>{run.state}</Badge>
       </div>
-      <p>
-        Run <code>{run.run_id}</code>. This records a cancellation and asks an online runner to
-        stop. An offline or hung process may remain unconfirmed.
-      </p>
       {run.cancellation ? <CancellationStatus cancellation={run.cancellation} /> : null}
-      {run.can_stop && !run.cancellation ? (
-        <form onSubmit={submit}>
-          <Field label="Stop reason">
-            <TextArea
-              required
-              maxLength={1_000}
-              rows={3}
-              value={lockedRequest?.reason ?? reason}
-              disabled={busy || lockedRequest !== null}
-              onChange={(event) => setReason(event.target.value)}
-            />
-          </Field>
-          {error ? (
-            <output className="conversation-action-error" role="alert">
-              {error}
-            </output>
+      {(run.can_stop || onPause) && !run.cancellation ? (
+        <div className="project-run-stop-actions">
+          {onPause ? (
+            <Button type="button" disabled={busy || pauseBusy} onClick={onPause}>
+              {pauseBusy ? "Pausing…" : "Pause"}
+            </Button>
           ) : null}
-          <Button
-            type="submit"
-            variant="danger"
-            disabled={busy || (!lockedRequest && !reason.trim())}
-          >
-            {busy
-              ? "Requesting stop…"
-              : lockedRequest
-                ? "Retry exact stop request"
-                : "Stop project work"}
-          </Button>
-        </form>
+          {run.can_stop ? (
+            <Button type="button" variant="danger" disabled={busy || pauseBusy} onClick={submit}>
+              {busy ? "Stopping…" : lockedRequest ? "Retry stop" : "Stop"}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
+      {error || pauseError ? (
+        <output className="conversation-action-error" role="alert">
+          {error ?? pauseError}
+        </output>
       ) : null}
     </section>
   );

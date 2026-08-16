@@ -2307,16 +2307,22 @@
 }
 
 .project-run-stop {
-  display: grid;
-  gap: 0.7rem;
-  margin-top: auto;
-  padding: 0.7rem 0.8rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.55rem 0.7rem;
   border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--line));
-  border-radius: var(--radius);
-  background: color-mix(in srgb, var(--danger) 5%, var(--surface));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 3%, var(--surface));
 }
 
-.project-run-stop-heading,
+.project-run-stop-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
 .project-run-cancellation-status > div {
   display: flex;
   align-items: flex-start;
@@ -2324,8 +2330,6 @@
   gap: 0.7rem;
 }
 
-.project-run-stop-heading > div,
-.project-run-stop form,
 .project-run-cancellation-status {
   display: grid;
   gap: 0.4rem;
@@ -2345,8 +2349,10 @@
   line-height: 1.45;
 }
 
-.project-run-stop code {
-  overflow-wrap: anywhere;
+.project-run-stop-actions {
+  display: flex;
+  gap: 0.45rem;
+  margin-left: auto;
 }
 
 .project-run-cancellation-status {
@@ -2356,8 +2362,9 @@
   background: var(--surface);
 }
 
-.project-run-stop form .btn {
-  justify-self: end;
+.project-run-stop > .conversation-action-error,
+.project-run-stop > .project-run-cancellation-status {
+  flex-basis: 100%;
 }
 
 .execution-conversation-controls > details,
@@ -4775,6 +4782,13 @@
     justify-content: flex-end;
   }
 
+  .conversation-header-menu-popover {
+    position: fixed;
+    inset: min(14rem, 28vh) 0.5rem auto;
+    width: auto;
+    max-height: calc(100dvh - min(14rem, 28vh) - 0.5rem);
+  }
+
   .conversation-handoff-card > header {
     display: grid;
   }
@@ -5070,31 +5084,6 @@
   border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line));
   border-radius: 12px;
   background: color-mix(in srgb, var(--accent) 7%, var(--surface));
-}
-
-.conversation-development-running {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  margin: 0.55rem 1rem 0;
-  padding: 0.6rem 0.75rem;
-  border: 1px solid color-mix(in srgb, var(--success) 35%, var(--line));
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--success) 7%, var(--surface));
-}
-
-.conversation-development-running > span:last-child {
-  display: grid;
-  gap: 0.1rem;
-}
-
-.conversation-development-running strong {
-  font-size: var(--text-sm);
-}
-
-.conversation-development-running small {
-  color: var(--ink-muted);
-  font-size: var(--text-xs);
 }
 
 .conversation-development-start > div {
@@ -5449,6 +5438,62 @@
   white-space: pre-wrap;
 }
 
+.conversation-agent-dialogue .run-activity-list {
+  display: grid;
+  max-height: 20rem;
+  gap: 0;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  list-style: none;
+  background: var(--surface);
+}
+
+.conversation-agent-dialogue .run-activity-list li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 0.6rem;
+  padding: 0.6rem 0.7rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.conversation-agent-dialogue .run-activity-list li:last-child {
+  border-bottom: 0;
+}
+
+.conversation-agent-dialogue .run-activity-list li > span {
+  width: 0.55rem;
+  height: 0.55rem;
+  margin-top: 0.35rem;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.conversation-agent-dialogue .run-activity-list li[data-kind="reasoning"] > span {
+  background: var(--warning);
+}
+
+.conversation-agent-dialogue .run-activity-list li[data-kind="result"] > span {
+  background: var(--success);
+}
+
+.conversation-agent-dialogue .run-activity-list p {
+  margin: 0;
+  color: var(--ink);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.conversation-agent-dialogue .run-activity-list time {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
 .conversation-agent-dialogue .run-log-meta {
   display: flex;
   justify-content: space-between;
@@ -5457,7 +5502,6 @@
 }
 
 .conversation-development-stop,
-.conversation-work-tab-development-chat > .conversation-development-running,
 .conversation-work-tab-development-chat > .conversation-development-start,
 .conversation-work-tab-development-chat > .conversation-context-receipt,
 .conversation-work-tab-development-chat > .conversation-thread-root,

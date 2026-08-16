@@ -723,6 +723,11 @@ function QcProgressPopout({
         aria-label="Quality control progress"
         aria-live="polite"
       >
+        <header className="qc-progress-focus">
+          <span>WORKING AREA</span>
+          <h3>Waiting for the independent reviewer</h3>
+          <p>This panel stays in place and updates as review activity arrives.</p>
+        </header>
         <section className="qc-progress-panel">
           <header>
             <span className="qc-new-pulse" aria-hidden="true" />
@@ -776,9 +781,19 @@ function QcProgressPopout({
       : live.stage === "revising" && accepted > 0
         ? `${accepted} accepted finding${accepted === 1 ? "" : "s"} in this revision step`
         : null;
+  const planningManagerActive = pmOwnsReviewStep(review);
 
   return (
     <aside className="qc-progress-popout" aria-label="Quality control progress" aria-live="polite">
+      <header className="qc-progress-focus">
+        <span>WORKING AREA</span>
+        <h3>
+          {planningManagerActive
+            ? "Planning manager is reviewing the QC findings"
+            : "Independent reviewer is checking the plan"}
+        </h3>
+        <p>Progress and readable agent dialogue update directly below.</p>
+      </header>
       <section className="qc-progress-panel">
         <header>
           <span className="qc-new-pulse" aria-hidden="true" />
@@ -1398,7 +1413,9 @@ export function QcWorkspace({
                 ? "The plan is unchanged. Choose a recovery path without leaving QC."
                 : review.status === "cancelled"
                   ? "The review was stopped. The plan remains unchanged."
-                  : null;
+                  : pmOwnsReviewStep(review)
+                    ? "The planning manager is reviewing the QC findings you selected. Follow its progress and dialogue directly below."
+                    : "The independent reviewer is checking the plan. Follow its progress and dialogue directly below.";
   const activeAgent = activeQcAgent(review);
 
   return (
@@ -1519,7 +1536,7 @@ export function QcWorkspace({
                   if (actions.approve) void onConfirmAction(actions.approve);
                 }}
               >
-                Start development
+                {busy ? "Opening development…" : "Start development"}
               </Button>
             ) : null}
             {actions.repeat && ["failed", "cancelled", "cap_reached"].includes(review.status) ? (
