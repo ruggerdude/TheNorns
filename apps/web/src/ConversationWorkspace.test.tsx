@@ -5271,6 +5271,14 @@ describe("conversation workspace", () => {
         }
         if (url.endsWith(`/conversations/${execution.id}/start-development`)) {
           developmentStartRequests += 1;
+          if (developmentStartRequests === 1) {
+            return Response.json({
+              status: "leased",
+              execution_started: null,
+              execution_detail: null,
+              planning_run_id: "planning-run-1",
+            });
+          }
           return Response.json({
             status: "refused",
             execution_started: false,
@@ -5353,7 +5361,7 @@ describe("conversation workspace", () => {
     );
     expect(screen.queryByTestId("conversation-total-usage")).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Development launch" })).toBeVisible();
-    await waitFor(() => expect(developmentStartRequests).toBe(1));
+    await waitFor(() => expect(developmentStartRequests).toBe(2), { timeout: 2_500 });
     await waitFor(() => expect(repositoryAnalysisRequests).toBe(1));
     await waitFor(() => expect(developmentRetryRequests).toBe(1));
     expect(screen.getByText("Starting development…")).toBeInTheDocument();

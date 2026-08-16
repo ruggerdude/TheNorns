@@ -25,10 +25,12 @@ assert.match(signer, /--keychain "\$INSTALLER_KEYCHAIN"/);
 assert.match(signer, /security find-identity -v "\$APPLICATION_KEYCHAIN"/);
 assert.match(signer, /security find-identity -v "\$INSTALLER_KEYCHAIN"/);
 assert.match(launcher, /<key>NORNS_ENABLE_DEVICE_CONTROL<\/key><string>true<\/string>/);
+assert.match(launcher, /<key>NORNS_ENABLE_DEVICE_EXECUTION<\/key><string>true<\/string>/);
 assert.match(launcher, /NORNS_ENABLE_DEVICE_CONTROL="true" \\\n\s*NORNS_LOCAL_AGENT_VERSION=/);
 assert.match(launcher, /loaded_agent_is_current/);
 assert.match(launcher, /grep -Fq "\$NODE"/);
 assert.match(launcher, /grep -Fq "\$CLI"/);
 assert.match(launcher, /NORNS_LOCAL_AGENT_VERSION => \$AGENT_VERSION/);
+assert.match(launcher, /NORNS_ENABLE_DEVICE_EXECUTION => true/);
 
 console.log("macOS Local Agent package has a fixed /Applications destination: OK");

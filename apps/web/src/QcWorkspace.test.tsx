@@ -327,6 +327,65 @@ describe("QcWorkspace", () => {
     expect(within(reviewerChat).queryByText(/\{"findings"/)).not.toBeInTheDocument();
   });
 
+  it("renders the planning manager's structured revision as readable responses and changes", () => {
+    const version = revisedPlanVersion();
+    renderWorkspace(
+      review({
+        chat_messages: [
+          {
+            id: "message-structured-pm-revision",
+            request_id: "request-structured-pm-revision",
+            channel: "pm",
+            round: 1,
+            attempt: 1,
+            speaker: "pm",
+            kind: "response",
+            content: JSON.stringify({
+              base_plan_content_hash: "a".repeat(64),
+              responses: [
+                {
+                  finding_index: 0,
+                  disposition: "accept",
+                  rationale: "The deployment target is now explicit.",
+                },
+              ],
+              changes: [
+                {
+                  op: "patch_module",
+                  finding_indices: [0],
+                  module_id: "core-api",
+                  patch: {
+                    description: "Store the deployment target and verify it before dispatch.",
+                  },
+                },
+              ],
+            }),
+            error_code: null,
+            created_at: now,
+          },
+        ],
+      }),
+      undefined,
+      version,
+    );
+
+    fireEvent.click(screen.getByText("QC record"));
+    const dialogue = screen.getByRole("region", { name: "Live quality-control dialogue" });
+    const revision = within(dialogue).getByRole("region", {
+      name: "Planning manager revision",
+    });
+    expect(within(revision).getByText("1 response · 1 plan change")).toBeVisible();
+    expect(within(revision).getByText("Finding 1")).toBeVisible();
+    expect(within(revision).getByText("Accepted")).toBeVisible();
+    expect(within(revision).getByText("The deployment target is now explicit.")).toBeVisible();
+    expect(within(revision).getByText("Updated a development phase")).toBeVisible();
+    expect(within(revision).getByText("Phase 1 · core-api")).toBeVisible();
+    expect(
+      within(revision).getByText("Store the deployment target and verify it before dispatch."),
+    ).toBeVisible();
+    expect(within(revision).queryByText(/base_plan_content_hash/)).not.toBeInTheDocument();
+  });
+
   it("waits for Send to PM after accepting every finding", () => {
     const { onTriage } = renderWorkspace();
     expect(onTriage).not.toHaveBeenCalled();
@@ -697,7 +756,8 @@ describe("QcWorkspace", () => {
     expect(screen.getByText(/over its typical time/i)).toBeVisible();
     expect(screen.getByText("Visible agent dialogue")).toBeVisible();
     expect(screen.getByText("Response streaming now")).toBeVisible();
-    expect(screen.getByText(/"severity":"should_fix"/)).toBeVisible();
+    expect(screen.getByText("Receiving and organizing the structured response…")).toBeVisible();
+    expect(screen.queryByText(/"severity":"should_fix"/)).not.toBeInTheDocument();
     expect(screen.getByText(/View instructions sent to reviewer/)).toBeVisible();
     vi.useRealTimers();
   });

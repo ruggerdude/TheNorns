@@ -33,12 +33,13 @@ function timestamp(value: Date | string): string {
 }
 
 /**
- * The only server-to-device control available while general device execution
- * remains disabled. Connections are exact credential/generation capabilities;
- * reconnect delivery comes from durable cancellation rows, never memory.
+ * Tracks exact authenticated device connections for cancellation and, after a
+ * successful execution reconciliation, live development dispatch. Reconnect
+ * cancellation delivery comes from durable rows, never memory.
  */
 export class DeviceOnlineControlBroker {
   private readonly connections = new Map<string, ConnectedDevice>();
+  private readonly executionReadyGenerations = new Map<string, number>();
 
   constructor(private readonly transactions: V2TransactionRunner) {}
 
@@ -47,6 +48,7 @@ export class DeviceOnlineControlBroker {
     // Publish first. A revocation that commits after authentication but before
     // this method acquires the device lock must be able to observe and close
     // the candidate connection from its post-commit hook.
+    this.executionReadyGenerations.delete(connection.identity.device_id);
     this.connections.set(connection.identity.device_id, connection);
     if (prior && prior !== connection) {
       prior.close(1008, "superseded device connection");
@@ -54,6 +56,7 @@ export class DeviceOnlineControlBroker {
     const disconnect = () => {
       if (this.connections.get(connection.identity.device_id) === connection) {
         this.connections.delete(connection.identity.device_id);
+        this.executionReadyGenerations.delete(connection.identity.device_id);
       }
     };
     try {
@@ -61,6 +64,7 @@ export class DeviceOnlineControlBroker {
       if (!stillActive) {
         if (this.connections.get(connection.identity.device_id) === connection) {
           this.connections.delete(connection.identity.device_id);
+          this.executionReadyGenerations.delete(connection.identity.device_id);
           connection.close(1008, "device authorization changed");
         }
         return null;
@@ -107,7 +111,25 @@ export class DeviceOnlineControlBroker {
     // Remove before close so an in-flight reconnect reconciliation cannot send
     // a pending cancellation after revocation has fenced the connection.
     this.connections.delete(deviceId);
+    this.executionReadyGenerations.delete(deviceId);
     connection.close(1008, "device revoked");
+  }
+
+  /** Marks the exact authenticated connection ready only after reconciliation. */
+  markExecutionReady(deviceId: string, generation: number): boolean {
+    const connection = this.connections.get(deviceId);
+    if (connection?.identity.generation !== generation) return false;
+    this.executionReadyGenerations.set(deviceId, generation);
+    return true;
+  }
+
+  /** Exact live device identity available for development task dispatch. */
+  executionIdentity(deviceId: string): { device_id: string; generation: number } | null {
+    const connection = this.connections.get(deviceId);
+    const generation = this.executionReadyGenerations.get(deviceId);
+    return connection && generation === connection.identity.generation
+      ? { device_id: connection.identity.device_id, generation }
+      : null;
   }
 
   /** Ephemeral presence only. Absence means offline, never revoked. */

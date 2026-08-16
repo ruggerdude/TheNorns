@@ -306,6 +306,11 @@
   overflow-wrap: anywhere;
 }
 
+.qc-structured-streaming {
+  color: var(--ink-muted);
+  font-style: italic;
+}
+
 .qc-structured-response {
   display: grid;
   gap: 0.65rem;
@@ -321,7 +326,7 @@
   gap: 0.65rem;
 }
 
-.qc-structured-findings > article {
+.qc-structured-findings > li {
   display: grid;
   gap: 0.55rem;
   padding: 0.8rem 0.9rem;
@@ -331,50 +336,182 @@
   background: color-mix(in srgb, var(--surface-2) 54%, var(--surface));
 }
 
-.qc-structured-findings > article[data-severity="must_fix"] {
+.qc-structured-findings > li[data-severity="must_fix"] {
   border-left-color: var(--danger);
 }
 
-.qc-structured-findings > article[data-severity="suggestion"] {
+.qc-structured-findings > li[data-severity="suggestion"] {
   border-left-color: var(--info);
 }
 
-.qc-structured-findings article > header {
+.qc-structured-findings li > header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
 }
 
-.qc-structured-findings article > header span {
+.qc-structured-findings li > header span {
   color: var(--ink);
   font-size: var(--text-xs);
   font-weight: 800;
 }
 
-.qc-structured-findings article > header small {
+.qc-structured-findings li > header small {
   color: var(--ink-muted);
   font-size: var(--text-xs);
 }
 
-.qc-structured-findings article > p,
-.qc-structured-findings article > div p {
+.qc-structured-findings li > p,
+.qc-structured-findings li > div p {
   margin: 0;
   color: var(--ink);
   font-size: 0.86rem;
   line-height: 1.5;
 }
 
-.qc-structured-findings article > div {
+.qc-structured-findings li > div {
   display: grid;
   gap: 0.2rem;
   padding-top: 0.55rem;
   border-top: 1px solid var(--line);
 }
 
-.qc-structured-findings article > div strong {
+.qc-structured-findings li > div strong {
   color: var(--ink-muted);
   font-size: var(--text-xs);
+}
+
+.qc-pm-revision > header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.25rem 0.75rem;
+}
+
+.qc-pm-revision > header strong {
+  color: var(--ink);
+  font-size: 0.86rem;
+}
+
+.qc-pm-responses,
+.qc-pm-changes > ol {
+  display: grid;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.qc-pm-responses > li,
+.qc-pm-changes > ol > li,
+.qc-pm-plan-summary {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0.75rem 0.85rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface-2) 54%, var(--surface));
+}
+
+.qc-pm-responses > li {
+  border-left: 4px solid var(--success);
+}
+
+.qc-pm-responses > li[data-disposition="rebut"] {
+  border-left-color: var(--warning);
+}
+
+.qc-pm-responses li > header,
+.qc-pm-changes li > header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.25rem 0.75rem;
+}
+
+.qc-pm-responses li > header strong,
+.qc-pm-changes li > header strong {
+  color: var(--ink);
+  font-size: 0.8rem;
+}
+
+.qc-pm-responses li > header span,
+.qc-pm-changes li > header span,
+.qc-pm-changes li > small {
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+}
+
+.qc-pm-responses li > p,
+.qc-pm-changes li > p,
+.qc-pm-plan-summary > p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.qc-pm-changes {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.qc-pm-changes > h4,
+.qc-pm-plan-summary > h4 {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.qc-pm-changes li > ul {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+.qc-pm-changes li > ul > li {
+  display: list-item;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.qc-pm-plan-summary > ol {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.qc-pm-plan-summary > ol > li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.65rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.qc-pm-plan-summary li span {
+  color: var(--qc-blue);
+  font-size: var(--text-xs);
+  font-weight: 800;
+}
+
+.qc-pm-plan-summary li strong {
+  color: var(--ink);
+  font-size: 0.82rem;
 }
 
 .qc-live-dialogue details pre {

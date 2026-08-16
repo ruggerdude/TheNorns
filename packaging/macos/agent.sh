@@ -73,7 +73,9 @@ loaded_agent_is_current() {
     printf '%s\n' "$LOADED_AGENT_STATE" | grep -Fq "$NODE" &&
     printf '%s\n' "$LOADED_AGENT_STATE" | grep -Fq "$CLI" &&
     printf '%s\n' "$LOADED_AGENT_STATE" |
-      grep -Fq "NORNS_LOCAL_AGENT_VERSION => $AGENT_VERSION"
+      grep -Fq "NORNS_LOCAL_AGENT_VERSION => $AGENT_VERSION" &&
+    printf '%s\n' "$LOADED_AGENT_STATE" |
+      grep -Fq "NORNS_ENABLE_DEVICE_EXECUTION => true"
 }
 
 install_launch_agent() {
@@ -100,6 +102,7 @@ install_launch_agent() {
     printf '%s\n' '<key>NORNS_SERVER</key><string>https://thenorns.up.railway.app</string>'
     printf '%s\n' '<key>NORNS_ENABLE_DEVICE_ENROLLMENT</key><string>true</string>'
     printf '%s\n' '<key>NORNS_ENABLE_DEVICE_CONTROL</key><string>true</string>'
+    printf '%s\n' '<key>NORNS_ENABLE_DEVICE_EXECUTION</key><string>true</string>'
     printf '<key>NORNS_LOCAL_AGENT_VERSION</key><string>%s</string>\n' "$AGENT_VERSION"
     printf '%s\n' '</dict>'
     printf '<key>StandardOutPath</key><string>%s/runner.log</string>\n' "$LOG_DIR"
@@ -153,6 +156,7 @@ case "$ACTION" in
       NORNS_ENABLE_DEVICE_ENROLLMENT="true" \
       NORNS_ENABLE_DEVICE_CONTROL="true" \
       NORNS_LOCAL_AGENT_VERSION="$AGENT_VERSION" \
+      NORNS_ENABLE_DEVICE_EXECUTION="true" \
       exec "$NODE" "$CLI" agent-start --data "$DATA_DIR"
     ;;
   stop)

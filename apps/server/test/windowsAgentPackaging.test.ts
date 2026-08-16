@@ -61,8 +61,15 @@ describe("desktop local-agent packaging", () => {
     const agent = read("packaging/macos/agent.sh");
     expect(agent).toContain("com.thenorns.local-agent.plist");
     expect(agent).toContain("NORNS_ENABLE_DEVICE_ENROLLMENT");
+    expect(agent).toContain("NORNS_ENABLE_DEVICE_CONTROL");
+    expect(agent).toContain("NORNS_ENABLE_DEVICE_EXECUTION");
     expect(agent).toContain("agent-start");
     expect(agent).toContain("xcode-select --install");
+
+    const windowsAgent = read("packaging/windows/start-agent.vbs");
+    expect(windowsAgent).toContain("NORNS_ENABLE_DEVICE_ENROLLMENT");
+    expect(windowsAgent).toContain("NORNS_ENABLE_DEVICE_CONTROL");
+    expect(windowsAgent).toContain("NORNS_ENABLE_DEVICE_EXECUTION");
   });
 
   it("requires Developer ID signing and Apple notarization before Mac publication", () => {

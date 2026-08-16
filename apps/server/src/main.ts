@@ -705,9 +705,10 @@ if (databaseUrl) {
     // approval -> PhaseLaunchService.startPhase), so it needs a
     // PhaseLaunchService constructed EXACTLY the way buildServer's
     // start-phase route path constructs its own: same assembler, same scope
-    // repository, same runner resolution against the live RelayStores (the
-    // closure reads the `stores` binding, which may be re-assigned by the
-    // relay-snapshot restore below — deliberately late-bound).
+    // repository, and the same exact live execution identity used by the
+    // start-phase route. Enrolled devices reconcile outside RelayStores, so
+    // resolving RelayStores alone incorrectly reports a connected computer as
+    // offline. The legacy lookup remains late-bound for compatible runners.
     const kickoffPhaseLaunch = new PhaseLaunchService(
       runtimeTransactions,
       phase4Services.coordinator,
@@ -718,6 +719,12 @@ if (databaseUrl) {
       ),
       new DispatchContextScopeRepository(runtimeTransactions),
       (runnerId) => {
+        const device = deviceCutoverRuntime.device_dispatch_enabled
+          ? deviceOnlineControl.executionIdentity(runnerId)
+          : null;
+        if (device) {
+          return { runner_id: device.device_id, runner_generation: device.generation };
+        }
         const runner = stores.runner(runnerId);
         return runner
           ? { runner_id: runner.runner_id, runner_generation: runner.generation }

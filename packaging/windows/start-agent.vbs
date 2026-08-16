@@ -37,6 +37,8 @@ shell.Environment("PROCESS")("PATH") = _
   shell.Environment("PROCESS")("PATH")
 shell.Environment("PROCESS")("NORNS_SERVER") = "https://thenorns.up.railway.app"
 shell.Environment("PROCESS")("NORNS_ENABLE_DEVICE_ENROLLMENT") = "true"
+shell.Environment("PROCESS")("NORNS_ENABLE_DEVICE_CONTROL") = "true"
+shell.Environment("PROCESS")("NORNS_ENABLE_DEVICE_EXECUTION") = "true"
 shell.CurrentDirectory = appDir
 command = Quote(nodePath) & " " & Quote(cliPath) & " agent-start --data " & Quote(dataDir)
 shell.Run command, 0, False

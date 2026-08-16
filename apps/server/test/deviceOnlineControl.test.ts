@@ -163,4 +163,29 @@ describe("device online cancellation control", () => {
       },
     ]);
   });
+
+  it("exposes an execution identity only after the exact connection reconciles", async () => {
+    const transactions = transactionRunner(async (statement) => {
+      if (statement.includes("FROM devices device")) return { rows: [activeIdentityRow] };
+      if (statement.includes("FROM device_run_cancellations")) return { rows: [] };
+      throw new Error(`unexpected query: ${statement}`);
+    });
+    const broker = new DeviceOnlineControlBroker(transactions);
+    const disconnect = await broker.connect({
+      identity,
+      send: () => undefined,
+      close: () => undefined,
+    });
+
+    expect(broker.executionIdentity(identity.device_id)).toBeNull();
+    expect(broker.markExecutionReady(identity.device_id, identity.generation + 1)).toBe(false);
+    expect(broker.markExecutionReady(identity.device_id, identity.generation)).toBe(true);
+    expect(broker.executionIdentity(identity.device_id)).toEqual({
+      device_id: identity.device_id,
+      generation: identity.generation,
+    });
+
+    disconnect?.();
+    expect(broker.executionIdentity(identity.device_id)).toBeNull();
+  });
 });

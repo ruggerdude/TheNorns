@@ -2655,6 +2655,29 @@ function developmentAutoStartStorageKey(conversationId: string): string {
   return `norns:conversation-development-auto-start:${conversationId}`;
 }
 
+function hasDevelopmentAutoStartRequest(conversationId: string): boolean {
+  try {
+    return window.sessionStorage.getItem(developmentAutoStartStorageKey(conversationId)) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function waitForDevelopmentStatus(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function localAgentIsDisconnected(detail: string | null): boolean {
+  return /local runner\s+\S+\s+is not connected to this relay/i.test(detail ?? "");
+}
+
+function readableDevelopmentStartError(detail: string | null): string {
+  if (localAgentIsDisconnected(detail)) {
+    return "The Local Agent on this computer is not connected. Open Norns Local Agent and keep it running, then choose Check status.";
+  }
+  return detail ?? "Development could not start.";
+}
+
 function executionConversationId(effect: ConversationActionEffect): string | null {
   if (
     effect.kind !== "plan_approved" ||
@@ -3879,6 +3902,7 @@ function ConversationThread({
   const [pmSettingsBusy, setPmSettingsBusy] = useState(false);
   const [pmSettingsError, setPmSettingsError] = useState<string | null>(null);
   const [developmentStartBusy, setDevelopmentStartBusy] = useState(false);
+  const [developmentAutoStartPending, setDevelopmentAutoStartPending] = useState(false);
   const [developmentStartError, setDevelopmentStartError] = useState<string | null>(null);
   const [developmentStartReport, setDevelopmentStartReport] = useState<string | null>(null);
   const [executionRetryBusy, setExecutionRetryBusy] = useState(false);
@@ -3903,6 +3927,7 @@ function ConversationThread({
   const executionActionKeys = useRef(new Map<string, string>());
   const waitAnswerKeys = useRef(new Map<string, string>());
   const reviewRecoveryKeys = useRef(new Map<string, string>());
+  const developmentStartInFlight = useRef(false);
   const base = conversationPath(
     detail.work_item.project_id,
     detail.work_item.id,
@@ -5062,18 +5087,35 @@ function ConversationThread({
   );
 
   const startDevelopment = useCallback(async (): Promise<void> => {
-    if (developmentStartBusy) return;
+    if (developmentStartInFlight.current) return;
+    developmentStartInFlight.current = true;
     setDevelopmentStartBusy(true);
     setDevelopmentStartError(null);
     setDevelopmentStartReport(null);
     try {
-      const result = await startConversationDevelopment(
+      let result = await startConversationDevelopment(
         detail.work_item.project_id,
         detail.work_item.id,
         detail.conversation.id,
       );
       let started = result.execution_started === true;
       let executionDetail = result.execution_detail;
+      let statusChecks = 0;
+      while (
+        !started &&
+        (result.status === "pending" || result.status === "leased") &&
+        statusChecks < 60
+      ) {
+        statusChecks += 1;
+        await waitForDevelopmentStatus(1_000);
+        result = await startConversationDevelopment(
+          detail.work_item.project_id,
+          detail.work_item.id,
+          detail.conversation.id,
+        );
+        started = result.execution_started === true;
+        executionDetail = result.execution_detail;
+      }
       let repositoryPrepared = false;
       const needsRepositoryPreparation = (detail: string | null): boolean =>
         /architecture revision|repository facts|ingest the repository/i.test(detail ?? "");
@@ -5098,13 +5140,23 @@ function ConversationThread({
           started = retry.execution?.started === true;
           executionDetail = retry.execution?.detail ?? executionDetail;
         }
+        let reconnectChecks = 0;
+        while (!started && localAgentIsDisconnected(executionDetail) && reconnectChecks < 30) {
+          reconnectChecks += 1;
+          await waitForDevelopmentStatus(1_000);
+          retry = await retryPlanningRunExecution(
+            detail.work_item.project_id,
+            result.planning_run_id,
+          );
+          started = retry.execution?.started === true;
+          executionDetail = retry.execution?.detail ?? executionDetail;
+        }
       }
       if (!started) {
         setDevelopmentStartError(
-          executionDetail ??
-            (result.status === "pending" || result.status === "leased"
-              ? "Development is still starting. Try again in a moment."
-              : "Development could not start."),
+          result.status === "pending" || result.status === "leased"
+            ? "The approved work is still queued because the assigned execution target has not confirmed its start. Check that the target is online, then choose Check status."
+            : readableDevelopmentStartError(executionDetail),
         );
         return;
       }
@@ -5115,15 +5167,17 @@ function ConversationThread({
         onUnauthorized();
         return;
       }
-      setDevelopmentStartError(caught instanceof Error ? caught.message : String(caught));
+      setDevelopmentStartError(
+        readableDevelopmentStartError(caught instanceof Error ? caught.message : String(caught)),
+      );
     } finally {
+      developmentStartInFlight.current = false;
       setDevelopmentStartBusy(false);
     }
   }, [
     detail.conversation.id,
     detail.work_item.id,
     detail.work_item.project_id,
-    developmentStartBusy,
     onRefresh,
     onUnauthorized,
   ]);
@@ -5133,11 +5187,12 @@ function ConversationThread({
     const key = developmentAutoStartStorageKey(detail.conversation.id);
     try {
       if (window.sessionStorage.getItem(key) !== "true") return;
+      setDevelopmentAutoStartPending(true);
       window.sessionStorage.removeItem(key);
     } catch {
       return;
     }
-    void startDevelopment();
+    void startDevelopment().finally(() => setDevelopmentAutoStartPending(false));
   }, [detail.conversation.id, detail.work_item.status, isExecution, startDevelopment]);
 
   const confirmAction = useCallback(
@@ -5501,6 +5556,10 @@ function ConversationThread({
     () => ({ messages: editableMessages, editMessage: onEditMessage }),
     [editableMessages, onEditMessage],
   );
+  const developmentLaunchPending =
+    developmentStartBusy ||
+    developmentAutoStartPending ||
+    hasDevelopmentAutoStartRequest(detail.conversation.id);
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -5673,23 +5732,23 @@ function ConversationThread({
                       <h2>
                         {developmentStartError
                           ? "Development needs attention"
-                          : developmentStartBusy
+                          : developmentLaunchPending
                             ? "Preparing development"
                             : "Ready to start development"}
                       </h2>
                       <p>
                         {developmentStartError
                           ? developmentStartError
-                          : developmentStartBusy
-                            ? "Checking repository context and connecting the approved phase agents."
+                          : developmentLaunchPending
+                            ? "Connecting the approved phase agents. This status updates automatically."
                             : "The approved phases and agents are ready."}
                       </p>
                     </div>
-                    {developmentStartBusy ? (
+                    {developmentLaunchPending ? (
                       <Spinner label="Starting development…" />
                     ) : (
                       <Button variant="primary" onClick={() => void startDevelopment()}>
-                        {developmentStartError ? "Try again" : "Start development"}
+                        {developmentStartError ? "Check status" : "Start development"}
                       </Button>
                     )}
                   </section>
@@ -6340,7 +6399,7 @@ export function ConversationWorkspace({
     if (!phaseWorkspaceVisible) return;
     setConversationSidebarCollapsed(true);
     setConversationListOpen(false);
-  }, [phaseWorkspaceVisible, detail?.conversation.id]);
+  }, [phaseWorkspaceVisible]);
 
   useEffect(() => {
     if (!conversationListOpen && !conversationMenu && !headerMenuOpen) return;

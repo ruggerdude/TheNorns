@@ -7860,6 +7860,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       taskContextAssembler,
       dispatchContextScope,
       (runnerId) => {
+        const device = deviceDispatchEnabled
+          ? options.deviceControl?.broker.executionIdentity(runnerId)
+          : null;
+        if (device) {
+          return { runner_id: device.device_id, runner_generation: device.generation };
+        }
         const runner = stores.runner(runnerId);
         return runner
           ? { runner_id: runner.runner_id, runner_generation: runner.generation }
@@ -8524,6 +8530,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               workspaceCloneDestination: body.capabilities.includes("workspace_clone_destination"),
               workspaceDelete: body.capabilities.includes("workspace_delete"),
             });
+            options.deviceControl?.broker.markExecutionReady(
+              deviceIdentity.device_id,
+              deviceIdentity.generation,
+            );
             const recentlyExecuted = new Set(body.recently_executed_command_ids);
             sendFrame(socket, {
               type: "reconcile_response",

@@ -192,12 +192,45 @@ type StructuredQcFinding = Pick<
   "severity" | "module_id" | "finding" | "recommendation"
 >;
 
-function structuredQcFindings(content: string): StructuredQcFinding[] | null {
+type QcMessageSpeaker = V2ConversationPlanReviewT["chat_messages"][number]["speaker"];
+
+type StructuredPmResponse = {
+  finding_index: number;
+  disposition: "accept" | "rebut";
+  rationale: string;
+};
+
+type StructuredPmChange = Record<string, unknown> & {
+  op: string;
+  finding_indices: number[];
+};
+
+type StructuredPmRevision = {
+  responses: StructuredPmResponse[];
+  changes: StructuredPmChange[];
+  plan: Record<string, unknown> | null;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function structuredJson(content: string): Record<string, unknown> | null {
   let source = content.trim();
   const fenced = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(source);
   if (fenced?.[1]) source = fenced[1];
   try {
-    const parsed = JSON.parse(source) as { findings?: unknown };
+    const parsed: unknown = JSON.parse(source);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function structuredQcFindings(content: string): StructuredQcFinding[] | null {
+  const parsed = structuredJson(content);
+  if (!parsed) return null;
+  try {
     if (!parsed || !Array.isArray(parsed.findings) || parsed.findings.length === 0) return null;
     const findings = parsed.findings.filter(
       (candidate): candidate is StructuredQcFinding =>
@@ -217,15 +250,272 @@ function structuredQcFindings(content: string): StructuredQcFinding[] | null {
   }
 }
 
+function structuredPmRevision(content: string): StructuredPmRevision | null {
+  const parsed = structuredJson(content);
+  if (!parsed || !Array.isArray(parsed.responses)) return null;
+  const responses = parsed.responses.filter(
+    (candidate): candidate is StructuredPmResponse =>
+      isRecord(candidate) &&
+      Number.isInteger(candidate.finding_index) &&
+      Number(candidate.finding_index) >= 0 &&
+      ["accept", "rebut"].includes(String(candidate.disposition)) &&
+      typeof candidate.rationale === "string",
+  );
+  if (responses.length !== parsed.responses.length) return null;
+
+  const rawChanges = parsed.changes;
+  const changes = Array.isArray(rawChanges)
+    ? rawChanges.filter(
+        (candidate): candidate is StructuredPmChange =>
+          isRecord(candidate) &&
+          typeof candidate.op === "string" &&
+          Array.isArray(candidate.finding_indices) &&
+          candidate.finding_indices.every((index) => Number.isInteger(index) && Number(index) >= 0),
+      )
+    : [];
+  if (Array.isArray(rawChanges) && changes.length !== rawChanges.length) return null;
+
+  const plan = isRecord(parsed.plan) ? parsed.plan : null;
+  if (!Array.isArray(rawChanges) && !plan) return null;
+  return { responses, changes, plan };
+}
+
+function phaseScope(moduleId: unknown, phaseNumbers: ReadonlyMap<string, number>): string | null {
+  if (typeof moduleId !== "string") return null;
+  const phase = phaseNumbers.get(moduleId);
+  return `${phase ? `Phase ${phase}` : "Plan phase"} · ${moduleId}`;
+}
+
+function readableList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (typeof item === "string") return [item];
+    if (!isRecord(item)) return [];
+    if (typeof item.description !== "string") return [];
+    return [
+      typeof item.mitigation === "string" && item.mitigation.trim()
+        ? `${item.description} — ${item.mitigation}`
+        : item.description,
+    ];
+  });
+}
+
+function readableFieldName(field: string): string {
+  return field.replaceAll("_", " ");
+}
+
+function pmChangePresentation(
+  change: StructuredPmChange,
+  phaseNumbers: ReadonlyMap<string, number>,
+): { title: string; scope: string; detail?: string; items?: string[] } {
+  const scope = phaseScope(change.module_id, phaseNumbers) ?? "Plan-wide";
+  const module = isRecord(change.module) ? change.module : null;
+  const patch = isRecord(change.patch) ? change.patch : null;
+  const staffing = isRecord(change.staffing) ? change.staffing : null;
+
+  switch (change.op) {
+    case "set_objective":
+      return {
+        title: "Updated the plan objective",
+        scope,
+        ...(typeof change.value === "string" ? { detail: change.value } : {}),
+      };
+    case "set_assumptions":
+      return { title: "Updated assumptions", scope, items: readableList(change.value) };
+    case "set_risks":
+      return { title: "Updated risks and mitigations", scope, items: readableList(change.value) };
+    case "set_out_of_scope":
+      return { title: "Updated what is out of scope", scope, items: readableList(change.value) };
+    case "set_verification_requirements":
+      return { title: "Updated final verification", scope, items: readableList(change.value) };
+    case "set_open_decisions":
+      return { title: "Updated open decisions", scope, items: readableList(change.value) };
+    case "set_estimated_budget": {
+      const value = isRecord(change.value) ? change.value : null;
+      const amount = typeof value?.amount === "number" ? value.amount.toFixed(2) : null;
+      const currency = typeof value?.currency === "string" ? value.currency : "";
+      return {
+        title: "Updated the estimated budget",
+        scope,
+        ...(amount ? { detail: `${currency} ${amount}`.trim() } : {}),
+      };
+    }
+    case "add_module":
+    case "replace_module":
+      return {
+        title: `${change.op === "add_module" ? "Added" : "Replaced"} ${typeof module?.title === "string" ? module.title : "a development phase"}`,
+        scope: phaseScope(module?.id, phaseNumbers) ?? scope,
+        ...(typeof module?.description === "string" ? { detail: module.description } : {}),
+      };
+    case "patch_module": {
+      const changedFields = patch ? Object.keys(patch).map(readableFieldName) : [];
+      return {
+        title: "Updated a development phase",
+        scope,
+        ...(typeof patch?.description === "string"
+          ? { detail: patch.description }
+          : changedFields.length > 0
+            ? { detail: `Changed ${changedFields.join(", ")}.` }
+            : {}),
+      };
+    }
+    case "remove_module":
+      return { title: "Removed a development phase", scope };
+    case "add_staffing":
+    case "replace_staffing": {
+      const identity = [staffing?.agent_role, staffing?.provider, staffing?.model]
+        .filter((value): value is string => typeof value === "string")
+        .join(" · ");
+      return {
+        title: `${change.op === "add_staffing" ? "Assigned" : "Changed"} the implementation agent`,
+        scope,
+        ...(identity ? { detail: identity } : {}),
+      };
+    }
+    case "remove_staffing":
+      return { title: "Removed the implementation agent", scope };
+    default:
+      return { title: readableFieldName(change.op), scope };
+  }
+}
+
+function planRevisionSummary(plan: Record<string, unknown>): {
+  objective: string | null;
+  phases: Array<{ id: string | null; title: string }>;
+} {
+  const contract = isRecord(plan.plan) ? plan.plan : null;
+  const modules = Array.isArray(contract?.modules) ? contract.modules : [];
+  return {
+    objective: typeof contract?.objective === "string" ? contract.objective : null,
+    phases: modules.flatMap((candidate) =>
+      isRecord(candidate) && typeof candidate.title === "string"
+        ? [
+            {
+              id: typeof candidate.id === "string" ? candidate.id : null,
+              title: candidate.title,
+            },
+          ]
+        : [],
+    ),
+  };
+}
+
+function PmRevisionContent({
+  revision,
+  phaseNumbers,
+}: {
+  revision: StructuredPmRevision;
+  phaseNumbers: ReadonlyMap<string, number>;
+}): React.ReactElement {
+  const plan = revision.plan ? planRevisionSummary(revision.plan) : null;
+  return (
+    <section
+      className="qc-structured-response qc-pm-revision"
+      aria-label="Planning manager revision"
+    >
+      <header>
+        <strong>Planning manager revision</strong>
+        <span>
+          {revision.responses.length} {revision.responses.length === 1 ? "response" : "responses"}
+          {revision.changes.length > 0
+            ? ` · ${revision.changes.length} ${revision.changes.length === 1 ? "plan change" : "plan changes"}`
+            : plan
+              ? " · complete revised plan"
+              : ""}
+        </span>
+      </header>
+      {revision.responses.length > 0 ? (
+        <ul className="qc-pm-responses" aria-label="Responses to QC findings">
+          {revision.responses.map((response) => (
+            <li
+              key={`${response.finding_index}:${response.disposition}`}
+              data-disposition={response.disposition}
+            >
+              <header>
+                <strong>Finding {response.finding_index + 1}</strong>
+                <span>{response.disposition === "accept" ? "Accepted" : "Rebutted"}</span>
+              </header>
+              <p>{response.rationale}</p>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {revision.changes.length > 0 ? (
+        <section className="qc-pm-changes" aria-label="Applied plan changes">
+          <h4>Applied plan changes</h4>
+          <ol>
+            {revision.changes.map((change, index) => {
+              const presentation = pmChangePresentation(change, phaseNumbers);
+              return (
+                <li key={`${change.op}:${index}`}>
+                  <header>
+                    <strong>{presentation.title}</strong>
+                    <span>{presentation.scope}</span>
+                  </header>
+                  {presentation.detail ? <p>{presentation.detail}</p> : null}
+                  {presentation.items && presentation.items.length > 0 ? (
+                    <ul>
+                      {presentation.items.map((item) => (
+                        <li key={item}>{item}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  <small>
+                    Addresses finding{change.finding_indices.length === 1 ? "" : "s"}{" "}
+                    {change.finding_indices.map((finding) => finding + 1).join(", ")}
+                  </small>
+                </li>
+              );
+            })}
+          </ol>
+        </section>
+      ) : null}
+      {plan ? (
+        <section className="qc-pm-plan-summary" aria-label="Complete revised plan summary">
+          <h4>Complete revised plan</h4>
+          {plan.objective ? <p>{plan.objective}</p> : null}
+          {plan.phases.length > 0 ? (
+            <ol>
+              {plan.phases.map((phase, index) => (
+                <li key={phase.id ?? `${phase.title}:${index}`}>
+                  <span>Phase {index + 1}</span>
+                  <strong>{phase.title}</strong>
+                </li>
+              ))}
+            </ol>
+          ) : null}
+        </section>
+      ) : null}
+    </section>
+  );
+}
+
 function QcMessageContent({
   content,
   phaseNumbers = new Map(),
+  speaker,
+  streaming = false,
 }: {
   content: string;
   phaseNumbers?: ReadonlyMap<string, number>;
+  speaker?: QcMessageSpeaker;
+  streaming?: boolean;
 }): React.ReactElement {
+  const pmRevision = speaker === "pm" ? structuredPmRevision(content) : null;
+  if (pmRevision) {
+    return <PmRevisionContent revision={pmRevision} phaseNumbers={phaseNumbers} />;
+  }
   const findings = structuredQcFindings(content);
-  if (!findings) return <p className="qc-message-text">{content}</p>;
+  if (!findings) {
+    if (streaming && /^[{[]/.test(content.trim())) {
+      return (
+        <p className="qc-message-text qc-structured-streaming">
+          Receiving and organizing the structured response…
+        </p>
+      );
+    }
+    return <p className="qc-message-text">{content}</p>;
+  }
   return (
     <section className="qc-structured-response" aria-label="Structured QC findings">
       <header>
@@ -233,13 +523,9 @@ function QcMessageContent({
           {findings.length} {findings.length === 1 ? "finding" : "findings"}
         </strong>
       </header>
-      <div className="qc-structured-findings" role="list">
+      <ul className="qc-structured-findings">
         {findings.map((finding, index) => (
-          <article
-            key={`${finding.module_id ?? "plan"}:${index}`}
-            role="listitem"
-            data-severity={finding.severity}
-          >
+          <li key={`${finding.module_id ?? "plan"}:${index}`} data-severity={finding.severity}>
             <header>
               <span>{severityLabel(finding.severity)}</span>
               <small>
@@ -253,9 +539,9 @@ function QcMessageContent({
               <strong>Recommendation</strong>
               <p>{finding.recommendation}</p>
             </div>
-          </article>
+          </li>
         ))}
-      </div>
+      </ul>
     </section>
   );
 }
@@ -302,7 +588,11 @@ function QcLiveDialogue({
                   <pre>{message.content}</pre>
                 </details>
               ) : (
-                <QcMessageContent content={message.content} phaseNumbers={phaseNumbers} />
+                <QcMessageContent
+                  content={message.content}
+                  phaseNumbers={phaseNumbers}
+                  speaker={message.speaker}
+                />
               )}
             </li>
           ))}
@@ -319,7 +609,12 @@ function QcLiveDialogue({
                 </strong>
                 <span>Response streaming now</span>
               </header>
-              <QcMessageContent content={liveOutput} phaseNumbers={phaseNumbers} />
+              <QcMessageContent
+                content={liveOutput}
+                phaseNumbers={phaseNumbers}
+                speaker={review.live_progress?.stage === "revising" ? "pm" : "reviewer"}
+                streaming
+              />
             </li>
           ) : null}
         </ol>
@@ -368,7 +663,11 @@ function QcQuestionBox({
           {messages.map((message) => (
             <li key={message.id} data-speaker={message.speaker}>
               <strong>{message.speaker === "human" ? "You" : label}</strong>
-              <QcMessageContent content={message.content} phaseNumbers={phaseNumbers} />
+              <QcMessageContent
+                content={message.content}
+                phaseNumbers={phaseNumbers}
+                speaker={message.speaker}
+              />
             </li>
           ))}
         </ol>
@@ -994,9 +1293,7 @@ function QcReviewRecord({
             <dd>{history.length}</dd>
           </div>
         </dl>
-        {includeDialogue ? (
-          <QcLiveDialogue review={review} phaseNumbers={phaseNumbers} />
-        ) : null}
+        {includeDialogue ? <QcLiveDialogue review={review} phaseNumbers={phaseNumbers} /> : null}
         {findings.length > 0 ? (
           <ul className="qc-new-findings is-readonly">
             {findings.map((finding) => (
