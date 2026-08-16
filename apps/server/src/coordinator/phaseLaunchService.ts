@@ -522,7 +522,14 @@ export class PhaseLaunchService {
             dispatchJobId: result.dispatch_job_id,
             runId: result.run_id,
           },
-          contextRefs,
+          [
+            ...contextRefs,
+            // Approved input files use the same signed, content-addressed
+            // retrieval route as the assembled prompt. Authorize those exact
+            // documents for this exact run too; otherwise the prompt loads and
+            // the first approved attachment fails with a misleading 403.
+            ...inputFiles.map((inputFile) => inputFile.context_ref),
+          ],
         );
 
         remaining -= 1;

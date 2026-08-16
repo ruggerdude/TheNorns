@@ -73,6 +73,20 @@ describe("conversation execution target", () => {
     expect(executionTargetHeaderLabel(executionProjection(presentation))).toBe(expected);
   });
 
+  it("does not call a merely dispatched run active coding", () => {
+    expect(
+      executionTargetHeaderLabel({
+        ...executionProjection("active"),
+        run: {
+          run_id: runId,
+          state: "dispatched",
+          can_stop: true,
+          cancellation: null,
+        },
+      }),
+    ).toBe("Preparing on · Office Mac mini");
+  });
+
   it("renders no execution-target wording when the authoritative target is absent", () => {
     expect(
       executionTargetHeaderLabel({

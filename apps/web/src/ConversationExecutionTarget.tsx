@@ -99,11 +99,16 @@ export function executionTargetHeaderLabel(
   projection: ConversationExecutionProjectionT | null,
 ): string | null {
   if (!projection?.target) return null;
-  const prefix = {
-    idle: "Execution target",
-    active: "Running on",
-    historical: "Last ran on",
-  }[projection.presentation];
+  const prefix =
+    projection.presentation === "idle"
+      ? "Execution target"
+      : projection.presentation === "historical"
+        ? "Last ran on"
+        : ["created", "dispatched"].includes(projection.run?.state ?? "")
+          ? "Preparing on"
+          : projection.run?.state === "waiting_for_human"
+            ? "Waiting on"
+            : "Running on";
   return `${prefix} · ${projection.target.name}`;
 }
 

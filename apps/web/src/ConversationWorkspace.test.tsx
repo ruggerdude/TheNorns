@@ -4973,17 +4973,11 @@ describe("conversation workspace", () => {
     );
   });
 
-  it("shows live phases and agent dialogue while keeping project-run stop separate from pause proposals", async () => {
+  it("shows dispatched phases without claiming coding is already running", async () => {
     const execution = executionConversation();
     const approvedVersion = planVersion({ status: "approved" });
-    const baseHandoff = handoffFor(approvedVersion, execution.id);
-    const handoff = {
-      ...baseHandoff,
-      package: {
-        ...baseHandoff.package,
-        task_ids: ["task-api"],
-      },
-    };
+    const handoff = handoffFor(approvedVersion, execution.id);
+    const taskId = "task:phase%3Aphase-1:task-core-api";
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -5027,7 +5021,7 @@ describe("conversation workspace", () => {
             },
             run: {
               run_id: "run-office-1",
-              state: "running",
+              state: "dispatched",
               can_stop: true,
               cancellation: null,
             },
@@ -5046,7 +5040,7 @@ describe("conversation workspace", () => {
             },
             tasks: [
               {
-                id: "task-api",
+                id: taskId,
                 title: "Core API",
                 state: "in_progress",
                 complexity: "moderate",
@@ -5062,7 +5056,7 @@ describe("conversation workspace", () => {
                 reviewer_agent: null,
                 run: {
                   id: "run-office-1",
-                  state: "running",
+                  state: "dispatched",
                   attempt: 1,
                   verification_status: "pending",
                   commit_sha: null,
@@ -5078,7 +5072,7 @@ describe("conversation workspace", () => {
             ],
           });
         }
-        if (url.endsWith("/phases/phase-1/tasks/task-api/run-log")) {
+        if (url.endsWith(`/phases/phase-1/tasks/${taskId}/run-log`)) {
           return Response.json({
             run_id: "run-office-1",
             entries: [
@@ -5099,12 +5093,15 @@ describe("conversation workspace", () => {
       />,
     );
 
-    const executionTargetLabel = await screen.findByText("Running on · Office Mac mini");
+    const executionTargetLabel = await screen.findByText("Preparing on · Office Mac mini");
     expect(executionTargetLabel).toBeVisible();
     expect(document.querySelector(".conversation-header-identity")).toContainElement(
       executionTargetLabel,
     );
     expect(await screen.findByRole("heading", { name: "Agent dialogue" })).toBeVisible();
+    expect(screen.getByTestId("conversation-development-running")).toHaveTextContent(
+      "Development is preparing",
+    );
     const phases = screen.getByRole("complementary", { name: "Development phases" });
     expect(phases).toHaveTextContent("Core API");
     expect(phases).toHaveTextContent("In progress");
@@ -5112,7 +5109,7 @@ describe("conversation workspace", () => {
       "Implementation agent",
     );
     expect(screen.getByText("openai · gpt-5.6")).toBeInTheDocument();
-    expect(await screen.findByTestId("task-run-log-output-task-api")).toHaveTextContent(
+    expect(await screen.findByTestId(`task-run-log-output-${taskId}`)).toHaveTextContent(
       "Implementing the approved API phase.",
     );
     expect(screen.queryByRole("combobox", { name: "Agent task to stop" })).not.toBeInTheDocument();
@@ -5199,7 +5196,7 @@ describe("conversation workspace", () => {
             // Deliberately opposite the immutable plan order.
             tasks: [
               {
-                id: `task:phase-1:${web.id}`,
+                id: `task:phase%3Aphase-1:task-${web.id}`,
                 title: web.title,
                 state: "pending",
                 complexity: "M",
@@ -5214,7 +5211,7 @@ describe("conversation workspace", () => {
                 reviews: [],
               },
               {
-                id: `task:phase-1:${core.id}`,
+                id: `task:phase%3Aphase-1:task-${core.id}`,
                 title: core.title,
                 state: "in_progress",
                 complexity: "M",
@@ -5273,12 +5270,20 @@ describe("conversation workspace", () => {
     );
     const phases = screen.getByRole("complementary", { name: "Development phases" });
     const phaseButtons = within(phases).getAllByRole("button");
+    expect(within(phases).getByText(core.title)).toBeInTheDocument();
+    expect(within(phases).getByText(web.title)).toBeInTheDocument();
     expect(
       phaseButtons.find((button) => button.textContent?.includes(core.title)),
     ).toHaveTextContent("In progress");
     expect(
       phaseButtons.find((button) => button.textContent?.includes(web.title)),
     ).toHaveTextContent("Queued");
+    expect(
+      phaseButtons.filter(
+        (button) =>
+          button.textContent?.includes(core.title) || button.textContent?.includes(web.title),
+      ),
+    ).toHaveLength(2);
   });
 
   it("offers a truthful status refresh instead of claiming an active stream can resume", async () => {

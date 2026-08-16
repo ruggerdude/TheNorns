@@ -3637,13 +3637,9 @@ function developmentPhaseItems(
   const paired: Array<{
     module: (typeof modules)[number] | undefined;
     task: DevelopmentTask | undefined;
-  }> = modules.map((module, moduleIndex) => {
-    const handoffTaskId =
-      detail.handoff?.package.task_sequence[moduleIndex] === module.id
-        ? detail.handoff.package.task_ids[moduleIndex]
-        : undefined;
+  }> = modules.map((module) => {
     const taskIndex = unmatchedTasks.findIndex((task) => {
-      if (task.id === module.id || task.id === handoffTaskId) return true;
+      if (task.id === module.id) return true;
       const decodedTaskId = (() => {
         try {
           return decodeURIComponent(task.id);
@@ -3651,7 +3647,13 @@ function developmentPhaseItems(
           return task.id;
         }
       })();
-      return task.id.endsWith(`:${module.id}`) || decodedTaskId.endsWith(`:${module.id}`);
+      // Materialized production task ids end in `:task-<module id>` while
+      // older/test fixtures may end directly in `:<module id>`. Match both
+      // explicit encodings, never by array position or title.
+      return [task.id, decodedTaskId].some(
+        (candidate) =>
+          candidate.endsWith(`:task-${module.id}`) || candidate.endsWith(`:${module.id}`),
+      );
     });
     const [task] = taskIndex >= 0 ? unmatchedTasks.splice(taskIndex, 1) : [undefined];
     return { module, task };
@@ -3693,6 +3695,29 @@ function developmentRunStatusMessage(task: DevelopmentTask | null): string {
       return task.run.failure_detail?.trim() || `This attempt ${task.run.state}.`;
     default:
       return `Current run status: ${task.run.state.replaceAll("_", " ")}.`;
+  }
+}
+
+function developmentExecutionHeading(
+  state: NonNullable<ConversationExecutionProjectionT["run"]>["state"] | undefined,
+): string {
+  switch (state) {
+    case "created":
+    case "dispatched":
+      return "Development is preparing";
+    case "running":
+    case "verifying":
+      return "Development is running";
+    case "waiting_for_human":
+      return "Development needs your input";
+    case "succeeded":
+      return "Development is complete";
+    case "failed":
+    case "cancelled":
+    case "expired":
+      return "Development needs attention";
+    default:
+      return "Development is starting";
   }
 }
 
@@ -5928,7 +5953,9 @@ function ConversationThread({
                   >
                     <span className="conversation-agent-indicator" aria-hidden="true" />
                     <span>
-                      <strong>Development is running</strong>
+                      <strong>
+                        {developmentExecutionHeading(executionProjection?.run?.state)}
+                      </strong>
                       <small>
                         {developmentStartReport ??
                           `${executionProjection?.target?.name ?? "Execution target"} · ${executionProjection?.run?.state.replaceAll("_", " ") ?? "active"}`}

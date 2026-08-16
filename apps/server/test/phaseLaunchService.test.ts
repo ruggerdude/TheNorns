@@ -8,7 +8,7 @@
 // still refuses everything it always refused (unverified binding, exhausted
 // budget); and a task is never scheduled with partial context.
 import { PGlite } from "@electric-sql/pglite";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DispatchContextScopeRepository } from "../src/coordinator/dispatchContextScope.js";
 import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
 import {
@@ -53,6 +53,7 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
   let transactions: PGliteTransactionRunner;
   let coordinator: Phase4Coordinator;
   let taskContext: RelationalTaskContextAssembler;
+  let taskContextStore: TaskContextStore;
   let dispatchScope: DispatchContextScopeRepository;
 
   async function seed(options: SeedOptions = {}): Promise<void> {
@@ -266,13 +267,10 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
     coordinator = new Phase4Coordinator(transactions, {
       deviceAuthorization: new PostgresDeviceActionAuthorization({ deviceDispatchEnabled: true }),
     });
-    taskContext = new RelationalTaskContextAssembler(
-      transactions,
-      new TaskContextStore(transactions),
-      {
-        baseUrl: "https://norns.example.com",
-      },
-    );
+    taskContextStore = new TaskContextStore(transactions);
+    taskContext = new RelationalTaskContextAssembler(transactions, taskContextStore, {
+      baseUrl: "https://norns.example.com",
+    });
     dispatchScope = new DispatchContextScopeRepository(transactions);
   }, 60_000);
 
@@ -282,8 +280,28 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
 
   // ---- the real chain: approved -> active, real dispatch_jobs, real refs ---
 
-  it("schedules a dependency-ready task through the real coordinator gate with real assembled context_refs", async () => {
+  it("authorizes assembled context and approved input files for the dispatched runner", async () => {
     await seed();
+    const approvedInput = await transactions.transaction((tx) =>
+      taskContextStore.put(tx, {
+        projectId: PROJECT,
+        section: `approved-input:${TASK}:fixture.gp`,
+        content: Buffer.from("approved guitar pro fixture"),
+        mediaType: "application/octet-stream",
+      }),
+    );
+    vi.spyOn(taskContext, "inputFilesForTask").mockResolvedValue([
+      {
+        filename: "fixture.gp",
+        media_type: approvedInput.media_type,
+        context_ref: {
+          artifact_id: approvedInput.id,
+          content_hash: approvedInput.sha256,
+          byte_size: approvedInput.byte_size,
+          storage_ref: `https://norns.example.com/api/v2/execution/task-context/${approvedInput.id}`,
+        },
+      },
+    ]);
     const result = await service().startPhase({
       project_id: PROJECT,
       phase_id: PHASE,
@@ -310,13 +328,14 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
     );
     expect(dispatchRow.rows[0]).toEqual({ status: "queued", runner_id: RUNNER });
 
-    const commandRow = await pg.query<{ envelope: { context_refs: unknown[] } }>(
-      "SELECT envelope FROM commands WHERE dispatch_job_id = $1",
-      [scheduled?.dispatch_job_id],
-    );
+    const commandRow = await pg.query<{
+      envelope: { context_refs: Array<{ artifact_id: string }>; input_files: unknown[] };
+    }>("SELECT envelope FROM commands WHERE dispatch_job_id = $1", [scheduled?.dispatch_job_id]);
     const contextRefs = commandRow.rows[0]?.envelope.context_refs ?? [];
+    const inputFiles = commandRow.rows[0]?.envelope.input_files ?? [];
     expect(Array.isArray(contextRefs)).toBe(true);
     expect(contextRefs.length).toBeGreaterThan(0);
+    expect(inputFiles).toHaveLength(1);
 
     // Real, assembled content — not a placeholder — reached the dispatch
     // command. Cross-check every ref id is a real content-addressed
@@ -324,7 +343,7 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
     const documentIds = await pg.query<{ count: string }>(
       "SELECT count(*) AS count FROM task_context_documents",
     );
-    expect(Number(documentIds.rows[0]?.count)).toBe(contextRefs.length);
+    expect(Number(documentIds.rows[0]?.count)).toBe(contextRefs.length + 1);
 
     // EXECUTION E2's authorization scope: the runner that was actually
     // dispatched is recorded against every context document it was handed.
@@ -332,7 +351,17 @@ describe.sequential("EXECUTION E2 — PhaseLaunchService", () => {
       "SELECT count(*) AS count FROM dispatch_context_documents WHERE runner_id = $1",
       [RUNNER],
     );
-    expect(Number(scopeRows.rows[0]?.count)).toBe(contextRefs.length);
+    expect(Number(scopeRows.rows[0]?.count)).toBe(contextRefs.length + 1);
+    const scopedIds = await pg.query<{ context_document_id: string }>(
+      "SELECT context_document_id FROM dispatch_context_documents WHERE runner_id = $1",
+      [RUNNER],
+    );
+    expect(scopedIds.rows.map((row) => row.context_document_id)).toEqual(
+      expect.arrayContaining([
+        ...contextRefs.map((reference) => reference.artifact_id),
+        approvedInput.id,
+      ]),
+    );
   });
 
   it("schedules a selected device-backed target through its live device identity", async () => {
