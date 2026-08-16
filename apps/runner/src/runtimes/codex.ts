@@ -97,6 +97,13 @@ export class CodexRuntime implements CodingRuntime {
       const createClient: CodexClientFactory =
         this.options.createClient ?? ((options) => new Codex(options));
       const runtimeEnv = credentialFreeEnvironment(this.options.baseEnv ?? process.env, {
+        ...(credentialMode === "api" && request.runtimeStateDirectory
+          ? {
+              HOME: request.runtimeStateDirectory,
+              XDG_CACHE_HOME: request.runtimeStateDirectory,
+              XDG_CONFIG_HOME: request.runtimeStateDirectory,
+            }
+          : {}),
         ...(request.humanWaitPath ? { NORNS_HUMAN_WAIT_PATH: request.humanWaitPath } : {}),
       });
       const codex = credential
@@ -113,6 +120,13 @@ export class CodexRuntime implements CodingRuntime {
       const threadOptions = {
         workingDirectory: request.worktreePath,
         skipGitRepoCheck: false,
+        sandboxMode: "workspace-write" as const,
+        approvalPolicy: "never" as const,
+        networkAccessEnabled: true,
+        additionalDirectories: [
+          ...(request.runtimeStateDirectory ? [request.runtimeStateDirectory] : []),
+          ...(request.additionalReadDirectories ?? []),
+        ],
         ...(this.options.model !== undefined ? { model: this.options.model } : {}),
         ...(this.options.reasoningEffort !== undefined
           ? { modelReasoningEffort: this.options.reasoningEffort }

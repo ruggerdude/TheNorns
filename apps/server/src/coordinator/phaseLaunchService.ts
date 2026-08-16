@@ -17,7 +17,7 @@
 // through to the same gate. Neither path bypasses or weakens it: every check
 // below only ever REFUSES work the gate would also refuse, earlier and with a
 // clearer reason.
-import type { V2ActorT, V2ContentAddressedReferenceT } from "@norns/contracts";
+import type { V2ActorT, V2ContentAddressedReferenceT, V2TaskInputFileT } from "@norns/contracts";
 import { type TaskContextAssembler, TaskContextAssemblyError } from "../execution/index.js";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import {
@@ -445,8 +445,10 @@ export class PhaseLaunchService {
         continue;
       }
       let contextRefs: V2ContentAddressedReferenceT[];
+      let inputFiles: V2TaskInputFileT[];
       try {
         contextRefs = await this.taskContext.assembleForTask(task.task_id);
+        inputFiles = (await this.taskContext.inputFilesForTask?.(task.task_id)) ?? [];
       } catch (error) {
         if (error instanceof TaskContextAssemblyError) {
           blocked.push({
@@ -471,6 +473,7 @@ export class PhaseLaunchService {
         correlation_id: `correlation:${task.task_id}:${input.issued_at}`,
         causation_id: null,
         context_refs: contextRefs,
+        input_files: inputFiles,
         target_branch: this.policy.targetBranch(task.task_id),
         worktree_policy_ref: this.policy.worktreePolicyRef,
         sandbox_policy_ref: this.policy.sandboxPolicyRef,

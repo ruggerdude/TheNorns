@@ -5123,6 +5123,164 @@ describe("conversation workspace", () => {
     expect(screen.getByRole("button", { name: "Stop project work" })).toBeDisabled();
   });
 
+  it("matches plan phases to their task ids instead of whichever task row arrives first", async () => {
+    const execution = executionConversation();
+    const core = makeCoreApiModule();
+    const web = makeWebUiModule();
+    const baseVersion = planVersion({ status: "approved" });
+    const approvedVersion = {
+      ...baseVersion,
+      plan: {
+        ...baseVersion.plan,
+        plan: makePlan({
+          objective: baseVersion.plan.plan.objective,
+          modules: [core, web],
+          risks: baseVersion.plan.plan.risks,
+        }),
+        staffing: [
+          {
+            module_id: core.id,
+            agent_role: "implementation",
+            provider: "openai",
+            model: "gpt-5.6-sol",
+          },
+          {
+            module_id: web.id,
+            agent_role: "implementation",
+            provider: "anthropic",
+            model: "claude-opus-4-8",
+          },
+        ],
+      },
+    } satisfies V2WorkPlanVersionT;
+    const handoff = handoffFor(approvedVersion, execution.id);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) {
+          return Response.json({
+            work_items: [
+              {
+                work_item: { ...workItem, status: "executing", phase_id: "phase-1" },
+                conversations: [execution],
+              },
+            ],
+          });
+        }
+        if (url.endsWith(`/conversations/${execution.id}`)) {
+          return detailResponse([], null, null, {
+            workItem: { ...workItem, status: "executing", phase_id: "phase-1" },
+            conversation: execution,
+            planVersions: [approvedVersion],
+            handoff,
+          });
+        }
+        if (url.endsWith(`/conversations/${execution.id}/execution`)) {
+          return Response.json({
+            project_id: projectId,
+            conversation_id: execution.id,
+            presentation: "active",
+            target: { execution_target_id: "office", name: "Office Mac" },
+            run: { run_id: "run-core", state: "running", can_stop: true, cancellation: null },
+          });
+        }
+        if (url.endsWith("/phases/phase-1/execution")) {
+          return Response.json({
+            schema_version: 2,
+            project_id: projectId,
+            phase: {
+              id: "phase-1",
+              objective_summary: approvedVersion.plan.plan.objective,
+              status: "active",
+              completed_tasks: 0,
+              total_tasks: 2,
+            },
+            // Deliberately opposite the immutable plan order.
+            tasks: [
+              {
+                id: `task:phase-1:${web.id}`,
+                title: web.title,
+                state: "pending",
+                complexity: "M",
+                risk: "medium",
+                dependencies: [],
+                assignment: { provider: "anthropic", model: "claude-opus-4-8", status: "proposed" },
+                implementation_agent: null,
+                reviewer_agent: null,
+                run: null,
+                failed_verification_commands: [],
+                evidence_count: 0,
+                reviews: [],
+              },
+              {
+                id: `task:phase-1:${core.id}`,
+                title: core.title,
+                state: "in_progress",
+                complexity: "M",
+                risk: "medium",
+                dependencies: [],
+                assignment: { provider: "openai", model: "gpt-5.6-sol", status: "active" },
+                implementation_agent: {
+                  profile_id: "agent-core",
+                  provider: "openai",
+                  model: "gpt-5.6-sol",
+                  roles: ["implementation"],
+                },
+                reviewer_agent: null,
+                run: {
+                  id: "run-core",
+                  state: "running",
+                  attempt: 1,
+                  verification_status: "pending",
+                  commit_sha: null,
+                  failure_detail: null,
+                  published_branch: null,
+                  pull_request_url: null,
+                  publication_note: null,
+                },
+                failed_verification_commands: [],
+                evidence_count: 0,
+                reviews: [],
+              },
+            ],
+          });
+        }
+        if (url.includes("/tasks/") && url.endsWith("/run-log")) {
+          return Response.json({
+            run_id: "run-core",
+            entries: [],
+            truncated: false,
+            total_entries: 0,
+          });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={execution.id}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByRole("heading", { name: "Agent dialogue" })).toBeVisible();
+    expect(await screen.findByText("openai · gpt-5.6-sol")).toBeInTheDocument();
+    expect(screen.getByRole("list", { name: "Agent activity transcript" })).toHaveTextContent(
+      "working now",
+    );
+    const phases = screen.getByRole("complementary", { name: "Development phases" });
+    const phaseButtons = within(phases).getAllByRole("button");
+    expect(
+      phaseButtons.find((button) => button.textContent?.includes(core.title)),
+    ).toHaveTextContent("In progress");
+    expect(
+      phaseButtons.find((button) => button.textContent?.includes(web.title)),
+    ).toHaveTextContent("Queued");
+  });
+
   it("offers a truthful status refresh instead of claiming an active stream can resume", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = urlOf(input);

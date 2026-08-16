@@ -260,6 +260,13 @@ export class ClaudeCodeRuntime implements CodingRuntime {
             // key would take precedence and the run would bill money nobody is
             // metering.
             ANTHROPIC_AUTH_TOKEN: credential.token,
+            ...(request.runtimeStateDirectory
+              ? {
+                  HOME: request.runtimeStateDirectory,
+                  XDG_CACHE_HOME: request.runtimeStateDirectory,
+                  XDG_CONFIG_HOME: request.runtimeStateDirectory,
+                }
+              : {}),
             ...(request.humanWaitPath ? { NORNS_HUMAN_WAIT_PATH: request.humanWaitPath } : {}),
           })
         : credentialFreeEnvironment(this.options.baseEnv ?? process.env, {
@@ -288,6 +295,35 @@ export class ClaudeCodeRuntime implements CodingRuntime {
           permissionMode: "dontAsk",
           tools: [...CLAUDE_CODE_AUTONOMOUS_TOOLS],
           allowedTools: [...CLAUDE_CODE_AUTONOMOUS_TOOLS],
+          settingSources: [],
+          additionalDirectories: [...(request.additionalReadDirectories ?? [])],
+          managedSettings: {
+            sandbox: {
+              enabled: true,
+              failIfUnavailable: true,
+              autoAllowBashIfSandboxed: true,
+              allowUnsandboxedCommands: false,
+              filesystem: {
+                ...(env.HOME && env.HOME !== request.runtimeStateDirectory
+                  ? { denyRead: [env.HOME], denyWrite: [env.HOME] }
+                  : this.options.baseEnv?.HOME || process.env.HOME
+                    ? {
+                        denyRead: [String(this.options.baseEnv?.HOME ?? process.env.HOME)],
+                        denyWrite: [String(this.options.baseEnv?.HOME ?? process.env.HOME)],
+                      }
+                    : {}),
+                allowRead: [
+                  request.worktreePath,
+                  ...(request.runtimeStateDirectory ? [request.runtimeStateDirectory] : []),
+                  ...(request.additionalReadDirectories ?? []),
+                ],
+                allowWrite: [
+                  request.worktreePath,
+                  ...(request.runtimeStateDirectory ? [request.runtimeStateDirectory] : []),
+                ],
+              },
+            },
+          },
           env,
           ...(this.options.model !== undefined ? { model: this.options.model } : {}),
           ...(this.options.resumeSessionId !== undefined

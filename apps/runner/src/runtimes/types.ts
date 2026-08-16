@@ -33,6 +33,10 @@ export interface RuntimeRunRequest {
   /** the isolated worktree the runtime may write to (Sandbox Contract) */
   worktreePath: string;
   prompt: string;
+  /** Runner-owned, hash-verified task inputs the runtime may read but not write. */
+  additionalReadDirectories?: string[];
+  /** Runner-owned state directory used as HOME/cache instead of the user's home. */
+  runtimeStateDirectory?: string;
   timeoutMs?: number;
   /** Execution-loop policy selected by the approved planning path. */
   executionMode?: "quick" | "planned";

@@ -3610,11 +3610,8 @@ type DevelopmentPhaseItem = {
   task: DevelopmentTask | null;
 };
 
-function developmentPhaseState(
-  task: DevelopmentTask | undefined,
-  fallbackActive: boolean,
-): DevelopmentPhaseState {
-  if (!task) return fallbackActive ? "active" : "queued";
+function developmentPhaseState(task: DevelopmentTask | undefined): DevelopmentPhaseState {
+  if (!task) return "queued";
   if (task.state === "completed" || task.run?.state === "succeeded") return "complete";
   if (
     task.state === "blocked" ||
@@ -3626,7 +3623,8 @@ function developmentPhaseState(
   if (task.run?.state === "waiting_for_human") return "waiting";
   if (task.state === "verifying" || task.run?.state === "verifying") return "verifying";
   if (["created", "dispatched", "running"].includes(task.run?.state ?? "")) return "active";
-  return fallbackActive ? "active" : "queued";
+  if (task.state === "in_progress") return "active";
+  return "queued";
 }
 
 function developmentPhaseItems(
@@ -3635,25 +3633,67 @@ function developmentPhaseItems(
 ): DevelopmentPhaseItem[] {
   const modules = detail.handoff?.package.approved_plan.plan.modules ?? [];
   const tasks = execution?.tasks ?? [];
-  const count = Math.max(modules.length, tasks.length);
-  const firstUnfinished = tasks.findIndex(
-    (task) => task.state !== "completed" && task.run?.state !== "succeeded",
-  );
-  return Array.from({ length: count }, (_, index) => {
-    const module = modules[index];
-    const task = tasks[index];
+  const unmatchedTasks = [...tasks];
+  const paired: Array<{
+    module: (typeof modules)[number] | undefined;
+    task: DevelopmentTask | undefined;
+  }> = modules.map((module, moduleIndex) => {
+    const handoffTaskId =
+      detail.handoff?.package.task_sequence[moduleIndex] === module.id
+        ? detail.handoff.package.task_ids[moduleIndex]
+        : undefined;
+    const taskIndex = unmatchedTasks.findIndex((task) => {
+      if (task.id === module.id || task.id === handoffTaskId) return true;
+      const decodedTaskId = (() => {
+        try {
+          return decodeURIComponent(task.id);
+        } catch {
+          return task.id;
+        }
+      })();
+      return task.id.endsWith(`:${module.id}`) || decodedTaskId.endsWith(`:${module.id}`);
+    });
+    const [task] = taskIndex >= 0 ? unmatchedTasks.splice(taskIndex, 1) : [undefined];
+    return { module, task };
+  });
+  paired.push(...unmatchedTasks.map((task) => ({ module: undefined, task })));
+  return paired.map(({ module, task }, index) => {
     return {
       id: task?.id ?? module?.id ?? `development-phase-${index + 1}`,
       title: module?.title ?? task?.title ?? `Phase ${index + 1}`,
       description: module?.description ?? null,
-      state: developmentPhaseState(
-        task,
-        detail.work_item.status === "executing" &&
-          (firstUnfinished < 0 ? index === 0 : index === firstUnfinished),
-      ),
+      state: developmentPhaseState(task),
       task: task ?? null,
     };
   });
+}
+
+function developmentRunStatusMessage(task: DevelopmentTask | null): string {
+  if (!task?.run) {
+    return task?.state === "assigned"
+      ? "Waiting for the local agent to accept this task."
+      : "This task is queued until its dependencies are complete.";
+  }
+  switch (task.run.state) {
+    case "created":
+      return "Preparing the task for the local agent.";
+    case "dispatched":
+      return "The local agent accepted the task and is preparing the coding session.";
+    case "running":
+      return "The implementation agent is working now. Live activity appears below.";
+    case "verifying":
+      return "Implementation finished and the agent is running the approved checks.";
+    case "waiting_for_human":
+      return "The agent needs your answer before it can continue.";
+    case "succeeded":
+      return "Implementation and verification completed successfully.";
+    case "failed":
+    case "cancelled":
+    case "expired":
+      return task.run.failure_detail?.trim() || `This attempt ${task.run.state}.`;
+    default:
+      return `Current run status: ${task.run.state.replaceAll("_", " ")}.`;
+  }
 }
 
 function developmentStateLabel(state: DevelopmentPhaseState): string {
@@ -3810,11 +3850,7 @@ function DevelopmentAgentDialogue({
                 <strong>{agent ? "Implementation agent" : "Development coordinator"}</strong>
                 <time>{task?.run ? `Attempt ${task.run.attempt}` : "Preparing"}</time>
               </header>
-              <p>
-                {task?.run
-                  ? `The agent is ${task.run.state.replaceAll("_", " ")}. Verification is ${task.run.verification_status.replaceAll("_", " ")}.`
-                  : "The approved work is queued for dispatch."}
-              </p>
+              <p>{developmentRunStatusMessage(task)}</p>
             </li>
             {(task?.reviews ?? []).map((review) => (
               <li className="is-reviewer" key={review.id}>

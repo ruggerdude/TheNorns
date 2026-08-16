@@ -37,6 +37,10 @@ describe("Codex runtime reasoning effort", () => {
     expect(codexSdk.startThread).toHaveBeenCalledWith({
       workingDirectory: "/tmp/norns-codex-runtime-test",
       skipGitRepoCheck: false,
+      sandboxMode: "workspace-write",
+      approvalPolicy: "never",
+      networkAccessEnabled: true,
+      additionalDirectories: [],
       model: "gpt-5.6-sol",
       modelReasoningEffort: "xhigh",
     });

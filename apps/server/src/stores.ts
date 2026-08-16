@@ -387,6 +387,20 @@ export class RelayStores {
     return this.state.watermark[runnerId] ?? 0;
   }
 
+  /**
+   * Bring the compatibility snapshot up to a watermark already proven by the
+   * relational event log. Device execution is relationally durable, while
+   * RelayStores remains the legacy websocket/read-model cache. A process can
+   * therefore restart with a snapshot that trails `runner_events`; leaving the
+   * stale value in place deadlocks the runner's bounded send window.
+   */
+  acknowledgeEventWatermark(runnerId: string, eventSequence: number): void {
+    if (!Number.isSafeInteger(eventSequence) || eventSequence < 0) return;
+    if (eventSequence <= this.eventWatermark(runnerId)) return;
+    this.state.watermark[runnerId] = eventSequence;
+    this.changed();
+  }
+
   /** Contiguous-sequence ingestion: duplicates are no-ops, gaps force resync. */
   ingestEvent(event: EventEnvelopeT): IngestOutcome {
     const watermark = this.eventWatermark(event.runner_id);

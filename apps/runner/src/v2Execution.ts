@@ -177,17 +177,22 @@ export class SignedUrlContentFetcher implements RunnerContentFetcher {
 export class HashVerifiedContextLoader {
   constructor(private readonly fetcher: RunnerContentFetcher) {}
 
+  async loadBytes(reference: V2ContentAddressedReferenceT): Promise<Uint8Array> {
+    const bytes = await this.fetcher.fetch(reference);
+    if (bytes.byteLength !== reference.byte_size) {
+      throw new Error(`context ${reference.artifact_id} byte-size mismatch`);
+    }
+    const actual = createHash("sha256").update(bytes).digest("hex");
+    if (actual !== reference.content_hash) {
+      throw new Error(`context ${reference.artifact_id} content hash mismatch`);
+    }
+    return bytes;
+  }
+
   async load(references: readonly V2ContentAddressedReferenceT[]): Promise<string> {
     const parts: string[] = [];
     for (const reference of references) {
-      const bytes = await this.fetcher.fetch(reference);
-      if (bytes.byteLength !== reference.byte_size) {
-        throw new Error(`context ${reference.artifact_id} byte-size mismatch`);
-      }
-      const actual = createHash("sha256").update(bytes).digest("hex");
-      if (actual !== reference.content_hash) {
-        throw new Error(`context ${reference.artifact_id} content hash mismatch`);
-      }
+      const bytes = await this.loadBytes(reference);
       parts.push(new TextDecoder().decode(bytes));
     }
     return parts.join("\n\n");
@@ -1140,12 +1145,40 @@ export class V2RunnerExecutor {
     }
 
     try {
-      const prompt = await this.context.load(command.context_refs);
+      let prompt = await this.context.load(command.context_refs);
+      const approvedInputFiles = await Promise.all(
+        command.input_files.map(async (input) => ({
+          ...input,
+          bytes: await this.context.loadBytes(input.context_ref),
+        })),
+      );
       if (controller.signal.aborted) return cancelledBefore("loading context");
       stage = "scratch_prepare";
       const scratchRoot = resolve(this.runner.scratch_root ?? tmpdir());
       await mkdir(scratchRoot, { recursive: true });
       scratch = await mkdtemp(resolve(scratchRoot, "norns-context-"));
+      let approvedInputDirectory: string | undefined;
+      if (approvedInputFiles.length > 0) {
+        const stagedInputDirectory = resolve(scratch, "approved-inputs");
+        approvedInputDirectory = stagedInputDirectory;
+        await mkdir(stagedInputDirectory, { recursive: true, mode: 0o700 });
+        for (const input of approvedInputFiles) {
+          await writeFile(resolve(stagedInputDirectory, input.filename), input.bytes, {
+            mode: 0o600,
+          });
+        }
+        prompt = [
+          prompt,
+          "## APPROVED INPUT FILES",
+          "The following user-approved files are staged read-only outside the repository. Use these exact paths; do not search the rest of this computer for replacements:",
+          ...approvedInputFiles.map(
+            (input) => `- ${input.filename}: ${resolve(stagedInputDirectory, input.filename)}`,
+          ),
+          "Do not commit these staged source files unless the task explicitly requires them as repository fixtures.",
+        ].join("\n\n");
+      }
+      const runtimeStateDirectory = resolve(scratch, "runtime-state");
+      await mkdir(runtimeStateDirectory, { recursive: true, mode: 0o700 });
       await writeFile(resolve(scratch, "prompt.txt"), prompt, { mode: 0o600 });
       // Local workspace removal or filesystem replacement may happen while
       // context is loading. Resolve again immediately before worktree setup.
@@ -1186,6 +1219,8 @@ export class V2RunnerExecutor {
         runId: command.run_id,
         worktreePath: worktree.path,
         prompt: command.human_wait_channel ? `${prompt}\n${humanWaitPrompt()}` : prompt,
+        additionalReadDirectories: approvedInputDirectory ? [approvedInputDirectory] : [],
+        runtimeStateDirectory,
         humanWaitPath,
         timeoutMs: command.max_duration_seconds * 1_000,
         executionMode: command.execution_mode ?? "planned",

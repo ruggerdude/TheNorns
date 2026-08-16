@@ -6,6 +6,7 @@ import {
   type V2ContentAddressedReferenceT,
   V2DispatchCommand,
   type V2DispatchCommandT,
+  type V2TaskInputFileT,
   V2_HUMAN_WAIT_CHANNEL_VERSION,
   V2_HUMAN_WAIT_INSTRUCTION_HASH,
   v2CommandIdForDispatchJob,
@@ -105,6 +106,7 @@ export interface Phase4ScheduleInput {
   correlation_id: string;
   causation_id: string | null;
   context_refs: V2ContentAddressedReferenceT[];
+  input_files?: V2TaskInputFileT[];
   target_branch: string;
   worktree_policy_ref: string;
   sandbox_policy_ref: string;
@@ -767,6 +769,7 @@ export class Phase4Coordinator {
         credential_mode: row.credential_mode,
         ...(row.reasoning_effort ? { reasoning_effort: row.reasoning_effort } : {}),
         context_refs: contextRefs,
+        input_files: input.input_files ?? [],
         ...(taskPackageDispatch
           ? {
               task_package_id: taskPackageDispatch.id,

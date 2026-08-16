@@ -8535,11 +8535,18 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               deviceIdentity.generation,
             );
             const recentlyExecuted = new Set(body.recently_executed_command_ids);
+            const durableEventWatermark = options.phase4?.events
+              ? await options.phase4.events.watermark(
+                  deviceIdentity.device_id,
+                  deviceIdentity.generation,
+                )
+              : stores.eventWatermark(deviceIdentity.device_id);
+            stores.acknowledgeEventWatermark(deviceIdentity.device_id, durableEventWatermark);
             sendFrame(socket, {
               type: "reconcile_response",
               body: {
                 protocol: PROTOCOL_VERSION as 1,
-                ack_event_seq: stores.eventWatermark(deviceIdentity.device_id),
+                ack_event_seq: durableEventWatermark,
                 generation: deviceIdentity.generation,
                 capabilities: body.capabilities.includes("knowledge_transport")
                   ? (["knowledge_transport"] as const)
@@ -8602,9 +8609,13 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                 await options.phase4?.events.apply(event, authenticatedIdentity);
               }
               stores.ingestEvent(event);
+              // `apply` committed this exact event to the relational log. Ack
+              // that durable fact directly: the compatibility snapshot may be
+              // behind, but it must never stall the runner's bounded window.
+              stores.acknowledgeEventWatermark(event.runner_id, event.event_seq);
               sendFrame(socket, {
                 type: "event_ack",
-                ack_event_seq: stores.eventWatermark(deviceIdentity.device_id),
+                ack_event_seq: event.event_seq,
               });
             })
             .catch((error) => {

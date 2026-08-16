@@ -400,6 +400,18 @@ export const V2ContentAddressedReference = z
   .strict();
 export type V2ContentAddressedReferenceT = z.infer<typeof V2ContentAddressedReference>;
 
+export const V2TaskInputFile = z
+  .object({
+    filename: V2NonEmptyString.max(255).refine(
+      (value) => value !== "." && value !== ".." && !/[\\/\0]/.test(value),
+      "input filename must be a single safe path component",
+    ),
+    media_type: V2NonEmptyString,
+    context_ref: V2ContentAddressedReference,
+  })
+  .strict();
+export type V2TaskInputFileT = z.infer<typeof V2TaskInputFile>;
+
 export function v2CommandIdForDispatchJob(dispatchJobId: string): string {
   return `dispatch:${dispatchJobId}`;
 }
@@ -497,6 +509,12 @@ export const V2DispatchCommand = z
      */
     credential_mode: z.enum(["api", "subscription"]).optional(),
     context_refs: z.array(V2ContentAddressedReference).min(1),
+    /**
+     * Approved binary/file inputs staged outside the repository and exposed
+     * read-only to the coding runtime. Keeping them separate from context_refs
+     * prevents binary bytes from being decoded into the text prompt.
+     */
+    input_files: z.array(V2TaskInputFile).max(32).default([]),
     /**
      * Present for conversation-first execution. These fields bind the
      * dispatched run to the immutable, module-scoped package whose exact

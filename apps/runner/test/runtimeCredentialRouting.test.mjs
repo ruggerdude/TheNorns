@@ -160,6 +160,75 @@ test("API mode mints once and uses the generalized Anthropic-compatible gateway"
   assert.equal(Object.hasOwn(queryOptions.env, "DEEPSEEK_API_KEY"), false);
 });
 
+test("agentic runtimes confine autonomous filesystem access to runner-approved paths", async () => {
+  let claudeOptions;
+  await new ClaudeCodeRuntime({
+    credentialMode: "api",
+    baseEnv: { HOME: "/Users/example", NORNS_TEST_SAFE_VALUE: "preserved" },
+    gateway: async () => gatewayCredential(),
+    queryImpl: ({ options }) => {
+      claudeOptions = options;
+      return {
+        async interrupt() {},
+        async *[Symbol.asyncIterator]() {
+          yield { type: "result", subtype: "success", result: "done" };
+        },
+      };
+    },
+  }).run({
+    runId: "run-sandbox-claude",
+    worktreePath: "/Users/example/repository-worktree",
+    runtimeStateDirectory: "/Users/example/.norns/runtime-state",
+    additionalReadDirectories: ["/Users/example/.norns/approved-inputs"],
+    prompt: "Do the work.",
+  });
+
+  assert.deepEqual(claudeOptions.settingSources, []);
+  assert.equal(claudeOptions.managedSettings.sandbox.enabled, true);
+  assert.equal(claudeOptions.managedSettings.sandbox.failIfUnavailable, true);
+  assert.equal(claudeOptions.managedSettings.sandbox.allowUnsandboxedCommands, false);
+  assert.deepEqual(claudeOptions.managedSettings.sandbox.filesystem.denyRead, ["/Users/example"]);
+  assert.deepEqual(claudeOptions.managedSettings.sandbox.filesystem.allowRead, [
+    "/Users/example/repository-worktree",
+    "/Users/example/.norns/runtime-state",
+    "/Users/example/.norns/approved-inputs",
+  ]);
+  assert.equal(claudeOptions.env.HOME, "/Users/example/.norns/runtime-state");
+
+  let codexThreadOptions;
+  await new CodexRuntime({
+    credentialMode: "api",
+    baseEnv: { HOME: "/Users/example", NORNS_TEST_SAFE_VALUE: "preserved" },
+    gateway: async () => gatewayCredential(),
+    createClient: () => ({
+      resumeThread() {
+        throw new Error("unexpected resume");
+      },
+      startThread(options) {
+        codexThreadOptions = options;
+        return {
+          async run() {
+            return { finalResponse: "done" };
+          },
+        };
+      },
+    }),
+  }).run({
+    runId: "run-sandbox-codex",
+    worktreePath: "/Users/example/repository-worktree",
+    runtimeStateDirectory: "/Users/example/.norns/runtime-state",
+    additionalReadDirectories: ["/Users/example/.norns/approved-inputs"],
+    prompt: "Do the work.",
+  });
+
+  assert.equal(codexThreadOptions.sandboxMode, "workspace-write");
+  assert.equal(codexThreadOptions.approvalPolicy, "never");
+  assert.deepEqual(codexThreadOptions.additionalDirectories, [
+    "/Users/example/.norns/runtime-state",
+    "/Users/example/.norns/approved-inputs",
+  ]);
+});
+
 test("explicit API mode fails before either SDK can spawn when no gateway is configured", async () => {
   let codexSpawned = false;
   const codex = await new CodexRuntime({

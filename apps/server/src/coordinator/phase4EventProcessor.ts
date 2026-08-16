@@ -75,6 +75,35 @@ export class Phase4EventProcessor {
     private readonly deviceAuthorization?: PostgresDeviceActionAuthorization,
   ) {}
 
+  /**
+   * Highest contiguous sequence durably committed for one runner generation.
+   *
+   * Device reconciliation must use this relational watermark rather than the
+   * legacy RelayStores snapshot. The snapshot is flushed independently and can
+   * trail the authoritative event log after a restart, which otherwise causes
+   * the runner to replay a full send window that the server can never advance.
+   */
+  watermark(runnerId: string, generation: number): Promise<number> {
+    return this.transactions.transaction(async (sql) => {
+      const result = await sql.query<{ watermark: number | string }>(
+        `WITH ordered AS (
+           SELECT sequence,
+                  row_number() OVER (ORDER BY sequence) AS expected_sequence
+             FROM runner_events
+            WHERE runner_id=$1 AND runner_generation=$2
+         )
+         SELECT COALESCE(
+                  MIN(expected_sequence) FILTER (WHERE sequence <> expected_sequence) - 1,
+                  MAX(sequence),
+                  0
+                ) AS watermark
+           FROM ordered`,
+        [runnerId, generation],
+      );
+      return Number(result.rows[0]?.watermark ?? 0);
+    });
+  }
+
   apply(
     input: EventEnvelopeInputT,
     authenticatedIdentity?: RunnerAuthorizationIdentity,

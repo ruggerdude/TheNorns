@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { PGlite } from "@electric-sql/pglite";
 import {
   AdapterError,
@@ -254,7 +255,8 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     const artifactId = withArtifact ? `artifact-${label}` : null;
     const artifactHash = "c".repeat(64);
     const attachmentId = withAttachment ? `attachment-${label}` : null;
-    const attachmentHash = canonicalSha256(`attachment:${label}`);
+    const attachmentBytes = Buffer.from(`phase4-image-bytes:${label}`);
+    const attachmentHash = createHash("sha256").update(attachmentBytes).digest("hex");
     if (artifactId) {
       await pg.query(
         `INSERT INTO artifacts (
@@ -270,14 +272,15 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
     if (attachmentId) {
       await pg.query(
         `INSERT INTO attachment_blobs (sha256, content)
-         VALUES ($1,$2)`,
-        [attachmentHash, Buffer.from("phase4-image-bytes")],
+         VALUES ($1,$2)
+         ON CONFLICT (sha256) DO NOTHING`,
+        [attachmentHash, attachmentBytes],
       );
       await pg.query(
         `INSERT INTO attachments (
            id, project_id, sha256, mime, bytes, width, height, purpose, created_by
          ) VALUES ($1,$2,$3,'image/png',$4,20,20,'conversation',$5)`,
-        [attachmentId, projectId, attachmentHash, 18, owner.id],
+        [attachmentId, projectId, attachmentHash, attachmentBytes.byteLength, owner.id],
       );
     }
     const initial = await conversations.submitUserMessage(owner, {
@@ -321,6 +324,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       artifactHash,
       attachmentId,
       attachmentHash,
+      attachmentByteSize: attachmentBytes.byteLength,
     };
   }
 
@@ -2087,6 +2091,16 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
         byte_size: number;
         storage_ref: string;
       };
+      input_files: Array<{
+        filename: string;
+        media_type: string;
+        context_ref: {
+          artifact_id: string;
+          content_hash: string;
+          byte_size: number;
+          storage_ref: string;
+        };
+      }>;
       verification_commands: Array<{ name: string; command: string[] }>;
     };
     expect(envelope.task_package_id).toBe(evidence.package_id);
@@ -2096,6 +2110,15 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
         (reference) => reference.artifact_id === evidence.context_document_id,
       ),
     );
+    expect(envelope.input_files).toHaveLength(1);
+    expect(envelope.input_files[0]).toMatchObject({
+      filename: "attachment",
+      media_type: "image/png",
+      context_ref: {
+        content_hash: scope.attachmentHash,
+        byte_size: scope.attachmentByteSize,
+      },
+    });
     expect(envelope.verification_commands).toEqual([
       {
         name: "AC-1",

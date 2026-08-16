@@ -18,7 +18,7 @@
 //     material goes first. The task and its acceptance criteria are never
 //     trimmed; if the untrimmable core alone exceeds the cap, that is a
 //     failure, not a truncation.
-import type { V2ContentAddressedReferenceT } from "@norns/contracts";
+import type { V2ContentAddressedReferenceT, V2TaskInputFileT } from "@norns/contracts";
 import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import { type TaskContextStore, taskContextDocumentId } from "./taskContextStore.js";
@@ -37,6 +37,7 @@ import {
  */
 export interface TaskContextAssembler {
   assembleForTask(taskId: string): Promise<V2ContentAddressedReferenceT[]>;
+  inputFilesForTask?(taskId: string): Promise<V2TaskInputFileT[]>;
 }
 
 export interface TaskKnowledgeContextSource {
@@ -56,6 +57,7 @@ export interface TaskKnowledgeContextSource {
  * cap is on the *briefing*, not on the work.
  */
 export const MAX_TOTAL_CONTEXT_BYTES = 256 * 1024;
+export const MAX_TOTAL_TASK_INPUT_BYTES = 64 * 1024 * 1024;
 
 // ---- failures ---------------------------------------------------------------
 
@@ -746,6 +748,96 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
         });
       }
       return refs;
+    });
+  }
+
+  async inputFilesForTask(taskId: string): Promise<V2TaskInputFileT[]> {
+    return this.transactions.transaction(async (tx) => {
+      const rows = (
+        await tx.query<{
+          id: string;
+          project_id: string;
+          original_filename: string | null;
+          mime: string;
+          sha256: string;
+          bytes: number | string;
+          content: Buffer | Uint8Array;
+          ordinal: number | string;
+        }>(
+          `SELECT attachment.id,attachment.project_id,attachment.original_filename,attachment.mime,
+                  attachment.sha256,attachment.bytes,blob.content,input.ordinal
+             FROM conversation_task_package_bindings binding
+             JOIN conversation_task_packages package ON package.id=binding.package_id
+             JOIN LATERAL jsonb_array_elements_text(
+                    COALESCE(package.package->'artifact_ids','[]'::jsonb)
+                  ) WITH ORDINALITY input(id,ordinal) ON true
+             JOIN attachments attachment
+               ON attachment.id=input.id AND attachment.project_id=binding.project_id
+              AND attachment.deleted_at IS NULL
+             JOIN attachment_blobs blob ON blob.sha256=attachment.sha256
+            WHERE binding.task_id=$1
+            ORDER BY input.ordinal`,
+          [taskId],
+        )
+      ).rows;
+      if (rows.length > 32) {
+        throw new TaskContextAssemblyError(
+          "context_too_large",
+          `task ${taskId} references ${rows.length} input files; at most 32 can be staged`,
+          "Remove unrelated attachments from the approved plan and retry development.",
+        );
+      }
+      const totalBytes = rows.reduce((total, row) => total + Number(row.bytes), 0);
+      if (totalBytes > MAX_TOTAL_TASK_INPUT_BYTES) {
+        throw new TaskContextAssemblyError(
+          "context_too_large",
+          `task ${taskId} input files total ${totalBytes} bytes, over the ${MAX_TOTAL_TASK_INPUT_BYTES}-byte limit`,
+          "Remove unrelated or oversized attachments from the approved plan and retry development.",
+        );
+      }
+      const usedNames = new Set<string>();
+      const files: V2TaskInputFileT[] = [];
+      for (const [index, row] of rows.entries()) {
+        const bytes = Buffer.from(row.content);
+        if (bytes.byteLength !== Number(row.bytes)) {
+          throw new TaskContextAssemblyError(
+            "task_package_mismatch",
+            `approved input ${row.id} byte size does not match its attachment record`,
+            "Re-upload the input file and approve a new plan before retrying development.",
+          );
+        }
+        const baseName =
+          row.original_filename
+            ?.replace(/[\\/\0]/g, "_")
+            .trim()
+            .slice(0, 220) || `input-${index + 1}.bin`;
+        const filename = usedNames.has(baseName) ? `${index + 1}-${baseName}` : baseName;
+        usedNames.add(filename);
+        const stored = await this.store.put(tx, {
+          projectId: row.project_id,
+          section: `approved_input:${row.id}`,
+          content: bytes,
+          mediaType: row.mime,
+        });
+        if (stored.sha256 !== row.sha256) {
+          throw new TaskContextAssemblyError(
+            "task_package_mismatch",
+            `approved input ${row.id} content hash does not match its attachment record`,
+            "Re-upload the input file and approve a new plan before retrying development.",
+          );
+        }
+        files.push({
+          filename,
+          media_type: row.mime,
+          context_ref: {
+            artifact_id: stored.id,
+            content_hash: stored.sha256,
+            byte_size: stored.byte_size,
+            storage_ref: `${this.baseUrl}${TASK_CONTEXT_ROUTE_PREFIX}/${stored.id}`,
+          },
+        });
+      }
+      return files;
     });
   }
 

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, realpath, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { type EventPayloadT, V2DispatchCommand } from "@norns/contracts";
@@ -41,7 +41,12 @@ describe("Phase 4 runner-owned execution", () => {
     registry.register({ repository_binding_id: "binding-1", repository_path: repository });
     const prompt = new TextEncoder().encode("Implement the verified task.");
     const promptHash = createHash("sha256").update(prompt).digest("hex");
-    const context = new HashVerifiedContextLoader({ fetch: async () => prompt });
+    const approvedInput = new TextEncoder().encode("approved guitar pro bytes");
+    const approvedInputHash = createHash("sha256").update(approvedInput).digest("hex");
+    const context = new HashVerifiedContextLoader({
+      fetch: async (reference) =>
+        reference.artifact_id === "approved-input-1" ? approvedInput : prompt,
+    });
     let worktreeCleaned = false;
     const worktrees: RunnerWorktreeManager = {
       prepare: async (input) => {
@@ -74,6 +79,14 @@ describe("Phase 4 runner-owned execution", () => {
         receivedPrompt = request.prompt;
         expect(request.maxBudgetUsd).toBe(10);
         expect(request.executionMode).toBe("planned");
+        expect(request.additionalReadDirectories).toHaveLength(1);
+        expect(request.runtimeStateDirectory).toBeTruthy();
+        const approvedInputDirectory = request.additionalReadDirectories?.[0];
+        if (!approvedInputDirectory) throw new Error("missing approved input directory");
+        expect(await readFile(resolve(approvedInputDirectory, "reference.gp"))).toEqual(
+          Buffer.from(approvedInput),
+        );
+        expect(request.prompt).toContain(resolve(approvedInputDirectory, "reference.gp"));
         request.onLog?.(
           [
             `root=${root}`,
@@ -171,6 +184,18 @@ describe("Phase 4 runner-owned execution", () => {
           storage_ref: "relay://prompt-1",
         },
       ],
+      input_files: [
+        {
+          filename: "reference.gp",
+          media_type: "application/octet-stream",
+          context_ref: {
+            artifact_id: "approved-input-1",
+            content_hash: approvedInputHash,
+            byte_size: approvedInput.byteLength,
+            storage_ref: "relay://approved-input-1",
+          },
+        },
+      ],
       budget_reservation_id: "reservation-1",
       max_charge_usd: 10,
       max_input_tokens: 10_000,
@@ -208,7 +233,9 @@ describe("Phase 4 runner-owned execution", () => {
     );
     expect(result.outcome, `${result.reason}\n${JSON.stringify(events)}`).toBe("succeeded");
     expect(result).toMatchObject({ commit_sha: COMMIT, verification_passed: true });
-    expect(receivedPrompt).toBe("Implement the verified task.");
+    expect(receivedPrompt).toContain("Implement the verified task.");
+    expect(receivedPrompt).toContain("APPROVED INPUT FILES");
+    expect(receivedPrompt).toContain("reference.gp");
     expect(worktreeCleaned).toBe(true);
     expect(events).toEqual(
       expect.arrayContaining([
