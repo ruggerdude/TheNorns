@@ -2675,6 +2675,9 @@ function readableDevelopmentStartError(detail: string | null): string {
   if (localAgentIsDisconnected(detail)) {
     return "The Local Agent on this computer is not connected. Open Norns Local Agent and keep it running, then choose Check status.";
   }
+  if (/permission denied for (?:table|relation)/i.test(detail ?? "")) {
+    return "Development could not prepare its task package because the service needs a database update. Choose Check status after the update completes.";
+  }
   return detail ?? "Development could not start.";
 }
 
@@ -5425,7 +5428,9 @@ function ConversationThread({
           onUnauthorized();
           return;
         }
-        setExecutionRetryError(caught instanceof Error ? caught.message : String(caught));
+        setExecutionRetryError(
+          readableDevelopmentStartError(caught instanceof Error ? caught.message : String(caught)),
+        );
       } finally {
         setExecutionRetryBusy(false);
       }
@@ -6045,9 +6050,11 @@ function ConversationThread({
                           : "Development did not start"}
                       </h2>
                       <p>
-                        {executionRetryReport?.detail ??
-                          recoverableExecutionEffect.execution.detail ??
-                          "The prior kickoff did not complete."}
+                        {readableDevelopmentStartError(
+                          executionRetryReport?.detail ??
+                            recoverableExecutionEffect.execution.detail ??
+                            "The prior kickoff did not complete.",
+                        )}
                       </p>
                     </div>
                     {!executionRetryReport?.started ? (

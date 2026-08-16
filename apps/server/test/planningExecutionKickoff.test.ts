@@ -21,7 +21,10 @@ import { Phase4EventProcessor } from "../src/coordinator/phase4EventProcessor.js
 import { Phase4RecoveryMonitor } from "../src/coordinator/phase4RecoveryMonitor.js";
 import { PhaseLaunchService } from "../src/coordinator/phaseLaunchService.js";
 import { RelationalTaskContextAssembler, TaskContextStore } from "../src/execution/index.js";
-import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
+import {
+  PGliteTransactionRunner,
+  type V2TransactionRunner,
+} from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 import { ExecutionKickoffService } from "../src/planning/executionKickoff.js";
 import { AttentionService } from "../src/projects/attentionService.js";
@@ -90,7 +93,7 @@ interface InjectedResponse {
 
 describe.sequential("phase tab P4: approve auto-starts execution (HTTP, real chain)", () => {
   let pg: PGlite;
-  let transactions: PGliteTransactionRunner;
+  let transactions: V2TransactionRunner;
   let server: NornsServer;
   let token: string;
   let adminId: string;
@@ -205,7 +208,16 @@ describe.sequential("phase tab P4: approve auto-starts execution (HTTP, real cha
     pg = new PGlite();
     await pg.exec("CREATE ROLE norns_app NOLOGIN");
     await runCurrentV2Migrations(pg as unknown as V2MigrationDatabase);
-    transactions = new PGliteTransactionRunner(pg);
+    // Exercise the same restricted role as production. This catches read
+    // queries that accidentally use row locks, which PostgreSQL treats as
+    // requiring UPDATE privilege even when no rows match.
+    transactions = {
+      transaction: (work) =>
+        pg.transaction(async (tx) => {
+          await tx.query("SET LOCAL ROLE norns_app");
+          return work(tx);
+        }),
+    };
 
     const projects = new ProjectStore();
     projectId = projects.create({

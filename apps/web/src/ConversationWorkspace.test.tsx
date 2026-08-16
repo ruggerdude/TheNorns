@@ -3540,7 +3540,7 @@ describe("conversation workspace", () => {
         execution: {
           status: "failed",
           started: false,
-          detail: "Coordinator unavailable.",
+          detail: "permission denied for table conversation_task_package_supplements",
         },
       },
       created_at: now,
@@ -3608,7 +3608,14 @@ describe("conversation workspace", () => {
     expect(await screen.findByTestId("conversation-retry-execution")).toBeInTheDocument();
     const reconnect = screen.getByTestId("conversation-activate-retry-execution");
     const analyze = screen.getByTestId("conversation-analyze-retry-execution");
-    expect(screen.getByText("Coordinator unavailable.")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Development could not prepare its task package because the service needs a database update. Choose Check status after the update completes.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("permission denied for table conversation_task_package_supplements"),
+    ).not.toBeInTheDocument();
     await user.click(analyze);
 
     expect(

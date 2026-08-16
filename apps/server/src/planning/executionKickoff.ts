@@ -358,6 +358,9 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
             "approved_mockup",
             supplementHash,
           );
+          // Supplement rows are immutable by database trigger. Locking them
+          // adds no safety and requires UPDATE permission from the restricted
+          // runtime role even when the query returns no rows.
           const existingSupplement = (
             await tx.query<{
               project_id: string;
@@ -373,8 +376,7 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
               `SELECT project_id,work_item_id,conversation_id,task_id,base_package_id,
                       ordinal,source_mockup_version_id,content_hash,context_document_id
                  FROM conversation_task_package_supplements
-                WHERE approval_decision_id=$1
-                FOR SHARE`,
+                WHERE approval_decision_id=$1`,
               [mockup.decision_id],
             )
           ).rows[0];

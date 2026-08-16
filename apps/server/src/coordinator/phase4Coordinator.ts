@@ -351,6 +351,9 @@ export class Phase4Coordinator {
       if (packageScope?.package_id && !taskPackageDispatch) {
         throw new Phase4CoordinatorConflictError("immutable task package binding is incomplete");
       }
+      // Both relations are append-only/content-addressed. A row lock adds no
+      // safety here and PostgreSQL would require UPDATE permission from the
+      // intentionally restricted runtime role merely to read them.
       const supplementRows = taskPackageDispatch
         ? (
             await sql.query<ConversationTaskPackageSupplementRow>(
@@ -363,8 +366,7 @@ export class Phase4Coordinator {
                    ON document.id=supplement.context_document_id
                 WHERE supplement.project_id=$1 AND supplement.task_id=$2
                   AND supplement.base_package_id=$3
-                ORDER BY supplement.ordinal,supplement.id
-                FOR SHARE OF supplement,document`,
+                ORDER BY supplement.ordinal,supplement.id`,
               [input.project_id, input.task_id, taskPackageDispatch.id],
             )
           ).rows
