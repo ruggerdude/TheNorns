@@ -690,6 +690,83 @@ describe("conversation workspace", () => {
     );
   });
 
+  it("presents phase plan tables as full-width phase sections", async () => {
+    const phasePlan = [
+      "## Execution plan · StrumSheet MVP",
+      "",
+      "| Phase | Deliverable | Done when |",
+      "| --- | --- | --- |",
+      "| 1. Scaffold + Parsing | TypeScript app with upload and track picker | Test file loads and a guitar track can be selected |",
+      "| 2. Cheat Sheet Engine | Section extraction and print layout | The output fits one printed page |",
+    ].join("\n");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) {
+          return detailResponse([
+            message({
+              id: "message-phase-plan",
+              role: "assistant",
+              sequence: 1,
+              parts: [{ type: "text", format: "markdown", text: phasePlan }],
+            }),
+          ]);
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByRole("heading", { name: /Execution plan/ })).toBeInTheDocument();
+    const table = screen.getByRole("table");
+    expect(table).toHaveClass("conversation-phase-table");
+    expect(screen.getByRole("columnheader", { name: "Phase" })).toBeInTheDocument();
+    expect(screen.getByText("1. Scaffold + Parsing")).toBeInTheDocument();
+    expect(screen.getByText("2. Cheat Sheet Engine")).toBeInTheDocument();
+  });
+
+  it("leaves unrelated Markdown tables in their standard layout", async () => {
+    const comparison = ["| Provider | Model |", "| --- | --- |", "| OpenAI | GPT-5.6 |"].join("\n");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) {
+          return detailResponse([
+            message({
+              id: "message-comparison-table",
+              role: "assistant",
+              sequence: 1,
+              parts: [{ type: "text", format: "markdown", text: comparison }],
+            }),
+          ]);
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(await screen.findByText("GPT-5.6")).toBeInTheDocument();
+    expect(screen.getByRole("table")).not.toHaveClass("conversation-phase-table");
+  });
+
   it("presents attributable human, PM, worker, runner, coordinator, and system actors", async () => {
     const actors = [
       message({

@@ -894,10 +894,56 @@ function MarkdownText(): React.ReactElement {
       components={{
         h1: ({ node: _node, ...props }) => <h3 {...props} />,
         h2: ({ node: _node, ...props }) => <h3 {...props} />,
+        table: ({ node, className, ...props }) => {
+          const phasePlan = isPhasePlanTable(node);
+          return (
+            <table
+              {...props}
+              className={
+                [className, phasePlan ? "conversation-phase-table" : null]
+                  .filter(Boolean)
+                  .join(" ") || undefined
+              }
+            />
+          );
+        },
       }}
       smooth
       defer
     />
+  );
+}
+
+function markdownNodeText(node: unknown): string {
+  if (!node || typeof node !== "object") return "";
+  const candidate = node as { value?: unknown; children?: unknown };
+  if (typeof candidate.value === "string") return candidate.value;
+  if (!Array.isArray(candidate.children)) return "";
+  return candidate.children.map(markdownNodeText).join("");
+}
+
+function isPhasePlanTable(node: unknown): boolean {
+  if (!node || typeof node !== "object") return false;
+  const children = (node as { children?: unknown }).children;
+  if (!Array.isArray(children)) return false;
+  const headers: string[] = [];
+
+  const collectHeaders = (candidate: unknown): void => {
+    if (!candidate || typeof candidate !== "object") return;
+    const element = candidate as { tagName?: unknown; children?: unknown };
+    if (element.tagName === "th") {
+      headers.push(markdownNodeText(element).trim().toLowerCase());
+      return;
+    }
+    if (Array.isArray(element.children)) element.children.forEach(collectHeaders);
+  };
+
+  children.forEach(collectHeaders);
+  return (
+    headers.length === 3 &&
+    headers[0] === "phase" &&
+    /^deliverables?$/.test(headers[1] ?? "") &&
+    headers[2] === "done when"
   );
 }
 

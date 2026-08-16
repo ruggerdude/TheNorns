@@ -1436,6 +1436,102 @@
   background: color-mix(in srgb, var(--surface-2) 80%, var(--bg));
 }
 
+/* PMs naturally describe execution phases as a Markdown table. Present that
+   specific table as a sequence of full-width phase sections so the phase name
+   never competes with its deliverables and completion criteria for width. */
+.conversation-markdown .conversation-phase-table {
+  display: block;
+  width: 100%;
+  margin: 1rem 0;
+  border: 0;
+  border-collapse: separate;
+}
+
+.conversation-phase-table thead {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.conversation-phase-table tbody {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.conversation-phase-table tr {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--surface-2) 48%, var(--surface));
+}
+
+.conversation-phase-table td {
+  min-width: 0;
+  padding: 0.8rem 0.95rem 0.95rem;
+  border: 0;
+  color: var(--ink);
+  vertical-align: top;
+}
+
+.conversation-phase-table td:first-child {
+  grid-column: 1 / -1;
+  padding: 0.72rem 0.95rem;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line));
+  color: var(--ink);
+  background: color-mix(in srgb, var(--accent) 9%, var(--surface));
+  font-size: var(--text-md);
+  font-weight: 800;
+}
+
+.conversation-phase-table td:nth-child(3) {
+  border-left: 1px solid var(--line);
+}
+
+.conversation-phase-table td::before {
+  display: block;
+  margin-bottom: 0.25rem;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  font-weight: 800;
+  letter-spacing: 0.07em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.conversation-phase-table td:first-child::before {
+  content: "Phase";
+  color: var(--accent);
+}
+
+.conversation-phase-table td:nth-child(2)::before {
+  content: "Deliverables";
+}
+
+.conversation-phase-table td:nth-child(3)::before {
+  content: "Done when";
+}
+
+@media (max-width: 700px) {
+  .conversation-phase-table tr {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .conversation-phase-table td:first-child {
+    grid-column: 1;
+  }
+
+  .conversation-phase-table td:nth-child(3) {
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+}
+
 .conversation-message-actions {
   display: flex;
   min-height: 1.75rem;

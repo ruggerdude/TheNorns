@@ -114,6 +114,7 @@ async function prepare(
     githubInitiallyInstalled?: boolean;
     conversationWorkspace?: boolean;
     focusedPlanningRun?: boolean;
+    phasePlan?: boolean;
   } = {},
 ) {
   let projects: ReturnType<typeof project>[] = [];
@@ -508,7 +509,16 @@ async function prepare(
               {
                 type: "text",
                 format: "markdown",
-                text: "I mapped the release workflow and the remaining deployment risks.",
+                text: options.phasePlan
+                  ? [
+                      "## Execution plan · Release dashboard",
+                      "",
+                      "| Phase | Deliverable | Done when |",
+                      "| --- | --- | --- |",
+                      "| 1. Scaffold + data | Dashboard shell and deployment feed | Current deployment state loads reliably |",
+                      "| 2. Release verification | Health checks and release summary | The release is verified end to end |",
+                    ].join("\n")
+                  : "I mapped the release workflow and the remaining deployment risks.",
               },
             ],
             client_message_id: null,
@@ -1031,6 +1041,49 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   expect(compactHeaderBox?.width).toBe(820);
   expect(compactHeaderBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(160);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(820);
+});
+
+test("Phase plans use full-width sections instead of a squeezed three-column table", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await prepare(page, "github", { conversationWorkspace: true, phasePlan: true });
+  await page.goto("/");
+  await selectExistingGitHubRepository(page);
+  await page.getByRole("button", { name: /adopt project/i }).click();
+  await page
+    .getByRole("navigation", { name: "Workspace sections" })
+    .getByRole("button", {
+      name: /work$/i,
+    })
+    .click();
+  await page.getByRole("button", { name: "Open work item Release readiness" }).click();
+
+  const table = page.locator(".conversation-phase-table");
+  await expect(table).toBeVisible();
+  const firstPhase = table.locator("tbody tr").first();
+  const cells = firstPhase.locator("td");
+  const [phaseBox, deliverableBox, doneWhenBox] = await Promise.all([
+    cells.nth(0).boundingBox(),
+    cells.nth(1).boundingBox(),
+    cells.nth(2).boundingBox(),
+  ]);
+
+  expect(phaseBox).not.toBeNull();
+  expect(deliverableBox).not.toBeNull();
+  expect(doneWhenBox).not.toBeNull();
+  expect(phaseBox?.width ?? 0).toBeGreaterThan((deliverableBox?.width ?? 0) * 1.9);
+  expect(deliverableBox?.y).toBe(doneWhenBox?.y);
+  expect(deliverableBox?.x ?? Number.POSITIVE_INFINITY).toBeLessThan(doneWhenBox?.x ?? 0);
+
+  await page.setViewportSize({ width: 640, height: 900 });
+  const compactDeliverableBox = await cells.nth(1).boundingBox();
+  const compactDoneWhenBox = await cells.nth(2).boundingBox();
+  expect(compactDeliverableBox).not.toBeNull();
+  expect(compactDoneWhenBox?.y ?? 0).toBeGreaterThan(
+    (compactDeliverableBox?.y ?? 0) + (compactDeliverableBox?.height ?? 0) - 1,
+  );
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(640);
 });
 
 test("A project with focused work still opens on Overview from Portfolio", async ({ page }) => {
