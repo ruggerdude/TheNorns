@@ -65,6 +65,7 @@ describe("desktop local-agent packaging", () => {
     expect(agent).toContain("NORNS_ENABLE_DEVICE_EXECUTION");
     expect(agent).toContain("agent-start");
     expect(agent).toContain("xcode-select --install");
+    expect(agent).toContain('[ "$LOADED_AGENT_PROGRAM" = "$NODE" ]');
 
     const windowsAgent = read("packaging/windows/start-agent.vbs");
     expect(windowsAgent).toContain("NORNS_ENABLE_DEVICE_ENROLLMENT");

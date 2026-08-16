@@ -69,8 +69,13 @@ loaded_agent_is_current() {
   if ! LOADED_AGENT_STATE=$(launchctl print "gui/$(id -u)/com.thenorns.local-agent" 2>/dev/null); then
     return 1
   fi
+  LOADED_AGENT_PROGRAM=$(
+    printf '%s\n' "$LOADED_AGENT_STATE" |
+      sed -n 's/^[[:space:]]*program = //p' |
+      head -n 1
+  )
   printf '%s\n' "$LOADED_AGENT_STATE" | grep -Fq 'state = running' &&
-    printf '%s\n' "$LOADED_AGENT_STATE" | grep -Fq "$NODE" &&
+    [ "$LOADED_AGENT_PROGRAM" = "$NODE" ] &&
     printf '%s\n' "$LOADED_AGENT_STATE" | grep -Fq "$CLI" &&
     printf '%s\n' "$LOADED_AGENT_STATE" |
       grep -Fq "NORNS_LOCAL_AGENT_VERSION => $AGENT_VERSION" &&
