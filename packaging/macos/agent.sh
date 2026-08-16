@@ -65,6 +65,17 @@ ensure_menu_agent() {
   fi
 }
 
+loaded_agent_is_current() {
+  if ! LOADED_AGENT_STATE=$(launchctl print "gui/$(id -u)/com.thenorns.local-agent" 2>/dev/null); then
+    return 1
+  fi
+  printf '%s\n' "$LOADED_AGENT_STATE" | grep -Fq 'state = running' &&
+    printf '%s\n' "$LOADED_AGENT_STATE" | grep -Fq "$NODE" &&
+    printf '%s\n' "$LOADED_AGENT_STATE" | grep -Fq "$CLI" &&
+    printf '%s\n' "$LOADED_AGENT_STATE" |
+      grep -Fq "NORNS_LOCAL_AGENT_VERSION => $AGENT_VERSION"
+}
+
 install_launch_agent() {
   mkdir -p "$HOME/Library/LaunchAgents" "$LOG_DIR"
   chmod 700 "$HOME/.norns"
@@ -128,15 +139,14 @@ case "$ACTION" in
       "$0" install
       exit 0
     fi
-    if launchctl print "gui/$(id -u)/com.thenorns.local-agent" 2>/dev/null |
-      grep -q 'state = running'
-    then
+    if loaded_agent_is_current; then
       ensure_menu_agent
       exit 0
     fi
-    launchctl bootstrap "gui/$(id -u)" "$SERVICE" >/dev/null 2>&1 || true
-    launchctl kickstart "gui/$(id -u)/com.thenorns.local-agent"
-    ensure_menu_agent
+    # A package upgrade can replace the plist and app while launchd still owns
+    # the prior executable. Reinstalling the exact service definition here
+    # replaces that stale process instead of reporting it as healthy forever.
+    "$0" install
     ;;
   start)
     NORNS_SERVER="https://thenorns.up.railway.app" \
