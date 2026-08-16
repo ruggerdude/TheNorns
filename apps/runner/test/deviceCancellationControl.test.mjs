@@ -82,6 +82,83 @@ async function createRelay() {
   };
 }
 
+test("device control replaces a silently stale socket without an app restart", async () => {
+  const dataDir = temporaryDataDir();
+  const credential = pendingCredential(dataDir);
+  credential.prepare();
+  const identity = {
+    device_id: "device-liveness",
+    credential_id: "credential-liveness",
+    generation: 3,
+  };
+  const relay = new WebSocketServer({ port: 0, host: "127.0.0.1", autoPong: false });
+  await new Promise((resolve) => relay.once("listening", resolve));
+  const address = relay.address();
+  assert.ok(address && typeof address !== "string");
+  const connections = [];
+  relay.on("connection", (socket) => {
+    const connectionNumber = connections.push(socket);
+    socket.send(
+      JSON.stringify({
+        type: "challenge",
+        nonce: `legacy-${connectionNumber}`,
+        device_auth: {
+          challenge: `device-${connectionNumber}`,
+          supported_protocol_versions: [DEVICE_WSS_PROTOCOL_VERSION],
+        },
+      }),
+    );
+    if (connectionNumber > 1) {
+      socket.on("ping", (data) => socket.pong(data));
+    }
+    socket.on("message", (raw) => {
+      const frame = JSON.parse(String(raw));
+      if (frame.type === "device_auth") {
+        socket.send(
+          JSON.stringify({
+            type: "device_auth_ok",
+            device_id: frame.device_id,
+            generation: frame.generation,
+            protocol_version: frame.protocol_version,
+          }),
+        );
+      }
+    });
+  });
+  const control = new DeviceControlConnection({
+    serverUrl: `http://127.0.0.1:${address.port}`,
+    dataDir,
+    identity,
+    sign: (transcript) => credential.sign(transcript),
+    reconnectDelayMs: 20,
+    evidenceRetryMs: 50,
+    livenessProbeMs: 30,
+    stopRun: async () => ({ target_found: false, process_tree_reaped: false }),
+    stopAll: async () => ({ target_found: false, process_tree_reaped: false }),
+    fence: () => {
+      throw new Error("a stale transport must reconnect, not fence the installation");
+    },
+  });
+
+  try {
+    control.start();
+    await waitFor(() => control.connected, "initial device connection");
+    await waitFor(
+      () => connections.length >= 2 && control.connected,
+      "automatic stale-connection replacement",
+    );
+    const stableConnectionCount = connections.length;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.equal(connections.length, stableConnectionCount);
+    assert.equal(control.connected, true);
+  } finally {
+    control.stop();
+    for (const socket of connections) socket.terminate();
+    await new Promise((resolve) => relay.close(resolve));
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("device cancellation evidence survives response loss and replays in state order", async () => {
   const dataDir = temporaryDataDir();
   const relay = await createRelay();

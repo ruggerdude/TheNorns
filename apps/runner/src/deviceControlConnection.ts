@@ -57,11 +57,14 @@ export interface DeviceControlConnectionOptions {
   reconnect?: boolean;
   reconnectDelayMs?: number;
   evidenceRetryMs?: number;
+  /** How often to prove the WebSocket is still usable, including after system wake. */
+  livenessProbeMs?: number;
   now?: () => Date;
 }
 
 const DEFAULT_RECONNECT_DELAY_MS = 1_000;
 const DEFAULT_EVIDENCE_RETRY_MS = 2_000;
+const DEFAULT_LIVENESS_PROBE_MS = 15_000;
 
 function sameIdentity(
   frame: Extract<ServerFrameT, { type: "device_cancellation_request" }>,
@@ -86,11 +89,14 @@ export class DeviceControlConnection {
   private readonly reconnect: boolean;
   private readonly reconnectDelayMs: number;
   private readonly evidenceRetryMs: number;
+  private readonly livenessProbeMs: number;
   private readonly now: () => Date;
   private readonly journal: DeviceCancellationJournal;
   private socket: WebSocket | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private evidenceRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private livenessTimer: ReturnType<typeof setInterval> | null = null;
+  private livenessAcknowledged = false;
   private stopped = true;
   private fenced = false;
   private authenticated = false;
@@ -100,7 +106,8 @@ export class DeviceControlConnection {
     this.reconnect = options.reconnect ?? true;
     this.reconnectDelayMs = options.reconnectDelayMs ?? DEFAULT_RECONNECT_DELAY_MS;
     this.evidenceRetryMs = options.evidenceRetryMs ?? DEFAULT_EVIDENCE_RETRY_MS;
-    if (this.reconnectDelayMs <= 0 || this.evidenceRetryMs <= 0) {
+    this.livenessProbeMs = options.livenessProbeMs ?? DEFAULT_LIVENESS_PROBE_MS;
+    if (this.reconnectDelayMs <= 0 || this.evidenceRetryMs <= 0 || this.livenessProbeMs <= 0) {
       throw new Error("device control retry intervals must be positive");
     }
     this.now = options.now ?? (() => new Date());
@@ -126,6 +133,7 @@ export class DeviceControlConnection {
     this.authenticated = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.evidenceRetryTimer) clearTimeout(this.evidenceRetryTimer);
+    this.stopLivenessProbe();
     this.reconnectTimer = null;
     this.evidenceRetryTimer = null;
     const socket = this.socket;
@@ -170,7 +178,16 @@ export class DeviceControlConnection {
     this.socket = socket;
     this.authenticated = false;
 
+    socket.on("open", () => {
+      if (this.socket !== socket || this.stopped || this.fenced) return;
+      this.startLivenessProbe(socket);
+    });
+    socket.on("pong", () => {
+      if (this.socket === socket) this.livenessAcknowledged = true;
+    });
     socket.on("message", (data) => {
+      if (this.socket !== socket) return;
+      this.livenessAcknowledged = true;
       const frame = parseServerFrame(String(data));
       if (!frame) {
         this.fenceAndClose("invalid device control frame");
@@ -182,6 +199,7 @@ export class DeviceControlConnection {
       if (this.socket !== socket) return;
       this.socket = null;
       this.authenticated = false;
+      this.stopLivenessProbe();
       if (this.evidenceRetryTimer) clearTimeout(this.evidenceRetryTimer);
       this.evidenceRetryTimer = null;
       this.options.execution?.disconnected();
@@ -400,6 +418,7 @@ export class DeviceControlConnection {
     this.options.fence(reason);
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.evidenceRetryTimer) clearTimeout(this.evidenceRetryTimer);
+    this.stopLivenessProbe();
     this.reconnectTimer = null;
     this.evidenceRetryTimer = null;
     const socket = this.socket;
@@ -414,5 +433,30 @@ export class DeviceControlConnection {
       this.connect();
     }, this.reconnectDelayMs);
     this.reconnectTimer.unref?.();
+  }
+
+  private startLivenessProbe(socket: WebSocket): void {
+    this.stopLivenessProbe();
+    this.livenessAcknowledged = true;
+    this.livenessTimer = setInterval(() => {
+      if (this.socket !== socket || this.stopped || this.fenced) {
+        this.stopLivenessProbe();
+        return;
+      }
+      if (socket.readyState !== WebSocket.OPEN) return;
+      if (!this.livenessAcknowledged) {
+        socket.terminate();
+        return;
+      }
+      this.livenessAcknowledged = false;
+      socket.ping();
+    }, this.livenessProbeMs);
+    this.livenessTimer.unref?.();
+  }
+
+  private stopLivenessProbe(): void {
+    if (this.livenessTimer) clearInterval(this.livenessTimer);
+    this.livenessTimer = null;
+    this.livenessAcknowledged = false;
   }
 }
