@@ -119,6 +119,7 @@ async function prepare(
   let projects: ReturnType<typeof project>[] = [];
   let planningCreated = false;
   let githubInstalled = options.githubInitiallyInstalled ?? true;
+  let attachmentCount = 0;
   const observed = {
     installRequests: 0,
     onboardingRequests: [] as unknown[],
@@ -145,6 +146,17 @@ async function prepare(
     }
     if (path === "/api/auth/sessions") {
       return fulfill(route, { sessions: [] });
+    }
+    if (/^\/api\/v2\/projects\/project-[^/]+\/attachments$/.test(path)) {
+      attachmentCount += 1;
+      return fulfill(route, {
+        id: `attachment-e2e-${attachmentCount}`,
+        mime: request.headers()["content-type"] ?? "text/plain",
+        bytes: request.postDataBuffer()?.byteLength ?? 0,
+        width: null,
+        height: null,
+        purpose: "objective",
+      });
     }
     if (path === "/api/admin/users") {
       return fulfill(route, []);
@@ -626,6 +638,58 @@ test("GitHub front door creates and immediately enters the project", async ({ pa
   await page.getByRole("button", { name: /adopt project/i }).click();
   await expect(page.getByText("front-door-app", { exact: true }).first()).toBeVisible();
   await expectNewWorkEntry(page);
+});
+
+test("New-work actions remain reachable across viewport layouts", async ({ page }) => {
+  await page.setViewportSize({ width: 2048, height: 1152 });
+  await prepare(page, "github");
+  await page.goto("/");
+  await selectExistingGitHubRepository(page);
+  await page.getByRole("button", { name: /adopt project/i }).click();
+  await expectNewWorkEntry(page);
+  await page.getByTestId("attachment-file-input").setInputFiles([
+    {
+      name: "project-notes.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("Project notes"),
+    },
+    {
+      name: "acceptance-criteria.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("Acceptance criteria"),
+    },
+  ]);
+  await expect(page.getByTestId("attachment-chip")).toHaveCount(2);
+
+  const workTabPanel = page.getByTestId("workspace-tab-work");
+  const workSurface = page.locator(".conversation-main.is-new-work");
+  const startPlanning = page.getByRole("button", { name: "Start Planning" });
+  const viewports = [
+    { width: 2048, height: 1152 },
+    { width: 1280, height: 720 },
+    { width: 820, height: 900 },
+    { width: 390, height: 844 },
+  ];
+
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    await expect(workSurface).toBeVisible();
+    expect(await workTabPanel.evaluate((node) => getComputedStyle(node).overflowY)).toBe("auto");
+    const dimensions = await workSurface.evaluate((node) => ({
+      clientHeight: node.clientHeight,
+      overflowY: getComputedStyle(node).overflowY,
+      scrollHeight: node.scrollHeight,
+    }));
+    expect(dimensions.overflowY).toBe("auto");
+
+    await workSurface.evaluate((node) => {
+      node.scrollTop = node.scrollHeight;
+    });
+    if (dimensions.scrollHeight > dimensions.clientHeight) {
+      await expect.poll(() => workSurface.evaluate((node) => node.scrollTop)).toBeGreaterThan(0);
+    }
+    await expect(startPlanning).toBeInViewport();
+  }
 });
 
 // DESIGN R2: the wizard is name-first and never starts a planning run —

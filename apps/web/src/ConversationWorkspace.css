@@ -415,10 +415,21 @@
 
 .conversation-main {
   display: flex;
+  min-height: 0;
   min-width: 0;
   flex: 1;
   flex-direction: column;
   background: var(--surface);
+}
+
+/* The Work workspace is viewport-bound on every responsive shell. New-work
+   forms can be taller than that viewport (especially with attachments), so
+   this surface must own a real scroll container just like chat transcripts,
+   phase lists, and the work-item sidebar already do. */
+.conversation-main.is-new-work {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .conversation-main-error,
@@ -4940,6 +4951,9 @@
   flex-direction: column;
   flex: 1;
   min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .conversation-thread > .conversation-work-tab-implementation {

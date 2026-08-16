@@ -7677,7 +7677,7 @@ export function ConversationWorkspace({
           : null}
       </aside>
 
-      <div className="conversation-main">
+      <div className={`conversation-main${showNew ? " is-new-work" : ""}`}>
         {error ? (
           <div className="conversation-main-error">
             <Alert testId="conversation-error">{error}</Alert>

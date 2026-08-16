@@ -7617,6 +7617,9 @@ h4 {
 .workspace-page-work > .workspace-tab-panel {
   height: auto;
   min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .workspace-header h1 {
