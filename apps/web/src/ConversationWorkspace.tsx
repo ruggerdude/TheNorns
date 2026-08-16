@@ -3062,9 +3062,9 @@ function PlanHandoffDialog({
         </div>
 
         <div className="plan-handoff-fields">
-          <Field label="Preferred development agent">
+          <Field label="Design Agent">
             <Select
-              aria-label="Preferred development agent"
+              aria-label="Design Agent"
               value={executionModel}
               disabled={busy || executionModels === null}
               onChange={(event) => setExecutionModel(event.target.value)}
@@ -3079,10 +3079,6 @@ function PlanHandoffDialog({
                 </option>
               ))}
             </Select>
-            <small>
-              The PM assigns the best available agent to each phase. You can change each assignment
-              in the plan.
-            </small>
           </Field>
           {reviewMode === "qc" ? (
             <>

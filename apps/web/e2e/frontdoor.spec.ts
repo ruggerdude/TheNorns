@@ -960,9 +960,10 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   expect(
     Math.abs((planHandoffBox?.x ?? 0) + (planHandoffBox?.width ?? 0) / 2 - 1920 / 2),
   ).toBeLessThanOrEqual(1);
+  await expect(planHandoff.getByRole("combobox", { name: "Design Agent" })).toBeVisible();
   await expect(
-    planHandoff.getByRole("combobox", { name: "Preferred development agent" }),
-  ).toBeVisible();
+    planHandoff.getByText(/The PM assigns the best available agent to each phase/),
+  ).toHaveCount(0);
   await expect(planHandoff.getByRole("combobox", { name: "QC agent" })).toHaveValue(
     "gpt-5.6-terra",
   );

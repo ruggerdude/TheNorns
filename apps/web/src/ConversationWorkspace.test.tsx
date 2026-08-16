@@ -2591,14 +2591,10 @@ describe("conversation workspace", () => {
           name: "Confirm QC Settings",
         });
         expect(handoffDialog.closest(".plan-handoff-backdrop")?.parentElement).toBe(document.body);
+        expect(screen.getByRole("combobox", { name: "Design Agent" })).toBeInTheDocument();
         expect(
-          screen.getByRole("combobox", { name: "Preferred development agent" }),
-        ).toBeInTheDocument();
-        expect(
-          screen.getByText(
-            "The PM assigns the best available agent to each phase. You can change each assignment in the plan.",
-          ),
-        ).toBeInTheDocument();
+          screen.queryByText(/The PM assigns the best available agent to each phase/),
+        ).not.toBeInTheDocument();
         const savedQcAgent = await screen.findByRole("combobox", { name: "QC agent" });
         await waitFor(() => expect(savedQcAgent).toHaveValue("gpt-5.6-terra"));
         expect(screen.getByRole("combobox", { name: "QC rounds" })).toHaveValue("2");
