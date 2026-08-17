@@ -556,27 +556,112 @@ function QcLiveDialogue({
   history?: V2ConversationPlanReviewT[];
   phaseNumbers?: ReadonlyMap<string, number>;
 }): React.ReactElement {
-  const messages = [...history]
+  type TranscriptMessage = Pick<
+    V2ConversationPlanReviewT["chat_messages"][number],
+    "id" | "speaker" | "round" | "kind" | "channel" | "content"
+  > & { historical: boolean };
+  const transcript = [...history]
     .reverse()
-    .flatMap((pastReview) => pastReview.chat_messages)
-    .concat(review.chat_messages)
-    .filter(
-      (message) =>
-        !(
-          message.speaker === "workflow" &&
-          /^WORK PLAN CONTRACT ENVELOPE\b/i.test(message.content.trim())
-        ),
-    )
+    .concat(review)
+    .flatMap((transcriptReview) => {
+      const messages = transcriptReview.chat_messages.filter(
+        (message) =>
+          !(
+            message.speaker === "workflow" &&
+            /^WORK PLAN CONTRACT ENVELOPE\b/i.test(message.content.trim())
+          ),
+      );
+      const syntheticMessages = transcriptReview.round_exchanges.flatMap((exchange) => {
+        const entries: TranscriptMessage[] = [];
+        if (
+          exchange.reviewer.findings.length > 0 &&
+          !messages.some(
+            (message) =>
+              message.round === exchange.round &&
+              message.speaker === "reviewer" &&
+              message.kind === "response",
+          )
+        ) {
+          entries.push({
+            id: `${transcriptReview.id}:round:${exchange.round}:reviewer`,
+            speaker: "reviewer",
+            round: exchange.round,
+            kind: "response",
+            channel: "reviewer",
+            content: JSON.stringify({ findings: exchange.reviewer.findings }),
+            historical: transcriptReview.id !== review.id,
+          });
+        }
+        if (
+          exchange.pm &&
+          !messages.some(
+            (message) =>
+              message.round === exchange.round &&
+              message.speaker === "pm" &&
+              message.kind === "response",
+          )
+        ) {
+          entries.push({
+            id: `${transcriptReview.id}:round:${exchange.round}:pm`,
+            speaker: "pm",
+            round: exchange.round,
+            kind: "response",
+            channel: "pm",
+            content: JSON.stringify({
+              responses: exchange.pm.dispositions,
+              changes: [],
+              plan: null,
+            }),
+            historical: transcriptReview.id !== review.id,
+          });
+        }
+        return entries;
+      });
+      const hasReviewerResponse =
+        messages.some((message) => message.speaker === "reviewer" && message.kind === "response") ||
+        syntheticMessages.some((message) => message.speaker === "reviewer");
+      if (!hasReviewerResponse && transcriptReview.findings.length > 0) {
+        syntheticMessages.push({
+          id: `${transcriptReview.id}:result:reviewer`,
+          speaker: "reviewer",
+          round: Math.max(1, transcriptReview.rounds_completed),
+          kind: "response",
+          channel: "reviewer",
+          content: JSON.stringify({ findings: transcriptReview.findings }),
+          historical: transcriptReview.id !== review.id,
+        });
+      }
+      const hasPmResponse =
+        messages.some((message) => message.speaker === "pm" && message.kind === "response") ||
+        syntheticMessages.some((message) => message.speaker === "pm");
+      if (!hasPmResponse && transcriptReview.dispositions.length > 0) {
+        syntheticMessages.push({
+          id: `${transcriptReview.id}:result:pm`,
+          speaker: "pm",
+          round: Math.max(1, transcriptReview.rounds_completed),
+          kind: "response",
+          channel: "pm",
+          content: JSON.stringify({
+            responses: transcriptReview.dispositions.map((disposition) => ({
+              finding_index: disposition.finding_index,
+              disposition: disposition.disposition,
+              rationale: disposition.rationale,
+            })),
+            changes: [],
+            plan: null,
+          }),
+          historical: transcriptReview.id !== review.id,
+        });
+      }
+      return [
+        ...syntheticMessages,
+        ...messages.map((message) => ({
+          ...message,
+          historical: transcriptReview.id !== review.id,
+        })),
+      ];
+    })
     .slice(-60);
-  const historicalFindings = [...history]
-    .reverse()
-    .flatMap((pastReview) =>
-      pastReview.round_exchanges.flatMap((exchange) =>
-        exchange.reviewer.findings.length > 0
-          ? [{ review: pastReview, round: exchange.round, findings: exchange.reviewer.findings }]
-          : [],
-      ),
-    );
   const liveOutput = review.live_progress?.output_preview?.trim() ?? "";
   return (
     <section className="qc-live-dialogue" aria-label="Live quality-control dialogue">
@@ -587,29 +672,14 @@ function QcLiveDialogue({
         </div>
         {liveOutput ? <b>LIVE</b> : null}
       </header>
-      {historicalFindings.length > 0 || messages.length > 0 || liveOutput ? (
+      {transcript.length > 0 || liveOutput ? (
         <ol>
-          {historicalFindings.map((entry) => (
+          {transcript.map((message) => (
             <li
-              key={`${entry.review.id}:round:${entry.round}`}
-              className="is-history"
-              data-speaker="reviewer"
+              key={message.id}
+              className={message.historical ? "is-history" : undefined}
+              data-speaker={message.speaker}
             >
-              <header>
-                <strong>Independent reviewer</strong>
-                <span>
-                  Prior attempt {entry.review.attempt_number} · Round {entry.round}
-                </span>
-              </header>
-              <QcMessageContent
-                content={JSON.stringify({ findings: entry.findings })}
-                phaseNumbers={phaseNumbers}
-                speaker="reviewer"
-              />
-            </li>
-          ))}
-          {messages.map((message) => (
-            <li key={message.id} data-speaker={message.speaker}>
               <header>
                 <strong>{speakerLabel(message.speaker)}</strong>
                 <span>
@@ -668,19 +738,28 @@ function QcLiveDialogue({
 function QcQuestionBox({
   review,
   channel,
+  allowChannelChoice = false,
   busy,
   onChat,
 }: {
   review: V2ConversationPlanReviewT;
   channel: "reviewer" | "pm";
+  allowChannelChoice?: boolean;
   busy: boolean;
   onChat: QcWorkspaceProps["onChat"];
   phaseNumbers?: ReadonlyMap<string, number>;
 }): React.ReactElement {
   const [question, setQuestion] = useState("");
-  const label = channel === "reviewer" ? "QC reviewer" : "Project Manager";
+  const [selectedChannel, setSelectedChannel] = useState(channel);
+  useEffect(() => setSelectedChannel(channel), [channel]);
+  const label = selectedChannel === "reviewer" ? "QC reviewer" : "Project Manager";
   return (
-    <section className="qc-agent-chat" aria-label={`Chat with the ${label}`}>
+    <section
+      className="qc-agent-chat"
+      aria-label={
+        allowChannelChoice ? "Quality control conversation composer" : `Chat with the ${label}`
+      }
+    >
       <h3 className="sr-only">Chat with the {label}</h3>
       <form
         onSubmit={(event) => {
@@ -688,9 +767,23 @@ function QcQuestionBox({
           const message = question.trim();
           if (!message || busy) return;
           setQuestion("");
-          void onChat(review, channel, message);
+          void onChat(review, selectedChannel, message);
         }}
       >
+        {allowChannelChoice ? (
+          <div className="qc-agent-chat-recipient">
+            <span>Ask</span>
+            <Select
+              aria-label="Quality control conversation recipient"
+              value={selectedChannel}
+              disabled={busy}
+              onChange={(event) => setSelectedChannel(event.target.value as "reviewer" | "pm")}
+            >
+              <option value="reviewer">QC reviewer</option>
+              <option value="pm">Project Manager</option>
+            </Select>
+          </div>
+        ) : null}
         <textarea
           value={question}
           maxLength={8_000}
@@ -948,33 +1041,6 @@ function FindingRow({
       ) : null}
     </li>
   );
-}
-
-function findingStatus(
-  review: V2ConversationPlanReviewT,
-  finding: V2ConversationPlanReviewFindingT,
-): { label: string; tone: "neutral" | "success" | "warn" | "muted" } {
-  const decision = review.finding_decisions?.find((item) => item.finding_id === finding.id);
-  const disposition = review.dispositions.find((item) => item.finding_id === finding.id);
-
-  if (decision?.decision === "reject") return { label: "Excluded by you", tone: "muted" };
-  if (disposition?.adjudication?.ruling === "reviewer") {
-    return { label: "Reviewer position chosen", tone: "success" };
-  }
-  if (disposition?.adjudication?.ruling === "pm") {
-    return { label: "PM position chosen", tone: "success" };
-  }
-  if (disposition?.adjudication?.ruling === "supplied_fact") {
-    return { label: "Resolved with supplied fact", tone: "success" };
-  }
-  if (disposition?.disposition === "accept") {
-    return { label: "Accepted by PM", tone: "success" };
-  }
-  if (disposition?.disposition === "rebut") {
-    return { label: "Rebutted by PM", tone: "warn" };
-  }
-  if (decision?.decision === "accept") return { label: "Sent to PM", tone: "neutral" };
-  return { label: "Awaiting your decision", tone: "neutral" };
 }
 
 function reviewRecordSummary(
@@ -1358,26 +1424,6 @@ export function QcWorkspace({
       ) : null}
 
       {!isPlanReview &&
-      findings.length > 0 &&
-      (terminal ||
-        (review.status === "awaiting_human" && review.paused_checkpoint === "after_revision")) ? (
-        <ul className="qc-new-findings is-readonly" aria-label="Quality control findings">
-          {findings.map((finding) => (
-            <FindingRow
-              key={finding.id}
-              finding={finding}
-              selectable={false}
-              selected={false}
-              onSelected={() => undefined}
-              response={review.dispositions.find((item) => item.finding_id === finding.id) ?? null}
-              status={findingStatus(review, finding)}
-              phaseNumber={finding.module_id ? phaseNumbers.get(finding.module_id) : undefined}
-            />
-          ))}
-        </ul>
-      ) : null}
-
-      {!isPlanReview &&
       review.status === "awaiting_human" &&
       review.paused_checkpoint === "after_review" ? (
         <FindingTriage
@@ -1438,68 +1484,90 @@ export function QcWorkspace({
       ) : null}
 
       {isPlanReview ? (
-        <section className="qc-new-outcome">
-          <div>
-            <span>{review.status === "converged" ? "REVIEW COMPLETE" : "DECISION REQUIRED"}</span>
-            <h2>
-              {review.status === "converged"
-                ? "The plan is ready to build"
-                : review.status === "cap_reached"
-                  ? "Final plan review"
-                  : "Choose a recovery path"}
-            </h2>
-            <p>
-              {review.status === "failed"
-                ? "The plan is unchanged. A fresh QC attempt will use the new finding-triage flow before the PM revises it."
-                : reviewRecordSummary(review, findings)}
-            </p>
-          </div>
-          {["converged", "cap_reached"].includes(review.status) ? (
-            <QcPlanVersion planVersion={planVersion} heading="Review the exact plan for approval" />
-          ) : null}
-          <div className="qc-new-outcome-actions">
-            {actions.reject ? (
-              <Button
-                variant="danger"
-                disabled={busy}
-                onClick={() => {
-                  if (actions.reject) void onConfirmAction(actions.reject);
-                }}
-              >
-                Return to PM
-              </Button>
+        <>
+          <section className="qc-new-outcome">
+            <div>
+              <span>{review.status === "converged" ? "REVIEW COMPLETE" : "DECISION REQUIRED"}</span>
+              <h2>
+                {review.status === "converged"
+                  ? "The plan is ready to build"
+                  : review.status === "cap_reached"
+                    ? "Final plan review"
+                    : "Choose a recovery path"}
+              </h2>
+              <p>
+                {review.status === "failed"
+                  ? "The plan is unchanged. A fresh QC attempt will use the new finding-triage flow before the PM revises it."
+                  : reviewRecordSummary(review, findings)}
+              </p>
+            </div>
+            {["converged", "cap_reached"].includes(review.status) ? (
+              <QcPlanVersion
+                planVersion={planVersion}
+                heading="Review the exact plan for approval"
+              />
             ) : null}
-            {actions.repeat ? (
-              <Button
-                variant={review.status === "failed" ? "primary" : undefined}
-                disabled={busy}
-                onClick={() => {
-                  if (actions.repeat) {
-                    void onConfirmAction(actions.repeat, "gated_when_contested");
-                  }
-                }}
-              >
-                Additional QC
-              </Button>
-            ) : null}
-            {review.status === "failed" ? (
-              <Button disabled={busy} onClick={() => void onContinueWithoutQc(review)}>
-                Keep plan without QC
-              </Button>
-            ) : null}
-            {actions.approve && ["converged", "cap_reached"].includes(review.status) ? (
-              <Button
-                variant="primary"
-                disabled={busy}
-                onClick={() => {
-                  if (actions.approve) void onConfirmAction(actions.approve);
-                }}
-              >
-                {busy ? "Opening development…" : "Develop"}
-              </Button>
-            ) : null}
-          </div>
-        </section>
+            <div className="qc-new-outcome-actions">
+              {actions.reject ? (
+                <Button
+                  variant="danger"
+                  disabled={busy}
+                  onClick={() => {
+                    if (actions.reject) void onConfirmAction(actions.reject);
+                  }}
+                >
+                  Return to PM
+                </Button>
+              ) : null}
+              {actions.repeat ? (
+                <Button
+                  variant={review.status === "failed" ? "primary" : undefined}
+                  disabled={busy}
+                  onClick={() => {
+                    if (actions.repeat) {
+                      void onConfirmAction(actions.repeat, "gated_when_contested");
+                    }
+                  }}
+                >
+                  Additional QC
+                </Button>
+              ) : null}
+              {review.status === "failed" ? (
+                <Button disabled={busy} onClick={() => void onContinueWithoutQc(review)}>
+                  Keep plan without QC
+                </Button>
+              ) : null}
+              {actions.approve && ["converged", "cap_reached"].includes(review.status) ? (
+                <Button
+                  variant="primary"
+                  disabled={busy}
+                  onClick={() => {
+                    if (actions.approve) void onConfirmAction(actions.approve);
+                  }}
+                >
+                  {busy ? "Opening development…" : "Develop"}
+                </Button>
+              ) : null}
+            </div>
+          </section>
+          <QcQuestionBox
+            review={review}
+            channel="pm"
+            allowChannelChoice
+            busy={busy}
+            onChat={onChat}
+          />
+        </>
+      ) : null}
+
+      {!isPlanReview && terminal ? (
+        <QcQuestionBox
+          review={review}
+          channel="reviewer"
+          allowChannelChoice
+          busy={busy}
+          onChat={onChat}
+        />
       ) : null}
 
       {!isPlanReview && !terminal && !awaitingFindingDecision ? (

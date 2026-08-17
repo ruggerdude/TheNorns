@@ -346,6 +346,32 @@ describe.sequential("QC adjudication (QCP-3A)", () => {
     expect(stillParked.chat_messages).toHaveLength(chatMessagesBefore + 2);
   });
 
+  it("answers follow-up questions after QC completes without reopening the run", async () => {
+    const sent = await sendToQc("terminal-question", 1);
+    reviewerV1.enqueue({ findings: [] });
+    await worker.runNow(sent.planningRunId);
+    const completed = await reviewRow(sent.reviewId);
+    expect(completed.status).toBe("converged");
+    expect(await planningRunStatus(sent.planningRunId)).toBe("converged");
+
+    chatAdapter.enqueue("The plan passed because every acceptance gate is measurable.");
+    const answered = await workflow.continueReviewChat(
+      owner.id,
+      sent.scope,
+      sent.reviewId,
+      "reviewer",
+      "Why is the plan ready?",
+    );
+
+    expect(answered.status).toBe("converged");
+    expect(answered.chat_messages.slice(-2).map((message) => message.speaker)).toEqual([
+      "human",
+      "reviewer",
+    ]);
+    expect(dispatchCount).toBe(0);
+    expect(await planningRunStatus(sent.planningRunId)).toBe("converged");
+  });
+
   it("rule-for-reviewer forces a revision pass and blocks re-rebuttal on recurrence", async () => {
     const sent = await sendToQc("rule-reviewer", 2);
     reviewerV1.enqueue({ findings: [rebuttableMustFix] });

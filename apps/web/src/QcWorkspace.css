@@ -1407,6 +1407,24 @@
   gap: 0.65rem;
 }
 
+.qc-agent-chat-recipient {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: center;
+  justify-self: end;
+  gap: 0.45rem;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  font-weight: 800;
+}
+
+.qc-agent-chat-recipient select {
+  min-width: 11rem;
+  min-height: 2.25rem;
+  color: var(--ink);
+  background: var(--surface);
+}
+
 .qc-agent-chat textarea {
   width: 100%;
   min-height: 4.5rem;
@@ -1482,6 +1500,15 @@
   }
 
   .qc-agent-chat form .btn {
+    width: 100%;
+  }
+
+  .qc-agent-chat-recipient {
+    width: 100%;
+    justify-self: stretch;
+  }
+
+  .qc-agent-chat-recipient select {
     width: 100%;
   }
 }

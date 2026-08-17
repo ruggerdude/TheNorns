@@ -803,6 +803,14 @@ function toUiMessage(
   };
 }
 
+function isDevelopmentTranscriptClutter(message: V2WorkMessageT): boolean {
+  const actorId = message.actor.actor_id?.toLowerCase() ?? "";
+  return (
+    message.parts.some((part) => part.type === "handoff") ||
+    actorId.includes("deterministic-pm-update")
+  );
+}
+
 function createConversationAttachmentAdapter(
   projectId: string,
   onUnauthorized: () => void,
@@ -4258,10 +4266,10 @@ function ConversationThread({
   );
   const initialMessages = useMemo(
     () =>
-      detail.messages.map((message) =>
-        toUiMessage(detail.work_item.project_id, message, resources),
-      ),
-    [detail.messages, detail.work_item.project_id, resources],
+      detail.messages
+        .filter((message) => !isExecution || !isDevelopmentTranscriptClutter(message))
+        .map((message) => toUiMessage(detail.work_item.project_id, message, resources)),
+    [detail.messages, detail.work_item.project_id, isExecution, resources],
   );
   const runtime = useChatRuntime<NornsUIMessage>({
     id: detail.conversation.id,

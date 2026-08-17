@@ -159,6 +159,7 @@ function renderWorkspace(
 ) {
   const onTriage = vi.fn().mockResolvedValue(undefined);
   const onContinueWithoutQc = vi.fn().mockResolvedValue(undefined);
+  const onChat = vi.fn().mockResolvedValue(undefined);
   render(
     <QcWorkspace
       review={current}
@@ -173,12 +174,12 @@ function renderWorkspace(
       onContinueWithoutQc={onContinueWithoutQc}
       onCancel={vi.fn().mockResolvedValue(undefined)}
       onStopAll={vi.fn().mockResolvedValue(undefined)}
-      onChat={vi.fn().mockResolvedValue(undefined)}
+      onChat={onChat}
       onConfirmAction={vi.fn().mockResolvedValue(undefined)}
       view={view}
     />,
   );
-  return { onTriage, onContinueWithoutQc };
+  return { onTriage, onContinueWithoutQc, onChat };
 }
 
 describe("QcWorkspace", () => {
@@ -566,11 +567,54 @@ describe("QcWorkspace", () => {
     expect(within(card).getByText("Plan Contract · Version 2")).toBeVisible();
     expect(within(card).getByText("Changes from version 1")).toBeVisible();
     expect(within(card).getByText("Documented the deployment target")).toBeVisible();
-    expect(screen.getAllByText("Accepted by PM")).toHaveLength(2);
-    expect(screen.getAllByText("Recommendation")).toHaveLength(2);
-    expect(screen.getAllByText("PM response")).toHaveLength(2);
+    expect(
+      screen.queryByRole("list", { name: "Quality control findings" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Live quality-control dialogue" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "Recommendation" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "PM response" })).not.toBeInTheDocument();
+  });
+
+  it("keeps one terminal QC transcript and lets the user ask either agent", () => {
+    const current = review({
+      status: "converged",
+      rounds_completed: 1,
+      paused_checkpoint: null,
+      paused_at_round: null,
+      completed_at: now,
+      dispositions: [
+        {
+          finding_id: "finding-1",
+          finding_index: 0,
+          disposition: "accept",
+          rationale: "Deployment target documented.",
+          adjudication: null,
+        },
+        {
+          finding_id: "finding-2",
+          finding_index: 1,
+          disposition: "accept",
+          rationale: "Accuracy tolerance documented.",
+          adjudication: null,
+        },
+      ],
+    });
+    const { onChat } = renderWorkspace(current, undefined, null, "qc");
+
+    expect(
+      screen.queryByRole("list", { name: "Quality control findings" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getAllByText("Deployment target is undefined.")).toHaveLength(1);
+    const recipient = screen.getByRole("combobox", {
+      name: "Quality control conversation recipient",
+    });
+    expect(recipient).toHaveValue("reviewer");
+    fireEvent.change(recipient, { target: { value: "pm" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Question for the Project Manager" }), {
+      target: { value: "Explain the final tradeoff." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Ask Project Manager" }));
+    expect(onChat).toHaveBeenCalledWith(current, "pm", "Explain the final tradeoff.");
   });
 
   it("shows the exact terminal plan and factual per-finding outcomes", () => {
@@ -625,6 +669,9 @@ describe("QcWorkspace", () => {
       ).length,
     ).toBeGreaterThan(0);
     expect(screen.queryByText(/findings remain/i)).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("combobox", { name: "Quality control conversation recipient" }),
+    ).toHaveValue("pm");
   });
 
   it("triages only the findings from the paused reviewer round", () => {

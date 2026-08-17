@@ -1929,7 +1929,6 @@ describe("conversation workspace", () => {
     await userEvent.click(screen.getByRole("button", { name: /Quality control/ }));
     expect(screen.getByRole("heading", { name: "Quality control" })).toBeInTheDocument();
     expect(screen.getByText("Make cancellation verification explicit.")).toBeInTheDocument();
-    expect(screen.getByText("PM response")).toBeInTheDocument();
     expect(screen.getByText("Added the requested telemetry assertion.")).toBeInTheDocument();
     await waitFor(() =>
       expect(onJourneyStageChange).toHaveBeenLastCalledWith(5, [], {
@@ -5469,6 +5468,20 @@ describe("conversation workspace", () => {
           { type: "handoff", handoff_id: handoff.id },
         ],
       }),
+      message({
+        id: "message-development-coordinator-update",
+        role: "assistant",
+        sequence: 2,
+        conversation_id: execution.id,
+        actor: { actor_type: "coordinator", actor_id: "deterministic-pm-update" },
+        parts: [
+          {
+            type: "text",
+            format: "markdown",
+            text: "Work is in progress. 0 of 1 tasks are complete.",
+          },
+        ],
+      }),
     ];
     const effect = {
       kind: "plan_approved" as const,
@@ -5620,16 +5633,20 @@ describe("conversation workspace", () => {
       await screen.findByRole("button", { name: "Confirm action: Approve and begin" }),
     );
 
-    expect(
-      await screen.findByText("Execution starts from the compact approved handoff."),
-    ).toBeInTheDocument();
+    await screen.findByRole("region", { name: "Development chat conversation" });
     expect(selected).toHaveBeenCalledWith(execution.id);
     expect(
       screen.getByRole("region", { name: "Development chat conversation" }),
     ).toBeInTheDocument();
     expect(screen.queryByText("Approved plan and planning context")).not.toBeInTheDocument();
     expect(screen.queryByTestId("conversation-handoff-card")).not.toBeInTheDocument();
-    expect(screen.getByTestId("conversation-handoff-receipt")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Execution starts from the compact approved handoff."),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByTestId("conversation-handoff-receipt")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Work is in progress. 0 of 1 tasks are complete."),
+    ).not.toBeInTheDocument();
     expect(screen.queryByTestId("conversation-summary-indicator")).not.toBeInTheDocument();
     expect(screen.queryByTestId("conversation-total-usage")).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Development launch" })).toBeVisible();
@@ -5757,9 +5774,10 @@ describe("conversation workspace", () => {
     }
     render(<RoutedWorkspace />);
 
+    await screen.findByRole("region", { name: "Development chat conversation" });
     expect(
-      await screen.findByText("Recovered the fresh execution conversation."),
-    ).toBeInTheDocument();
+      screen.queryByText("Recovered the fresh execution conversation."),
+    ).not.toBeInTheDocument();
     expect(selected).toHaveBeenCalledTimes(1);
     expect(selected).toHaveBeenCalledWith(execution.id);
     expect(
@@ -5997,7 +6015,8 @@ describe("conversation workspace", () => {
       />,
     );
 
-    expect(await screen.findByText("Start only from the compact handoff.")).toBeInTheDocument();
+    await screen.findByRole("region", { name: "Development chat conversation" });
+    expect(screen.queryByText("Start only from the compact handoff.")).not.toBeInTheDocument();
     expect(screen.queryByText(/PLANNING_SENTINEL/)).not.toBeInTheDocument();
     expect(planningReads).toBe(0);
     expect(screen.queryByText("Planning context")).not.toBeInTheDocument();

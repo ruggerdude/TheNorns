@@ -1571,18 +1571,18 @@ export class ConversationPlanWorkflowService {
         false,
       );
       const review = await this.loadReviewForUpdate(tx, scope, reviewId);
-      // Widened for QCP-3A ("Human chat at a gate"): a "question" at a live
-      // gate is answered in place and must NOT advance the run — this method
-      // never touches planning_runs/review status, so simply widening the
-      // gate keeps that guarantee for free. Only the resume/adjudicate routes
-      // advance a parked review.
+      // A question at a live gate or after the automated review has finished
+      // is answered in place and must never advance or reopen the run. Only
+      // the resume/adjudicate/action routes change workflow state.
       if (
-        !["failed", "awaiting_human"].includes(review.status) ||
+        !["failed", "awaiting_human", "converged", "cap_reached", "cancelled"].includes(
+          review.status,
+        ) ||
         review.review_mode === "waived"
       ) {
         throw new ConversationPlanWorkflowError(
           "invalid_plan_state",
-          "manual QC chat is available only after an automated QC failure or while paused at a gate",
+          "manual QC chat is available while review is paused or after automated QC finishes",
         );
       }
       const existingMessages = json<V2ConversationPlanReviewT["chat_messages"]>(
@@ -1637,8 +1637,8 @@ export class ConversationPlanWorkflowService {
       )
       .join("\n\n");
     const prompt = [
-      `You are continuing the ${channel === "reviewer" ? "independent QC reviewer" : "planning manager"} chat after automated QC stopped.`,
-      "The human has temporarily taken over this QC conversation.",
+      `You are continuing the ${channel === "reviewer" ? "independent QC reviewer" : "planning manager"} chat after automated QC reached a pause or terminal state.`,
+      "Answer the human's follow-up without changing the saved review or plan state.",
       "Reply with a complete, self-contained Markdown document. Plain text is valid Markdown. Do not rely on hidden context and do not return a JSON-only application envelope. The server saves your reply verbatim as an immutable .md artifact.",
       `EXISTING QC CHAT:\n${transcript || "No earlier raw chat was retained."}`,
       `IMMUTABLE PLAN CANDIDATE:\n${JSON.stringify(json(prepared.review.seed_plan))}`,
@@ -1664,7 +1664,13 @@ export class ConversationPlanWorkflowService {
             [reviewId],
           )
         ).rows[0];
-        if (!current || !["failed", "awaiting_human"].includes(current.status)) return;
+        if (
+          !current ||
+          !["failed", "awaiting_human", "converged", "cap_reached", "cancelled"].includes(
+            current.status,
+          )
+        )
+          return;
         await this.appendReviewChatEvent(
           tx,
           current,
@@ -1693,7 +1699,13 @@ export class ConversationPlanWorkflowService {
             [reviewId],
           )
         ).rows[0];
-        if (!current || !["failed", "awaiting_human"].includes(current.status)) return;
+        if (
+          !current ||
+          !["failed", "awaiting_human", "converged", "cap_reached", "cancelled"].includes(
+            current.status,
+          )
+        )
+          return;
         await this.appendReviewChatEvent(
           tx,
           current,

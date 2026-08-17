@@ -527,6 +527,11 @@ export const HELD_EXECUTION_KICKOFF_MIGRATION_URL = new URL(
   "../../../drizzle/0082_held_execution_kickoff.sql",
   import.meta.url,
 );
+export const QC_TERMINAL_FOLLOWUP_CHAT_MIGRATION_NAME = "0083_qc_terminal_followup_chat";
+export const QC_TERMINAL_FOLLOWUP_CHAT_MIGRATION_URL = new URL(
+  "../../../drizzle/0083_qc_terminal_followup_chat.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -886,6 +891,10 @@ export async function loadProjectDestroyMigrationSql(): Promise<string> {
 
 export async function loadHeldExecutionKickoffMigrationSql(): Promise<string> {
   return readFile(HELD_EXECUTION_KICKOFF_MIGRATION_URL, "utf8");
+}
+
+export async function loadQcTerminalFollowupChatMigrationSql(): Promise<string> {
+  return readFile(QC_TERMINAL_FOLLOWUP_CHAT_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1387,6 +1396,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: HELD_EXECUTION_KICKOFF_MIGRATION_NAME,
       sql: await loadHeldExecutionKickoffMigrationSql(),
+    },
+    {
+      name: QC_TERMINAL_FOLLOWUP_CHAT_MIGRATION_NAME,
+      sql: await loadQcTerminalFollowupChatMigrationSql(),
     },
   ];
 }
