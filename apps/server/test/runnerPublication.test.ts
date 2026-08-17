@@ -119,6 +119,30 @@ function committingRuntime(file = "agent.txt", body = "work\n"): CodingRuntime {
   };
 }
 
+/** A real runtime-shaped regression: verified files exist, but the model never commits them. */
+function uncommittedRuntime(): CodingRuntime {
+  return {
+    ...idleRuntime,
+    run: async (request) => {
+      const html = "<h1>Norns development proof</h1>\n";
+      const test = '#!/bin/sh\ngrep -q "Norns development proof" "${1:-index.html}"\n';
+      await execFileAsync(
+        "node",
+        [
+          "-e",
+          `require('fs').writeFileSync('index.html',${JSON.stringify(html)}); require('fs').writeFileSync('test.sh',${JSON.stringify(test)}, { mode: 0o755 })`,
+        ],
+        { cwd: request.worktreePath },
+      );
+      return {
+        outcome: "completed",
+        detail: "files verified, but remote delivery is unavailable",
+        usage: { input_tokens: 10, output_tokens: 5, usage_source: "runtime_report" },
+      };
+    },
+  };
+}
+
 /** A coding runtime that does nothing at all — the empty run. */
 const idleRuntime: CodingRuntime = {
   name: "codex",
@@ -301,6 +325,43 @@ describe("EXECUTION E4 — a run's work is published, and verification is real",
 
     // The worktree is still cleaned up — publication does not leak directories.
     await expect(stat(resolve(h.worktreeRoot, "run-1"))).rejects.toThrow();
+  });
+
+  it("checkpoints, verifies, and publishes task files when the runtime exits without committing", async () => {
+    const h = await harness(cleanup);
+    const api = githubApi();
+    const events: EventPayloadT[] = [];
+    const result = await executor(
+      h,
+      uncommittedRuntime(),
+      [{ name: "proof", command: ["./test.sh"] }],
+      new GitPublisher({
+        repositorySlug: "acme/widgets",
+        token: "test-token",
+        fetchImpl: api.fetchImpl,
+      }),
+    ).execute(dispatchCommand({ expected_revision: h.base }), (event) => events.push(event));
+
+    expect(result).toMatchObject({
+      outcome: "succeeded",
+      verification_passed: true,
+      empty: false,
+      publication: { outcome: "pushed", branch: "norns/task-task-1" },
+    });
+    const remoteSha = await git(h.remote, "rev-parse", "refs/heads/norns/task-task-1");
+    expect(remoteSha).toBe(result.commit_sha);
+    expect(await git(h.remote, "show", `${remoteSha}:index.html`)).toContain(
+      "Norns development proof",
+    );
+    expect(await git(h.remote, "show", `${remoteSha}:test.sh`)).toContain("grep -q");
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "run_log",
+        chunk: expect.stringContaining(
+          "the coding runtime left 2 uncommitted path(s); the runner checkpointed them",
+        ),
+      }),
+    );
   });
 
   it("independently verifies and publishes a commit made before the runtime hit max turns", async () => {

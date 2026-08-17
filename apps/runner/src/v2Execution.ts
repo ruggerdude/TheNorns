@@ -1521,7 +1521,16 @@ export class V2RunnerExecutor {
         return await cancelledWithWorktree(runtimeResult.usage);
       }
       stage = "worktree_inspection";
-      const commit = await worktree.head();
+      const uncommitted = await this.allUncommittedPaths(worktree.path);
+      let commit = await worktree.head();
+      if (uncommitted.length > 0) {
+        commit = await this.checkpointUncommittedChanges(worktree.path, command.task_id);
+        emit({
+          kind: "run_log",
+          run_id: command.run_id,
+          chunk: `the coding runtime left ${uncommitted.length} uncommitted path(s); the runner checkpointed them at commit ${commit} before independent verification`,
+        });
+      }
       knowledgeCommit = commit;
       knowledgeFiles = boundedKnowledgeList(
         await this.changedPaths(worktree.path, worktree.base_revision, commit),
@@ -1939,6 +1948,36 @@ export class V2RunnerExecutor {
       .split("\n")
       .map((line) => line.slice(3).trim())
       .filter(Boolean);
+  }
+
+  /**
+   * A coding runtime can complete the implementation yet stop at the remote
+   * delivery boundary (for example, because `main` is checked out in the base
+   * clone or remote credentials are intentionally absent). The isolated
+   * worktree is already the runner's task-scoped trust boundary, so checkpoint
+   * every visible change locally before verification instead of deleting
+   * tested work merely because the model omitted `git commit`.
+   */
+  private async checkpointUncommittedChanges(
+    worktreePath: string,
+    taskId: string,
+  ): Promise<string> {
+    await execFileAsync("git", ["-C", worktreePath, "add", "--all"]);
+    await execFileAsync("git", [
+      "-C",
+      worktreePath,
+      "-c",
+      "user.name=Norns Runner",
+      "-c",
+      "user.email=runner@norns.local",
+      "-c",
+      "commit.gpgSign=false",
+      "commit",
+      "--no-verify",
+      "-m",
+      `Checkpoint task changes for ${taskId}`,
+    ]);
+    return (await execFileAsync("git", ["-C", worktreePath, "rev-parse", "HEAD"])).stdout.trim();
   }
 
   /** Repository-relative committed paths are useful evidence and reveal no local root. */
