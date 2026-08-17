@@ -435,7 +435,7 @@ function layout(nodes: GraphNodeDto[]): Map<string, { x: number; y: number }> {
   return positions;
 }
 
-type ProjectJourneyStage = 1 | 2 | 3 | 4 | 5;
+type ProjectJourneyStage = 1 | 2 | 3 | 4 | 5 | 6;
 
 interface ProjectJourneyState {
   current: ProjectJourneyStage;
@@ -448,7 +448,8 @@ const PROJECT_JOURNEY: ReadonlyArray<{ id: ProjectJourneyStage; label: string }>
   { id: 2, label: "Project Manager" },
   { id: 3, label: "Plan" },
   { id: 4, label: "Quality Control" },
-  { id: 5, label: "Deployment" },
+  { id: 5, label: "Plan Review" },
+  { id: 6, label: "Deployment" },
 ];
 
 function ProjectJourney({ current, skipped, qc }: ProjectJourneyState): React.ReactElement {

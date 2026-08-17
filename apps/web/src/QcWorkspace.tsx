@@ -22,7 +22,7 @@ type QcWorkspaceActions = {
 export interface QcWorkspaceProps {
   review: V2ConversationPlanReviewT;
   planVersion: V2WorkPlanVersionT | null;
-  history: V2ConversationPlanReviewT[];
+  history?: V2ConversationPlanReviewT[];
   actions: QcWorkspaceActions;
   busy: boolean;
   error?: string | null;
@@ -44,6 +44,7 @@ export interface QcWorkspaceProps {
     message: string,
   ) => Promise<void>;
   onConfirmAction: (action: V2ConversationActionT, qcMode?: QcModeT) => Promise<void>;
+  view?: "qc" | "plan_review";
 }
 
 const TERMINAL = new Set(["converged", "cap_reached", "failed", "cancelled"]);
@@ -548,12 +549,17 @@ function QcMessageContent({
 
 function QcLiveDialogue({
   review,
+  history = [],
   phaseNumbers,
 }: {
   review: V2ConversationPlanReviewT;
+  history?: V2ConversationPlanReviewT[];
   phaseNumbers?: ReadonlyMap<string, number>;
 }): React.ReactElement {
-  const messages = review.chat_messages
+  const messages = [...history]
+    .reverse()
+    .flatMap((pastReview) => pastReview.chat_messages)
+    .concat(review.chat_messages)
     .filter(
       (message) =>
         !(
@@ -561,7 +567,16 @@ function QcLiveDialogue({
           /^WORK PLAN CONTRACT ENVELOPE\b/i.test(message.content.trim())
         ),
     )
-    .slice(-20);
+    .slice(-60);
+  const historicalFindings = [...history]
+    .reverse()
+    .flatMap((pastReview) =>
+      pastReview.round_exchanges.flatMap((exchange) =>
+        exchange.reviewer.findings.length > 0
+          ? [{ review: pastReview, round: exchange.round, findings: exchange.reviewer.findings }]
+          : [],
+      ),
+    );
   const liveOutput = review.live_progress?.output_preview?.trim() ?? "";
   return (
     <section className="qc-live-dialogue" aria-label="Live quality-control dialogue">
@@ -572,8 +587,27 @@ function QcLiveDialogue({
         </div>
         {liveOutput ? <b>LIVE</b> : null}
       </header>
-      {messages.length > 0 || liveOutput ? (
+      {historicalFindings.length > 0 || messages.length > 0 || liveOutput ? (
         <ol>
+          {historicalFindings.map((entry) => (
+            <li
+              key={`${entry.review.id}:round:${entry.round}`}
+              className="is-history"
+              data-speaker="reviewer"
+            >
+              <header>
+                <strong>Independent reviewer</strong>
+                <span>
+                  Prior attempt {entry.review.attempt_number} · Round {entry.round}
+                </span>
+              </header>
+              <QcMessageContent
+                content={JSON.stringify({ findings: entry.findings })}
+                phaseNumbers={phaseNumbers}
+                speaker="reviewer"
+              />
+            </li>
+          ))}
           {messages.map((message) => (
             <li key={message.id} data-speaker={message.speaker}>
               <header>
@@ -636,7 +670,6 @@ function QcQuestionBox({
   channel,
   busy,
   onChat,
-  phaseNumbers,
 }: {
   review: V2ConversationPlanReviewT;
   channel: "reviewer" | "pm";
@@ -646,32 +679,9 @@ function QcQuestionBox({
 }): React.ReactElement {
   const [question, setQuestion] = useState("");
   const label = channel === "reviewer" ? "QC reviewer" : "Project Manager";
-  const messages = review.chat_messages
-    .filter((message) => message.channel === channel && message.speaker !== "workflow")
-    .slice(-8);
   return (
     <section className="qc-agent-chat" aria-label={`Chat with the ${label}`}>
-      <header>
-        <div>
-          <span className="eyebrow">Ask before deciding</span>
-          <h3>Chat with the {label}</h3>
-        </div>
-        <span>Round {currentRound(review)}</span>
-      </header>
-      {messages.length > 0 ? (
-        <ol>
-          {messages.map((message) => (
-            <li key={message.id} data-speaker={message.speaker}>
-              <strong>{message.speaker === "human" ? "You" : label}</strong>
-              <QcMessageContent
-                content={message.content}
-                phaseNumbers={phaseNumbers}
-                speaker={message.speaker}
-              />
-            </li>
-          ))}
-        </ol>
-      ) : null}
+      <h3 className="sr-only">Chat with the {label}</h3>
       <form
         onSubmit={(event) => {
           event.preventDefault();
@@ -756,7 +766,6 @@ function QcProgressPopout({
             </div>
           </dl>
         </section>
-        <QcLiveDialogue review={review} phaseNumbers={phaseNumbers} />
       </aside>
     );
   }
@@ -866,7 +875,6 @@ function QcProgressPopout({
         </p>
         <small>Progress advances only when QC reports a completed checkpoint.</small>
       </section>
-      <QcLiveDialogue review={review} phaseNumbers={phaseNumbers} />
     </aside>
   );
 }
@@ -1075,42 +1083,47 @@ function FindingTriage({
         <p>Choose one clear action. You can ask the reviewer questions before sending anything.</p>
       </div>
 
-      <label className="qc-triage-select" htmlFor={`qc-finding-action-${review.id}`}>
-        <span>What should happen next?</span>
-        <Select
-          id={`qc-finding-action-${review.id}`}
-          aria-label="Quality control finding action"
-          value={mode}
-          disabled={busy}
-          onChange={(event) => {
-            const nextMode = event.target.value as "all" | "individual" | "none";
-            setMode(nextMode);
-            if (nextMode === "all") {
-              setSelected(new Set(findings.map((finding) => finding.id)));
+      <ul className="qc-new-findings">
+        {findings.map((finding) => (
+          <FindingRow
+            key={finding.id}
+            finding={finding}
+            selectable={mode === "individual"}
+            selected={mode === "all" || selected.has(finding.id)}
+            phaseNumber={finding.module_id ? phaseNumbers.get(finding.module_id) : undefined}
+            onSelected={(checked) =>
+              setSelected((current) => {
+                const next = new Set(current);
+                if (checked) next.add(finding.id);
+                else next.delete(finding.id);
+                return next;
+              })
             }
-          }}
-        >
-          <option value="all">Send all {findings.length} findings to the PM</option>
-          <option value="individual">Choose findings to send</option>
-          <option value="none">Keep the current plan and skip these findings</option>
-        </Select>
-      </label>
-
-      <QcQuestionBox
-        review={review}
-        channel="reviewer"
-        busy={busy}
-        onChat={onChat}
-        phaseNumbers={phaseNumbers}
-      />
+          />
+        ))}
+      </ul>
 
       <fieldset className="qc-new-triage-actions" aria-label="Quality control actions">
-        <details className="qc-stop-options">
-          <summary>Stop options</summary>
-          <div>
-            <QcStopActions review={review} busy={busy} onCancel={onCancel} onStopAll={onStopAll} />
-          </div>
-        </details>
+        <label className="qc-triage-select" htmlFor={`qc-finding-action-${review.id}`}>
+          <span>What should happen next?</span>
+          <Select
+            id={`qc-finding-action-${review.id}`}
+            aria-label="Quality control finding action"
+            value={mode}
+            disabled={busy}
+            onChange={(event) => {
+              const nextMode = event.target.value as "all" | "individual" | "none";
+              setMode(nextMode);
+              if (nextMode === "all") {
+                setSelected(new Set(findings.map((finding) => finding.id)));
+              }
+            }}
+          >
+            <option value="all">Send all {findings.length} findings to the PM</option>
+            <option value="individual">Choose findings to send</option>
+            <option value="none">Keep the current plan and skip these findings</option>
+          </Select>
+        </label>
         {mode === "none" ? (
           <Button variant="primary" disabled={busy} onClick={() => void onRejectAll()}>
             {busy ? "Recording…" : "Keep plan and skip remaining QC"}
@@ -1143,25 +1156,20 @@ function FindingTriage({
         </p>
       ) : null}
 
-      <ul className="qc-new-findings">
-        {findings.map((finding) => (
-          <FindingRow
-            key={finding.id}
-            finding={finding}
-            selectable={mode === "individual"}
-            selected={mode === "all" || selected.has(finding.id)}
-            phaseNumber={finding.module_id ? phaseNumbers.get(finding.module_id) : undefined}
-            onSelected={(checked) =>
-              setSelected((current) => {
-                const next = new Set(current);
-                if (checked) next.add(finding.id);
-                else next.delete(finding.id);
-                return next;
-              })
-            }
-          />
-        ))}
-      </ul>
+      <QcQuestionBox
+        review={review}
+        channel="reviewer"
+        busy={busy}
+        onChat={onChat}
+        phaseNumbers={phaseNumbers}
+      />
+
+      <details className="qc-stop-options">
+        <summary>Stop options</summary>
+        <div>
+          <QcStopActions review={review} busy={busy} onCancel={onCancel} onStopAll={onStopAll} />
+        </div>
+      </details>
 
       {mode === "none" ? (
         <div className="qc-new-confirm" role="alert">
@@ -1262,112 +1270,9 @@ function AdjudicationDecision({
   );
 }
 
-function QcReviewRecord({
-  review,
-  planVersion,
-  history,
-  findings,
-  accepted,
-  includeDialogue,
-  phaseNumbers,
-}: {
-  review: V2ConversationPlanReviewT;
-  planVersion: V2WorkPlanVersionT | null;
-  history: V2ConversationPlanReviewT[];
-  findings: V2ConversationPlanReviewFindingT[];
-  accepted: number;
-  includeDialogue: boolean;
-  phaseNumbers: ReadonlyMap<string, number>;
-}): React.ReactElement {
-  return (
-    <details className="qc-new-record" data-testid="qc-review-record">
-      <summary>
-        <span>
-          <strong>QC record</strong>
-          <small>{reviewRecordSummary(review, findings)}</small>
-        </span>
-        <span>{findings.length} findings</span>
-      </summary>
-      <div>
-        <h2 id="qc-review-record-title">Current review record</h2>
-        <dl>
-          <div>
-            <dt>Plan</dt>
-            <dd>Version {planVersion?.version ?? review.plan_version_id}</dd>
-          </div>
-          <div>
-            <dt>Attempt</dt>
-            <dd>{review.attempt_number}</dd>
-          </div>
-          <div>
-            <dt>Accepted</dt>
-            <dd>{accepted}</dd>
-          </div>
-          <div>
-            <dt>Prior attempts</dt>
-            <dd>{history.length}</dd>
-          </div>
-        </dl>
-        {includeDialogue ? <QcLiveDialogue review={review} phaseNumbers={phaseNumbers} /> : null}
-        {findings.length > 0 ? (
-          <ul className="qc-new-findings is-readonly">
-            {findings.map((finding) => (
-              <FindingRow
-                key={finding.id}
-                finding={finding}
-                selectable={false}
-                selected={false}
-                onSelected={() => undefined}
-                response={
-                  review.dispositions.find((item) => item.finding_id === finding.id) ?? null
-                }
-                status={findingStatus(review, finding)}
-                phaseNumber={finding.module_id ? phaseNumbers.get(finding.module_id) : undefined}
-              />
-            ))}
-          </ul>
-        ) : (
-          <p>No retained findings.</p>
-        )}
-        {history.length > 0 ? (
-          <details className="qc-new-history">
-            <summary>Previous attempts · {history.length}</summary>
-            <ol>
-              {history.map((pastReview) => {
-                const pastFindings = visibleFindings(pastReview);
-                return (
-                  <li key={pastReview.id}>
-                    <header>
-                      <strong>Attempt {pastReview.attempt_number}</strong>
-                      <span>{pastReview.status.replaceAll("_", " ")}</span>
-                    </header>
-                    <p>
-                      {pastReview.rounds_completed} of {pastReview.max_rounds} rounds completed
-                    </p>
-                    {pastFindings.length > 0 ? (
-                      <ul>
-                        {pastFindings.map((finding) => (
-                          <li key={finding.id}>{finding.finding}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p>No retained findings.</p>
-                    )}
-                  </li>
-                );
-              })}
-            </ol>
-          </details>
-        ) : null}
-      </div>
-    </details>
-  );
-}
-
 export function QcWorkspace({
   review,
   planVersion,
-  history,
   actions,
   busy,
   error,
@@ -1379,6 +1284,8 @@ export function QcWorkspace({
   onStopAll,
   onChat,
   onConfirmAction,
+  view,
+  history = [],
 }: QcWorkspaceProps): React.ReactElement {
   const findings = useMemo(() => visibleFindings(review), [review]);
   const phaseNumbers = useMemo(
@@ -1391,13 +1298,16 @@ export function QcWorkspace({
   const currentFindings = useMemo(() => pausedRoundFindings(review, findings), [review, findings]);
   const round = currentRound(review);
   const terminal = TERMINAL.has(review.status);
+  const isPlanReview = terminal && (view === "plan_review" || view === undefined);
   const awaitingFindingDecision =
     review.status === "awaiting_human" && review.paused_checkpoint === "after_review";
   const visibleError = error && !/not awaiting human input/i.test(error) ? error : null;
   const accepted = (review.finding_decisions ?? []).filter(
     (item) => item.decision === "accept",
   ).length;
-  const stageTitle = `Round ${terminal ? review.rounds_completed : round} of ${review.max_rounds}`;
+  const stageTitle = isPlanReview
+    ? "Final plan decision"
+    : `Round ${terminal ? review.rounds_completed : round} of ${review.max_rounds}`;
   const stageDetail =
     review.status === "awaiting_human" && review.paused_checkpoint === "after_review"
       ? `Reviewer pass complete. ${currentFindings.length} finding${currentFindings.length === 1 ? " is" : "s are"} waiting for your decision before the PM can revise anything.`
@@ -1420,13 +1330,13 @@ export function QcWorkspace({
 
   return (
     <section
-      className="qc-new-workspace"
+      className={`qc-new-workspace${isPlanReview ? " is-plan-review" : ""}`}
       data-testid="qc-new-workspace"
       aria-labelledby="qc-workspace-title"
     >
       <header className="qc-new-header">
         <div>
-          <h2 id="qc-workspace-title">Quality control</h2>
+          <h2 id="qc-workspace-title">{isPlanReview ? "Plan review" : "Quality control"}</h2>
           <p className="qc-new-stage-title">{stageTitle}</p>
           {stageDetail ? <p className="qc-new-header-detail">{stageDetail}</p> : null}
           <p className="qc-new-agent-identity">
@@ -1439,21 +1349,37 @@ export function QcWorkspace({
         </div>
       </header>
 
-      <QcReviewRecord
-        review={review}
-        planVersion={planVersion}
-        history={history}
-        findings={findings}
-        accepted={accepted}
-        includeDialogue={terminal || review.status === "awaiting_human"}
-        phaseNumbers={phaseNumbers}
-      />
-
-      {!terminal && review.status !== "awaiting_human" ? (
+      {!isPlanReview && !terminal && review.status !== "awaiting_human" ? (
         <QcProgressPopout review={review} accepted={accepted} phaseNumbers={phaseNumbers} />
       ) : null}
 
-      {review.status === "awaiting_human" && review.paused_checkpoint === "after_review" ? (
+      {!isPlanReview ? (
+        <QcLiveDialogue review={review} history={history} phaseNumbers={phaseNumbers} />
+      ) : null}
+
+      {!isPlanReview &&
+      findings.length > 0 &&
+      (terminal ||
+        (review.status === "awaiting_human" && review.paused_checkpoint === "after_revision")) ? (
+        <ul className="qc-new-findings is-readonly" aria-label="Quality control findings">
+          {findings.map((finding) => (
+            <FindingRow
+              key={finding.id}
+              finding={finding}
+              selectable={false}
+              selected={false}
+              onSelected={() => undefined}
+              response={review.dispositions.find((item) => item.finding_id === finding.id) ?? null}
+              status={findingStatus(review, finding)}
+              phaseNumber={finding.module_id ? phaseNumbers.get(finding.module_id) : undefined}
+            />
+          ))}
+        </ul>
+      ) : null}
+
+      {!isPlanReview &&
+      review.status === "awaiting_human" &&
+      review.paused_checkpoint === "after_review" ? (
         <FindingTriage
           review={review}
           findings={currentFindings}
@@ -1467,7 +1393,9 @@ export function QcWorkspace({
         />
       ) : null}
 
-      {review.status === "awaiting_human" && review.paused_checkpoint === "after_revision" ? (
+      {!isPlanReview &&
+      review.status === "awaiting_human" &&
+      review.paused_checkpoint === "after_revision" ? (
         <section className="qc-new-decision">
           <div className="qc-new-decision-copy">
             <span>REVISION SAVED</span>
@@ -1498,7 +1426,9 @@ export function QcWorkspace({
         </section>
       ) : null}
 
-      {review.status === "awaiting_human" && review.paused_checkpoint === "adjudication" ? (
+      {!isPlanReview &&
+      review.status === "awaiting_human" &&
+      review.paused_checkpoint === "adjudication" ? (
         <AdjudicationDecision
           review={review}
           findings={findings}
@@ -1507,7 +1437,7 @@ export function QcWorkspace({
         />
       ) : null}
 
-      {terminal ? (
+      {isPlanReview ? (
         <section className="qc-new-outcome">
           <div>
             <span>{review.status === "converged" ? "REVIEW COMPLETE" : "DECISION REQUIRED"}</span>
@@ -1528,35 +1458,6 @@ export function QcWorkspace({
             <QcPlanVersion planVersion={planVersion} heading="Review the exact plan for approval" />
           ) : null}
           <div className="qc-new-outcome-actions">
-            {actions.approve && ["converged", "cap_reached"].includes(review.status) ? (
-              <Button
-                variant="primary"
-                disabled={busy}
-                onClick={() => {
-                  if (actions.approve) void onConfirmAction(actions.approve);
-                }}
-              >
-                {busy ? "Opening development…" : "Start development"}
-              </Button>
-            ) : null}
-            {actions.repeat && ["failed", "cancelled", "cap_reached"].includes(review.status) ? (
-              <Button
-                variant={review.status === "failed" ? "primary" : undefined}
-                disabled={busy}
-                onClick={() => {
-                  if (actions.repeat) {
-                    void onConfirmAction(actions.repeat, "gated_when_contested");
-                  }
-                }}
-              >
-                Run another QC pass
-              </Button>
-            ) : null}
-            {review.status === "failed" ? (
-              <Button disabled={busy} onClick={() => void onContinueWithoutQc(review)}>
-                Keep plan without QC
-              </Button>
-            ) : null}
             {actions.reject ? (
               <Button
                 variant="danger"
@@ -1568,17 +1469,59 @@ export function QcWorkspace({
                 Return to PM
               </Button>
             ) : null}
+            {actions.repeat ? (
+              <Button
+                variant={review.status === "failed" ? "primary" : undefined}
+                disabled={busy}
+                onClick={() => {
+                  if (actions.repeat) {
+                    void onConfirmAction(actions.repeat, "gated_when_contested");
+                  }
+                }}
+              >
+                Additional QC
+              </Button>
+            ) : null}
+            {review.status === "failed" ? (
+              <Button disabled={busy} onClick={() => void onContinueWithoutQc(review)}>
+                Keep plan without QC
+              </Button>
+            ) : null}
+            {actions.approve && ["converged", "cap_reached"].includes(review.status) ? (
+              <Button
+                variant="primary"
+                disabled={busy}
+                onClick={() => {
+                  if (actions.approve) void onConfirmAction(actions.approve);
+                }}
+              >
+                {busy ? "Opening development…" : "Develop"}
+              </Button>
+            ) : null}
           </div>
         </section>
       ) : null}
 
-      {!terminal && !awaitingFindingDecision ? (
+      {!isPlanReview && !terminal && !awaitingFindingDecision ? (
         <details className="qc-stop-options">
           <summary>Stop options</summary>
           <div>
             <QcStopActions review={review} busy={busy} onCancel={onCancel} onStopAll={onStopAll} />
           </div>
         </details>
+      ) : null}
+
+      {!isPlanReview &&
+      !terminal &&
+      !(review.status === "awaiting_human" && review.paused_checkpoint === "after_review") &&
+      !(review.status === "awaiting_human" && review.paused_checkpoint === "after_revision") ? (
+        <QcQuestionBox
+          review={review}
+          channel={pmOwnsReviewStep(review) ? "pm" : "reviewer"}
+          busy={busy}
+          onChat={onChat}
+          phaseNumbers={phaseNumbers}
+        />
       ) : null}
 
       {visibleError ? (

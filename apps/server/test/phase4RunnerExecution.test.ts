@@ -1,7 +1,9 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { promisify } from "node:util";
 import { type EventPayloadT, V2DispatchCommand } from "@norns/contracts";
 import {
   ApprovedRepositoryRegistry,
@@ -22,6 +24,7 @@ const COMMIT = "a".repeat(40);
 // call that a success, so a base revision equal to COMMIT would no longer
 // model a run that did any work.
 const BASE = "b".repeat(40);
+const execFileAsync = promisify(execFile);
 
 describe("Phase 4 runner-owned execution", () => {
   const cleanup: string[] = [];
@@ -54,6 +57,7 @@ describe("Phase 4 runner-owned execution", () => {
         expect(input.expected_revision).toBe(COMMIT);
         const worktreePath = resolve(root, "worktree");
         await mkdir(worktreePath, { recursive: true });
+        await execFileAsync("git", ["init", worktreePath]);
         return {
           path: worktreePath,
           base_revision: BASE,

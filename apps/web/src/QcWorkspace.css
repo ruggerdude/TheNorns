@@ -1485,3 +1485,149 @@
     width: 100%;
   }
 }
+
+/* The QC workspace is one continuous transcript. The status strip stays
+   compact, findings use the page, and the composer remains at the bottom. */
+.qc-new-workspace {
+  gap: 0.75rem;
+}
+
+.qc-progress-popout {
+  gap: 0.5rem;
+  padding: 0.7rem 0.9rem;
+  box-shadow: none;
+}
+
+.qc-progress-focus {
+  display: none;
+}
+
+.qc-progress-panel {
+  gap: 0.45rem;
+  padding: 0;
+  border-bottom: 0;
+}
+
+.qc-progress-panel > header {
+  gap: 0.5rem;
+}
+
+.qc-progress-popout progress {
+  height: 0.35rem;
+}
+
+.qc-progress-popout dl {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.4rem;
+}
+
+.qc-progress-popout dl > div {
+  display: flex;
+  gap: 0.35rem;
+}
+
+.qc-progress-popout dl dd::before {
+  content: "·";
+  margin-right: 0.35rem;
+  color: var(--ink-muted);
+}
+
+.qc-progress-panel > small,
+.qc-new-working-meta {
+  display: none;
+}
+
+.qc-live-dialogue {
+  min-height: 0;
+  gap: 0.55rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.qc-live-dialogue > header {
+  padding-inline: 0.1rem;
+}
+
+.qc-live-dialogue ol {
+  max-height: none;
+  overflow: visible;
+  padding: 0;
+}
+
+.qc-live-dialogue li {
+  width: 100%;
+  max-width: none;
+  border-radius: var(--radius-sm);
+}
+
+.qc-live-dialogue li[data-speaker="reviewer"] {
+  background: color-mix(in srgb, var(--warning) 7%, var(--surface));
+}
+
+.qc-live-dialogue li[data-speaker="pm"] {
+  background: color-mix(in srgb, var(--qc-blue) 7%, var(--surface));
+}
+
+.qc-live-dialogue li[data-speaker="human"] {
+  background: color-mix(in srgb, var(--success) 7%, var(--surface));
+}
+
+.qc-live-dialogue > small {
+  display: none;
+}
+
+.qc-new-decision,
+.qc-new-outcome {
+  padding: clamp(0.9rem, 2vw, 1.25rem);
+  box-shadow: none;
+}
+
+.qc-new-triage-actions {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 0.65rem;
+  padding: 0;
+  border-bottom: 0;
+}
+
+.qc-new-triage-actions > .btn {
+  width: auto;
+  min-height: 2.9rem;
+  white-space: nowrap;
+}
+
+.qc-triage-select {
+  width: 100%;
+  max-width: none;
+}
+
+.qc-agent-chat {
+  position: sticky;
+  z-index: 2;
+  bottom: 0;
+  padding: 0.65rem;
+  border-color: var(--line-strong);
+  background: color-mix(in srgb, var(--surface) 94%, var(--qc-blue));
+}
+
+.qc-agent-chat textarea {
+  min-height: 3.2rem;
+  max-height: 10rem;
+}
+
+.qc-new-outcome-actions {
+  width: 100%;
+  justify-content: flex-end;
+}
+
+@media (max-width: 42rem) {
+  .qc-new-triage-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .qc-new-triage-actions > .btn {
+    width: 100%;
+  }
+}

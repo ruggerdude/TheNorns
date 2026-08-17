@@ -1012,8 +1012,10 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   await expect(conversationHeader.getByText("Planning", { exact: true })).toHaveCount(0);
   await expect(conversationHeader.getByText("Stage", { exact: true })).toHaveCount(0);
   expect(transcriptBox?.height ?? 0).toBeGreaterThan(740);
-  expect(composerShellBox?.width ?? 0).toBeGreaterThan(700);
-  expect(composerShellBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(1108);
+  expect(composerShellBox?.width ?? 0).toBeGreaterThan((conversationMainBox?.width ?? 0) - 160);
+  expect(composerShellBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(
+    conversationMainBox?.width ?? 0,
+  );
 
   const sidebarBox = await conversationSidebar.boundingBox();
   expect(sidebarBox?.width ?? 0).toBeGreaterThanOrEqual(268);

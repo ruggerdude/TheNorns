@@ -1823,7 +1823,7 @@ describe("conversation workspace", () => {
     expect(await screen.findByAltText("Delivered desktop implementation")).toBeInTheDocument();
     expect(await screen.findByAltText("Approved mobile mockup")).toBeInTheDocument();
     expect(await screen.findByAltText("Delivered mobile implementation")).toBeInTheDocument();
-    await waitFor(() => expect(onJourneyStageChange).toHaveBeenLastCalledWith(5, [3, 4], null));
+    await waitFor(() => expect(onJourneyStageChange).toHaveBeenLastCalledWith(6, [3, 4, 5], null));
     view.unmount();
   });
 
@@ -1839,6 +1839,27 @@ describe("conversation workspace", () => {
           plan_version_id: version.id,
           content_hash: version.content_hash,
           plan_review_id: review.id,
+        },
+      },
+    });
+    const repeat = planAction({
+      id: "action-repeat-after-qc",
+      action_type: "send_plan_to_qc",
+      payload: {
+        parameters: {
+          plan_version_id: version.id,
+          content_hash: version.content_hash,
+          review: { mode: "qc", rounds: 1 },
+        },
+      },
+    });
+    const reject = planAction({
+      id: "action-return-after-qc",
+      action_type: "reject_plan",
+      payload: {
+        parameters: {
+          plan_version_id: version.id,
+          content_hash: version.content_hash,
         },
       },
     });
@@ -1863,7 +1884,7 @@ describe("conversation workspace", () => {
           return detailResponse(history, null, null, {
             workItem: { ...workItem, status: "awaiting_approval" },
             planVersions: [version],
-            actions: [action],
+            actions: [action, repeat, reject],
             reviews: [review],
           });
         }
@@ -1887,19 +1908,31 @@ describe("conversation workspace", () => {
     expect(screen.getByRole("heading", { name: "Signal Studio" })).toBeInTheDocument();
     expect(screen.queryByText(/Execution target/)).not.toBeInTheDocument();
     expect(screen.queryByText(/QC checks planned/)).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Quality control" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Plan review" })).toBeInTheDocument();
     expect(screen.getByText(/Quality review passed/)).toBeInTheDocument();
     expect(screen.getByText("Plan Contract · Version 1")).toBeInTheDocument();
     expect(screen.queryByTestId("conversation-action-approve_plan")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Quality control/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Plan review/ })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(screen.getByRole("button", { name: "Develop" })).toBeInTheDocument();
+    const reviewActions = document.querySelector(".qc-new-outcome-actions");
+    if (!(reviewActions instanceof HTMLElement)) throw new Error("Plan review actions not found");
+    expect(
+      within(reviewActions)
+        .getAllByRole("button")
+        .map((button) => button.textContent),
+    ).toEqual(["Return to PM", "Additional QC", "Develop"]);
+    await userEvent.click(screen.getByRole("button", { name: /Quality control/ }));
+    expect(screen.getByRole("heading", { name: "Quality control" })).toBeInTheDocument();
     expect(screen.getByText("Make cancellation verification explicit.")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Current review record" })).toBeInTheDocument();
     expect(screen.getByText("PM response")).toBeInTheDocument();
     expect(screen.getByText("Added the requested telemetry assertion.")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Start development" })).toBeInTheDocument();
     await waitFor(() =>
-      expect(onJourneyStageChange).toHaveBeenLastCalledWith(4, [], {
+      expect(onJourneyStageChange).toHaveBeenLastCalledWith(5, [], {
         active: "complete",
         round: 1,
         maxRounds: 3,
@@ -1990,8 +2023,7 @@ describe("conversation workspace", () => {
 
     expect((await screen.findAllByText("Round 1 of 3")).length).toBeGreaterThan(0);
     expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Current review record" })).toBeInTheDocument();
-    await userEvent.click(screen.getByText("Previous attempts · 1"));
+    expect(screen.getByRole("region", { name: "Live quality-control dialogue" })).toBeVisible();
     expect(screen.getByText("The retry boundary is not explicit.")).toBeInTheDocument();
   });
 
@@ -2699,11 +2731,9 @@ describe("conversation workspace", () => {
         await waitFor(() => expect(handedOff).toBe(true));
         expect(approved).toBe(false);
         expect(await screen.findByTestId("qc-new-workspace")).toBeInTheDocument();
-        expect(screen.getByRole("heading", { name: "Quality control" })).toBeInTheDocument();
+        expect(screen.getByRole("heading", { name: "Plan review" })).toBeInTheDocument();
         expect(screen.getByText(/Quality review passed/)).toBeInTheDocument();
-        expect(
-          await screen.findByRole("button", { name: "Start development" }),
-        ).toBeInTheDocument();
+        expect(await screen.findByRole("button", { name: "Develop" })).toBeInTheDocument();
       } else {
         await waitFor(() => expect(saved).toBe(true));
         expect(handedOff).toBe(false);
@@ -3458,7 +3488,7 @@ describe("conversation workspace", () => {
       />,
     );
 
-    expect(await screen.findByRole("button", { name: "Run another QC pass" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Additional QC" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
   });
 
@@ -3927,7 +3957,7 @@ describe("conversation workspace", () => {
     await waitFor(() => expect(confirmationBodies).toHaveLength(2));
     expect(confirmationBodies[0]?.idempotency_key).toEqual(expect.any(String));
     expect(confirmationBodies[1]?.idempotency_key).toBe(confirmationBodies[0]?.idempotency_key);
-    expect(await screen.findByRole("heading", { name: "Quality control" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Plan review" })).toBeInTheDocument();
   });
 
   it("keeps one in-memory confirmation key when session storage is unavailable", async () => {
@@ -6757,7 +6787,7 @@ describe("conversation workspace", () => {
       screen.getByRole("textbox", { name: "Question for the QC reviewer" }),
     ).toBeInTheDocument();
     const workspace = screen.getByTestId("conversation-workspace");
-    expect(workspace).toHaveClass("is-sidebar-collapsed");
+    await waitFor(() => expect(workspace).toHaveClass("is-sidebar-collapsed"));
     const conversationHeader = document.querySelector(".conversation-header");
     if (!(conversationHeader instanceof HTMLElement)) throw new Error("Header not found");
     await userEvent.click(
@@ -6983,6 +7013,7 @@ describe("conversation workspace", () => {
     );
 
     expect(await screen.findByTestId("qc-new-workspace")).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /Quality control/ }));
     expect(screen.getByText("Make cancellation verification explicit.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Discuss in Plan" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();

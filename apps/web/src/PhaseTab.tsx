@@ -289,8 +289,8 @@ export interface PhaseTabProps {
   onRunStarted?: (runId: string) => void;
   onJourneyChanged?: () => void;
   onJourneyStageChange?: (
-    stage: 2 | 3 | 4 | 5,
-    skipped?: Array<2 | 3 | 4>,
+    stage: 2 | 3 | 4 | 5 | 6,
+    skipped?: Array<2 | 3 | 4 | 5>,
     qc?: QcReviewJourney | null,
   ) => void;
   onConversationSelected?: (conversationId: string, replace?: boolean) => void;

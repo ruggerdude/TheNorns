@@ -1,7 +1,9 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
+import { promisify } from "node:util";
 import { PGlite } from "@electric-sql/pglite";
 import {
   ApprovedRepositoryRegistry,
@@ -23,6 +25,7 @@ import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persist
 const COMMIT = "c".repeat(40);
 const PROMPT = new TextEncoder().encode("Implement and verify the assigned task.");
 const PROMPT_HASH = createHash("sha256").update(PROMPT).digest("hex");
+const execFileAsync = promisify(execFile);
 
 describe.sequential("runner knowledge transport", () => {
   let pg: PGlite;
@@ -193,6 +196,7 @@ describe.sequential("runner knowledge transport", () => {
       prepare: async () => {
         const worktreePath = resolve(root, "worktree");
         await mkdir(worktreePath, { recursive: true });
+        await execFileAsync("git", ["init", worktreePath]);
         return {
           path: worktreePath,
           base_revision: "base-kt",

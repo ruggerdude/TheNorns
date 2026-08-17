@@ -278,8 +278,8 @@ interface ConversationWorkspaceProps {
   initialNewConversation?: boolean;
   initialBrief?: string | null;
   onJourneyStageChange?: (
-    stage: 2 | 3 | 4 | 5,
-    skipped?: Array<2 | 3 | 4>,
+    stage: 2 | 3 | 4 | 5 | 6,
+    skipped?: Array<2 | 3 | 4 | 5>,
     qc?: QcReviewJourney | null,
   ) => void;
   onConversationSelected?: (conversationId: string, replace?: boolean) => void;
@@ -1866,9 +1866,11 @@ function PlanDecisionControls({
 function ConversationQcActivity({
   reviews,
   planVersions,
+  view = "qc",
 }: {
   reviews: V2ConversationPlanReviewT[];
   planVersions: V2WorkPlanVersionT[];
+  view?: "qc" | "plan_review";
 }): React.ReactElement | null {
   const context = useContext(ConversationActionContext);
   const ordered = [...reviews].sort(
@@ -1909,7 +1911,6 @@ function ConversationQcActivity({
     proposed.find((action) => action.action_type === "reject_plan" && targetsReview(action)) ??
     null;
   const history = ordered.slice(1);
-
   return (
     <QcWorkspace
       review={latest}
@@ -1934,6 +1935,7 @@ function ConversationQcActivity({
       onStopAll={context.stopAllWork}
       onChat={context.continueReviewChat}
       onConfirmAction={context.confirm}
+      view={view}
     />
   );
 }
@@ -3490,12 +3492,25 @@ function PlanGenerationProgress({
 type DevelopmentTask = V2PhaseExecutionT["tasks"][number];
 type DevelopmentPhaseState = "complete" | "active" | "verifying" | "waiting" | "blocked" | "queued";
 
-type PlanningStageView = "pm" | "plan" | "qc";
+type PlanningStageView = "pm" | "plan" | "qc" | "plan_review";
+
+const PLAN_REVIEW_STATUSES = new Set(["converged", "cap_reached", "failed", "cancelled"]);
+
+function planningStageForReviews(reviews: V2ConversationPlanReviewT[]): PlanningStageView {
+  const latest = [...reviews].sort(
+    (left, right) =>
+      Date.parse(right.created_at) - Date.parse(left.created_at) ||
+      right.attempt_number - left.attempt_number,
+  )[0];
+  if (!latest) return "plan";
+  return PLAN_REVIEW_STATUSES.has(latest.status) ? "plan_review" : "qc";
+}
 
 function ConversationStageSidebar({
   view,
   hasPlan,
   hasQc,
+  hasPlanReview,
   developmentConversationId,
   onSelect,
   onOpenConversation,
@@ -3503,6 +3518,7 @@ function ConversationStageSidebar({
   view: PlanningStageView;
   hasPlan: boolean;
   hasQc: boolean;
+  hasPlanReview: boolean;
   developmentConversationId: string | null;
   onSelect: (view: PlanningStageView) => void;
   onOpenConversation: (conversationId: string) => Promise<void>;
@@ -3522,7 +3538,6 @@ function ConversationStageSidebar({
           <span>01</span>
           <span>
             <strong>Original PM</strong>
-            <small>Project conversation</small>
           </span>
         </button>
         {hasPlan ? (
@@ -3534,7 +3549,6 @@ function ConversationStageSidebar({
             <span>02</span>
             <span>
               <strong>Plan</strong>
-              <small>Phases and agents</small>
             </span>
           </button>
         ) : null}
@@ -3547,16 +3561,26 @@ function ConversationStageSidebar({
             <span>03</span>
             <span>
               <strong>Quality control</strong>
-              <small>Reviewer ↔ PM record</small>
+            </span>
+          </button>
+        ) : null}
+        {hasPlanReview ? (
+          <button
+            type="button"
+            aria-current={view === "plan_review" ? "page" : undefined}
+            onClick={() => onSelect("plan_review")}
+          >
+            <span>04</span>
+            <span>
+              <strong>Plan review</strong>
             </span>
           </button>
         ) : null}
         {developmentConversationId ? (
           <button type="button" onClick={() => void onOpenConversation(developmentConversationId)}>
-            <span>04</span>
+            <span>{hasPlanReview ? "05" : "04"}</span>
             <span>
               <strong>Development</strong>
-              <small>Separate live chat</small>
             </span>
           </button>
         ) : null}
@@ -3729,13 +3753,12 @@ function DevelopmentPhaseSidebar({
     <aside className="conversation-development-phases" aria-label="Development phases">
       <header>
         <span className="eyebrow">Workspace</span>
-        <h2>Development chat</h2>
-        <p>The approved phases update as agents work.</p>
+        <h2>Development phases</h2>
       </header>
       <nav className="conversation-development-conversations" aria-label="Project conversations">
         {planningConversationId ? (
           <button type="button" onClick={() => void onOpenConversation(planningConversationId)}>
-            Original PM &amp; QC
+            PM, Plan, QC &amp; Plan Review
           </button>
         ) : null}
         <button type="button" aria-current="page">
@@ -3929,8 +3952,9 @@ function ConversationThread({
   const [workTab, setWorkTab] = useState<"plan" | "implementation">(() =>
     detail.conversation.kind === "execution_pm" ? "implementation" : "plan",
   );
-  const [planningStageView, setPlanningStageView] = useState<PlanningStageView>(() =>
-    detail.plan_reviews.length > 0 ? "qc" : "plan",
+  const currentPlanningReviewStage = planningStageForReviews(detail.plan_reviews);
+  const [planningStageView, setPlanningStageView] = useState<PlanningStageView>(
+    currentPlanningReviewStage,
   );
   const [streamError, setStreamError] = useState<string | null>(null);
   const [modelBusy, setModelBusy] = useState(false);
@@ -5509,8 +5533,8 @@ function ConversationThread({
   const hasEnteredQc = isPlanning && detail.plan_reviews.length > 0;
   useEffect(() => {
     if (!isPlanning) return;
-    setPlanningStageView(detail.plan_reviews.length > 0 ? "qc" : "plan");
-  }, [detail.plan_reviews.length, isPlanning]);
+    setPlanningStageView(currentPlanningReviewStage);
+  }, [currentPlanningReviewStage, isPlanning]);
   const recoverableExecutionEffect = isPlanning
     ? ([...actionContext.effects.values()].find(isRecoverableExecutionEffect) ?? null)
     : null;
@@ -5827,6 +5851,7 @@ function ConversationThread({
                     view={planningStageView}
                     hasPlan
                     hasQc={false}
+                    hasPlanReview={false}
                     developmentConversationId={linkedExecutionConversationId}
                     onSelect={setPlanningStageView}
                     onOpenConversation={onOpenConversation}
@@ -6084,6 +6109,9 @@ function ConversationThread({
                   view={planningStageView}
                   hasPlan={latestPlan !== undefined}
                   hasQc
+                  hasPlanReview={
+                    latestReview ? PLAN_REVIEW_STATUSES.has(latestReview.status) : false
+                  }
                   developmentConversationId={linkedExecutionConversationId}
                   onSelect={setPlanningStageView}
                   onOpenConversation={onOpenConversation}
@@ -6094,7 +6122,8 @@ function ConversationThread({
                 {planningStageView === "plan" && latestPlan ? (
                   <PlanningPlanWorkspace version={latestPlan} reviews={visiblePlanReviews} />
                 ) : null}
-                {planningStageView === "qc" && recoverableExecutionEffect ? (
+                {(["qc", "plan_review"] as PlanningStageView[]).includes(planningStageView) &&
+                recoverableExecutionEffect ? (
                   <section
                     className="conversation-development-start"
                     aria-label="Development start recovery"
@@ -6150,6 +6179,14 @@ function ConversationThread({
                   <ConversationQcActivity
                     reviews={visiblePlanReviews}
                     planVersions={detail.plan_versions}
+                    view="qc"
+                  />
+                ) : null}
+                {planningStageView === "plan_review" ? (
+                  <ConversationQcActivity
+                    reviews={visiblePlanReviews}
+                    planVersions={detail.plan_versions}
+                    view="plan_review"
                   />
                 ) : null}
               </div>
@@ -6423,7 +6460,8 @@ export function ConversationWorkspace({
   const createdConversationRoute = useRef<string | null>(null);
   const handleUnauthorized = useCallback(() => callbacks.current.onUnauthorized(), []);
   const handleQcJourneyChange = useCallback(
-    (qc: QcReviewJourney) => callbacks.current.onJourneyStageChange?.(4, [], qc),
+    (qc: QcReviewJourney) =>
+      callbacks.current.onJourneyStageChange?.(qc.active === "complete" ? 5 : 4, [], qc),
     [],
   );
 
@@ -6433,8 +6471,12 @@ export function ConversationWorkspace({
       return;
     }
     if (detail.conversation.kind === "execution_pm") {
-      const skipped: Array<3 | 4> = detail.handoff ? (detail.project_runs_qc ? [] : [4]) : [3, 4];
-      callbacks.current.onJourneyStageChange?.(5, skipped, null);
+      const skipped: Array<3 | 4 | 5> = detail.handoff
+        ? detail.project_runs_qc
+          ? []
+          : [4]
+        : [3, 4, 5];
+      callbacks.current.onJourneyStageChange?.(6, skipped, null);
       return;
     }
     if (detail.plan_reviews.length > 0) {
@@ -6446,7 +6488,8 @@ export function ConversationWorkspace({
         )
         .at(0);
       if (latestReview) {
-        callbacks.current.onJourneyStageChange?.(4, [], qcReviewJourney(latestReview));
+        const qc = qcReviewJourney(latestReview);
+        callbacks.current.onJourneyStageChange?.(qc.active === "complete" ? 5 : 4, [], qc);
         return;
       }
     }
@@ -7252,7 +7295,7 @@ export function ConversationWorkspace({
                   });
                 }}
               >
-                <span aria-hidden="true">•••</span>
+                <span aria-hidden="true">…</span>
               </button>
             </div>
             {group.conversations.length > 1 ? (
@@ -7362,7 +7405,7 @@ export function ConversationWorkspace({
                   setHeaderMenuOpen((open) => !open);
                 }}
               >
-                <span aria-hidden="true">•••</span>
+                <span aria-hidden="true">…</span>
               </Button>
               <dialog
                 className="conversation-header-menu-popover"

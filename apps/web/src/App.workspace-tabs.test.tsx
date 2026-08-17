@@ -94,12 +94,13 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
       /Coordinator|Reviewer/i,
     );
     const journey = screen.getByRole("navigation", { name: "Project journey" });
-    expect(within(journey).getAllByRole("listitem")).toHaveLength(5);
+    expect(within(journey).getAllByRole("listitem")).toHaveLength(6);
     for (const label of [
       "Define the project",
       "Project Manager",
       "Plan",
       "Quality Control",
+      "Plan Review",
       "Deployment",
     ]) {
       expect(within(journey).getByText(label)).toBeVisible();

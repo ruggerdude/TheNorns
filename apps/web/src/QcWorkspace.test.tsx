@@ -155,6 +155,7 @@ function renderWorkspace(
   current = review(),
   error?: string,
   planVersion: V2WorkPlanVersionT | null = null,
+  view?: "qc" | "plan_review",
 ) {
   const onTriage = vi.fn().mockResolvedValue(undefined);
   const onContinueWithoutQc = vi.fn().mockResolvedValue(undefined);
@@ -174,6 +175,7 @@ function renderWorkspace(
       onStopAll={vi.fn().mockResolvedValue(undefined)}
       onChat={vi.fn().mockResolvedValue(undefined)}
       onConfirmAction={vi.fn().mockResolvedValue(undefined)}
+      view={view}
     />,
   );
   return { onTriage, onContinueWithoutQc };
@@ -271,7 +273,7 @@ describe("QcWorkspace", () => {
     expect(screen.getAllByText("Choose and document a deployment target.").at(-1)).toBeVisible();
     expect(screen.queryByText("YOUR DECISION")).not.toBeInTheDocument();
     expect(screen.queryByText(/Nothing goes back to the planning manager/)).not.toBeInTheDocument();
-    expect(screen.getByText("QC record")).toBeVisible();
+    expect(screen.queryByText("QC record")).not.toBeInTheDocument();
     expect(screen.queryByText("Need to stop?")).not.toBeInTheDocument();
     expect(screen.queryByText("Plan with PM")).not.toBeInTheDocument();
     expect(screen.queryByText(/No planning manager response/)).not.toBeInTheDocument();
@@ -312,7 +314,7 @@ describe("QcWorkspace", () => {
       }),
     );
 
-    const reviewerChat = screen.getByRole("region", { name: "Chat with the QC reviewer" });
+    const reviewerChat = screen.getByRole("region", { name: "Live quality-control dialogue" });
     expect(
       within(reviewerChat).getByRole("region", { name: "Structured QC findings" }),
     ).toBeVisible();
@@ -369,7 +371,6 @@ describe("QcWorkspace", () => {
       version,
     );
 
-    fireEvent.click(screen.getByText("QC record"));
     const dialogue = screen.getByRole("region", { name: "Live quality-control dialogue" });
     const revision = within(dialogue).getByRole("region", {
       name: "Planning manager revision",
@@ -468,9 +469,7 @@ describe("QcWorkspace", () => {
         ],
       }),
     );
-    expect(screen.getByText("QC record")).toBeVisible();
-    fireEvent.click(screen.getByText("QC record"));
-    expect(screen.getByRole("heading", { name: "Current review record" })).toBeVisible();
+    expect(screen.queryByText("QC record")).not.toBeInTheDocument();
     expect(screen.queryByText(/WORK PLAN CONTRACT ENVELOPE/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Full reviewer/)).not.toBeInTheDocument();
   });
@@ -567,8 +566,6 @@ describe("QcWorkspace", () => {
     expect(within(card).getByText("Plan Contract · Version 2")).toBeVisible();
     expect(within(card).getByText("Changes from version 1")).toBeVisible();
     expect(within(card).getByText("Documented the deployment target")).toBeVisible();
-    fireEvent.click(screen.getByText("QC record"));
-    expect(screen.getByRole("heading", { name: "Current review record" })).toBeVisible();
     expect(screen.getAllByText("Accepted by PM")).toHaveLength(2);
     expect(screen.getAllByText("Recommendation")).toHaveLength(2);
     expect(screen.getAllByText("PM response")).toHaveLength(2);
@@ -621,9 +618,7 @@ describe("QcWorkspace", () => {
     expect(
       screen.getByRole("article", { name: "Ship the revised, measurable deployment plan" }),
     ).toBeVisible();
-    fireEvent.click(screen.getByText("QC record"));
-    expect(screen.getByText("Accepted by PM")).toBeVisible();
-    expect(screen.getByText("Excluded by you")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Plan review" })).toBeVisible();
     expect(
       screen.getAllByText(
         "2 QC findings were recorded. 1 sent to the PM; 1 excluded by you. 1 accepted by the PM; 0 rebutted by the PM.",

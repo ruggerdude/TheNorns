@@ -3545,6 +3545,36 @@
   }
 }
 
+/* Compact conversation chrome: every record is a single scannable line and
+   the transcript uses the available workspace width. */
+.conversation-welcome,
+.conversation-message:not(.is-system),
+.conversation-message.is-system,
+.conversation-message:has(
+    :is(
+        .conversation-plan-card,
+        .conversation-action-card,
+        .conversation-qc-card,
+        .conversation-mockup-comparison
+      )
+  ),
+.conversation-composer-footer {
+  max-width: none;
+}
+
+.conversation-family-menu {
+  width: 1.45rem;
+  height: 1.45rem;
+  font-size: 0.78rem;
+}
+
+.conversation-header-menu > .btn-small {
+  width: 1.75rem;
+  min-height: 1.75rem;
+  padding: 0;
+  font-size: 0.76rem;
+}
+
 /* Planning and QC are durable workspaces, not chat attachments. The stage
    rail keeps the earlier conversations available without forcing their full
    transcripts above the current work. */
@@ -5553,5 +5583,124 @@
 
   .conversation-agent-dialogue-stream li.is-reviewer {
     margin-left: 0;
+  }
+}
+
+/* Final layout overrides: compact conversation rail and horizontal
+   development phases. These sit after the legacy sidebar rules. */
+.conversation-work-tab-plan.has-plan-workspace,
+.conversation-stage-workspace {
+  padding-left: 11.5rem;
+}
+
+.conversation-stage-sidebar {
+  width: 11.5rem;
+  padding-inline: 0.55rem;
+}
+
+.conversation-stage-sidebar nav button {
+  grid-template-columns: 1.35rem minmax(0, 1fr);
+  gap: 0.35rem;
+  padding: 0.55rem 0.45rem;
+}
+
+.conversation-stage-sidebar nav button strong {
+  display: block;
+  overflow: hidden;
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-stage-sidebar nav button small {
+  display: none;
+}
+
+.conversation-work-tab-development-chat {
+  padding-left: 0;
+}
+
+.conversation-development-phases {
+  position: relative;
+  inset: auto;
+  display: grid;
+  width: auto;
+  overflow: visible;
+  grid-template-columns: auto minmax(15rem, 1fr) minmax(10rem, 0.45fr);
+  align-items: center;
+  gap: 0.65rem 1rem;
+  padding: 0.75rem 1rem;
+  border-right: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.conversation-development-phases header {
+  display: block;
+}
+
+.conversation-development-phases header .eyebrow,
+.conversation-development-phases header p {
+  display: none;
+}
+
+.conversation-development-conversations {
+  display: flex;
+  min-width: 0;
+  gap: 0.35rem;
+}
+
+.conversation-development-conversations button {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-development-phase-list {
+  grid-column: 1 / -1;
+}
+
+.conversation-development-phase-list > summary {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+}
+
+.conversation-development-phases ol {
+  display: grid;
+  grid-auto-columns: minmax(11rem, 1fr);
+  grid-auto-flow: column;
+  gap: 0.45rem;
+  overflow-x: auto;
+  padding-bottom: 0.2rem;
+}
+
+@media (max-width: 880px) {
+  .conversation-work-tab-plan.has-plan-workspace,
+  .conversation-stage-workspace {
+    padding-left: 0;
+  }
+
+  .conversation-stage-sidebar {
+    position: relative;
+    inset: auto;
+    width: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .conversation-stage-sidebar nav {
+    grid-auto-columns: minmax(9rem, 1fr);
+    grid-auto-flow: column;
+    overflow-x: auto;
+  }
+
+  .conversation-development-phases {
+    grid-template-columns: 1fr;
+  }
+
+  .conversation-development-phase-list {
+    grid-column: auto;
   }
 }
