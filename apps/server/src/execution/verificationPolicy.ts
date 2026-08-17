@@ -57,6 +57,8 @@ function record(value: unknown): Record<string, unknown> | null {
 }
 
 const TEST_EXECUTABLES = new Set([
+  "bash",
+  "biome",
   "npm",
   "pnpm",
   "yarn",
@@ -82,7 +84,20 @@ const TEST_EXECUTABLES = new Set([
   "ruby",
   "bundle",
   "rspec",
+  "git",
+  "jest",
+  "playwright",
+  "sh",
+  "tsc",
+  "vitest",
+  "eslint",
 ]);
+
+function explicitVerificationExecutable(value: string): boolean {
+  if (TEST_EXECUTABLES.has(value)) return true;
+  if (value.startsWith("/") || value.startsWith("../") || value.includes("/../")) return false;
+  return /^(?:\.\/)?[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+$/.test(value);
+}
 
 /**
  * Extracts explicit, shell-free commands from an immutable approved task
@@ -126,7 +141,7 @@ export function verificationCommandsFromTaskPackage(value: unknown): V2Verificat
             ? criterion.id.trim()
             : `acceptance-${index + 1}`,
         value: verification,
-        trustedAsCommand: type === "command",
+        trustedAsCommand: false,
       });
     });
   }
@@ -136,7 +151,13 @@ export function verificationCommandsFromTaskPackage(value: unknown): V2Verificat
   for (const candidate of candidates) {
     const command = tokenizeVerificationCommand(candidate.value);
     if (!command) continue;
-    if (!candidate.trustedAsCommand && !TEST_EXECUTABLES.has(command[0])) continue;
+    // The PM may label natural-language instructions as `command`, such as
+    // "Run test.sh, then inspect the result". Passing the first prose word to
+    // `spawn` creates a guaranteed ENOENT and falsely fails otherwise-valid
+    // work. Acceptance evidence must start with a known executable or an
+    // explicit repository-relative executable path; only the dedicated
+    // execution.test_commands field is already command-shaped by contract.
+    if (!candidate.trustedAsCommand && !explicitVerificationExecutable(command[0])) continue;
     const identity = JSON.stringify(command);
     if (seen.has(identity)) continue;
     seen.add(identity);

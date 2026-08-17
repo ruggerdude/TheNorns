@@ -310,8 +310,21 @@ describe.sequential("EXECUTION E10 — verification commands reach the runner", 
           acceptance: [
             { id: "build", verification_type: "command", verification: "npm run build" },
             { id: "e2e", verification_type: "test", verification: "npx playwright test" },
+            { id: "script", verification_type: "command", verification: "./test.sh" },
             { id: "inspect", verification_type: "inspection", verification: "Review the UI" },
             { id: "prose", verification_type: "test", verification: "Review the output" },
+            {
+              id: "natural-run",
+              verification_type: "command",
+              verification:
+                "Run test.sh, then run it against a marker-absent fixture and confirm a nonzero exit.",
+            },
+            {
+              id: "natural-inspect",
+              verification_type: "command",
+              verification:
+                "Inspect git status and verify the remote main branch contains the commit.",
+            },
             { id: "shell", verification_type: "command", verification: "npm test && npm build" },
           ],
         },
@@ -320,6 +333,7 @@ describe.sequential("EXECUTION E10 — verification commands reach the runner", 
       { name: "task-package-test-1", command: ["pnpm", "test"] },
       { name: "build", command: ["npm", "run", "build"] },
       { name: "e2e", command: ["npx", "playwright", "test"] },
+      { name: "script", command: ["./test.sh"] },
     ]);
   });
 });
