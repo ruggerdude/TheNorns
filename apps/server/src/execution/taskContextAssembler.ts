@@ -289,10 +289,12 @@ function renderMission(model: ContextModel): string {
       "Do exactly the task in the TASK section. Do not expand its scope.",
       "Make the smallest complete implementation early, before optional investigation or explanation.",
       "Run the declared verification commands in the REPOSITORY section immediately after the edit and leave them passing.",
-      "Commit the verified change immediately. A written summary is not a deliverable and must not delay the commit.",
+      "Commit the verified change immediately on the current task branch. A written summary is not a deliverable and must not delay the commit.",
       "Every acceptance criterion must be satisfied and demonstrably true before you finish.",
       "Follow every project directive and constraint; they override your own defaults.",
-      "Commit on the branch you were given. Do not merge, rebase onto, or push to other branches.",
+      "The Norns runner owns remote publication. Do not check out, merge into, commit directly to, or push main or any other target branch.",
+      "If the task, deliverables, or acceptance criteria say to push or merge to main, treat that wording as the final runner-owned outcome: commit locally on the current task branch and let the runner verify and publish it.",
+      "Remote credentials are intentionally unavailable to you. Never leave verified edits uncommitted because a push is unavailable; a local task-branch commit is mandatory.",
       "If the task is impossible as specified, stop and report why. Do not substitute a different task.",
     ]),
     "",
@@ -445,6 +447,13 @@ function renderRepository(model: ContextModel): string {
     "",
     `- Project policy: ${model.project.verification_policy_ref}`,
     `- Task policy: ${model.task.verification_policy_ref}`,
+    "",
+    "### Delivery boundary",
+    "",
+    "Commit all verified work locally on the current task branch. The Norns runner then",
+    "verifies that commit and owns every remote push or target-branch update. Any task text",
+    "that says to push or merge to `main` describes the runner-owned final outcome, not an",
+    "agent action. Missing remote credentials are expected and must never prevent the local commit.",
   );
   return lines.join("\n");
 }

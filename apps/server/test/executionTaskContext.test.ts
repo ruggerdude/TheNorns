@@ -269,6 +269,20 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
     expect(prompt.indexOf("Run the declared verification commands")).toBeLessThan(
       prompt.indexOf("Commit the verified change immediately"),
     );
+    expect(prompt).toContain("The Norns runner owns remote publication.");
+    expect(prompt).toContain(
+      "If the task, deliverables, or acceptance criteria say to push or merge to main",
+    );
+    expect(prompt).toContain(
+      "Never leave verified edits uncommitted because a push is unavailable",
+    );
+    expect(prompt).toContain("### Delivery boundary");
+    expect(prompt.indexOf("## TASK — this is what you must deliver")).toBeLessThan(
+      prompt.indexOf("### Delivery boundary"),
+    );
+    expect(prompt).toContain(
+      "Any task text\nthat says to push or merge to `main` describes the runner-owned final outcome",
+    );
     expect(prompt).toContain("Never push to main.");
     expect(prompt).toContain("Strongest at typed backend work.");
     expect(prompt).toContain("Define the ref contract");
