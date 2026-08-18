@@ -131,7 +131,48 @@ describe("readable RunLog activity", () => {
     ]);
 
     expect(activities.map((activity) => activity.text)).toEqual([
+      "Running a development command",
       "Editing apps/web/src/RunLog.tsx",
     ]);
+  });
+
+  it("recovers safe activity labels from truncated legacy Claude events", () => {
+    const activities = readableRunActivities([
+      {
+        sequence: 10,
+        occurred_at: "2026-07-25T17:00:00.000Z",
+        chunk:
+          '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"[LOCAL_PATH]/private-file",',
+      },
+      {
+        sequence: 11,
+        occurred_at: "2026-07-25T17:00:01.000Z",
+        chunk:
+          '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"secret command contents",',
+      },
+    ]);
+
+    expect(activities.map((activity) => activity.text)).toEqual([
+      "Inspecting project files",
+      "Running a development command",
+    ]);
+    expect(activities.map((activity) => activity.text).join(" ")).not.toContain("private-file");
+    expect(activities.map((activity) => activity.text).join(" ")).not.toContain("secret command");
+  });
+
+  it("shows an active session when a legacy runner has only emitted internal events", () => {
+    const activities = readableRunActivities([
+      {
+        sequence: 20,
+        occurred_at: "2026-07-25T17:00:00.000Z",
+        chunk: JSON.stringify({
+          type: "system",
+          subtype: "thinking_tokens",
+          estimated_tokens: 250,
+        }),
+      },
+    ]);
+
+    expect(activities.map((activity) => activity.text)).toEqual(["Agent session is active"]);
   });
 });

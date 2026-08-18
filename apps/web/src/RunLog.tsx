@@ -44,6 +44,46 @@ type RunActivity = {
   text: string;
 };
 
+const LEGACY_TOOL_ACTIVITY: Record<string, string> = {
+  Read: "Inspecting project files",
+  Glob: "Inspecting project files",
+  Grep: "Inspecting project files",
+  Edit: "Editing project files",
+  Write: "Editing project files",
+  Bash: "Running a development command",
+};
+
+function legacyToolActivity(value: unknown, raw: string): string | null {
+  const names: string[] = [];
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>;
+    const message = record.message;
+    if (record.type === "assistant" && message && typeof message === "object") {
+      const content = (message as Record<string, unknown>).content;
+      if (Array.isArray(content)) {
+        for (const item of content) {
+          if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+          const block = item as Record<string, unknown>;
+          if (block.type === "tool_use" && typeof block.name === "string") {
+            names.push(block.name);
+          }
+        }
+      }
+    }
+  }
+  // Older runners can truncate a large assistant SDK event before the JSON
+  // closes. Recover only a fixed allowlist of tool names from that envelope;
+  // never expose its free-form input, command, path, prompt, or reasoning.
+  if (names.length === 0 && /"type"\s*:\s*"assistant"/.test(raw)) {
+    for (const match of raw.matchAll(/"name"\s*:\s*"(Read|Glob|Grep|Edit|Write|Bash)"/g)) {
+      if (match[1]) names.push(match[1]);
+    }
+  }
+  const priority = ["Edit", "Write", "Bash", "Read", "Glob", "Grep"];
+  const name = priority.find((candidate) => names.includes(candidate));
+  return name ? (LEGACY_TOOL_ACTIVITY[name] ?? null) : null;
+}
+
 function activityFromEntry(entry: RunLogEntryDto): RunActivity | null {
   const chunk = entry.chunk.trim();
   if (!chunk) return null;
@@ -51,8 +91,15 @@ function activityFromEntry(entry: RunLogEntryDto): RunActivity | null {
   try {
     value = JSON.parse(chunk);
   } catch {
-    // Older runtimes emitted raw SDK JSON. Suppress it instead of recreating
-    // the noisy, generic reading/searching/reasoning feed.
+    const legacyActivity = legacyToolActivity(null, chunk);
+    if (legacyActivity) {
+      return {
+        sequence: entry.sequence,
+        occurredAt: entry.occurred_at,
+        kind: "tool",
+        text: legacyActivity,
+      };
+    }
     if (chunk.startsWith("{")) return null;
     return {
       sequence: entry.sequence,
@@ -69,6 +116,15 @@ function activityFromEntry(entry: RunLogEntryDto): RunActivity | null {
       occurredAt: entry.occurred_at,
       kind: "tool",
       text: record.text,
+    };
+  }
+  const legacyActivity = legacyToolActivity(record, chunk);
+  if (legacyActivity) {
+    return {
+      sequence: entry.sequence,
+      occurredAt: entry.occurred_at,
+      kind: "tool",
+      text: legacyActivity,
     };
   }
   if (record.type === "result") {
@@ -94,6 +150,17 @@ export function readableRunActivities(entries: RunLogEntryDto[]): RunActivity[] 
     }
     if (previous?.kind === activity.kind && previous.text === activity.text) continue;
     activities.push(activity);
+  }
+  if (activities.length === 0 && entries.length > 0) {
+    const latest = entries.at(-1);
+    if (latest) {
+      activities.push({
+        sequence: latest.sequence,
+        occurredAt: latest.occurred_at,
+        kind: "session",
+        text: "Agent session is active",
+      });
+    }
   }
   return activities.slice(-MAX_VISIBLE_ACTIVITIES);
 }
