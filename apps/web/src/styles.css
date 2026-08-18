@@ -4869,8 +4869,9 @@ button:disabled {
 
   .workspace-compact-shell > .workspace-top-menu .workspace-rail-project {
     display: block;
-    min-width: 4rem;
-    max-width: 11rem;
+    width: clamp(12rem, 18vw, 24rem);
+    min-width: 12rem;
+    max-width: none;
     padding: 0 0.55rem;
     border: 0;
   }
@@ -4941,6 +4942,25 @@ button:disabled {
 
   .workspace-compact-shell > .workspace-top-menu .portfolio-new-project::before {
     content: "+";
+  }
+}
+
+@media (max-width: 1400px) and (min-width: 901px) {
+  .workspace-compact-shell > .workspace-top-menu .workspace-rail-project {
+    width: 12rem;
+  }
+
+  .workspace-compact-shell > .workspace-top-menu > .workspace-tabs button {
+    padding-inline: 0.4rem;
+  }
+
+  .workspace-compact-shell > .workspace-top-menu .user-chip {
+    padding-inline: 0.35rem;
+  }
+
+  .workspace-compact-shell > .workspace-top-menu .user-chip > span:nth-child(2),
+  .workspace-compact-shell > .workspace-top-menu .user-menu-caret {
+    display: none;
   }
 }
 
@@ -8156,8 +8176,9 @@ h4 {
 
   .workspace-compact-shell > .workspace-top-menu .workspace-rail-project {
     display: block;
-    min-width: 4rem;
-    max-width: 11rem;
+    width: clamp(12rem, 18vw, 24rem);
+    min-width: 12rem;
+    max-width: none;
     padding: 0 0.55rem;
     border: 0;
   }
@@ -8244,6 +8265,25 @@ h4 {
 
   .workspace-compact-shell > .workspace-top-menu .portfolio-new-project::before {
     content: "+";
+  }
+}
+
+@media (max-width: 1400px) and (min-width: 901px) {
+  .workspace-compact-shell > .workspace-top-menu .workspace-rail-project {
+    width: 12rem;
+  }
+
+  .workspace-compact-shell > .workspace-top-menu > .workspace-tabs button {
+    padding-inline: 0.4rem;
+  }
+
+  .workspace-compact-shell > .workspace-top-menu .user-chip {
+    padding-inline: 0.35rem;
+  }
+
+  .workspace-compact-shell > .workspace-top-menu .user-chip > span:nth-child(2),
+  .workspace-compact-shell > .workspace-top-menu .user-menu-caret {
+    display: none;
   }
 }
 

@@ -545,6 +545,11 @@ async function prepare(
       });
     }
     if (path.endsWith("/destroy") && request.method() === "DELETE") {
+      const selection = request.postDataJSON() as { delete_github_repository?: boolean };
+      if (!selection.delete_github_repository) {
+        projects = [];
+        return route.fulfill({ status: 204, body: "" });
+      }
       return fulfill(
         route,
         {
@@ -872,6 +877,11 @@ test("Workspace uses a compact top menu and one phase-chat sidebar", async ({ pa
   const workspaceNavigationBox = await workspaceNavigation.boundingBox();
   expect(projectContextBox).not.toBeNull();
   expect(workspaceNavigationBox).not.toBeNull();
+  expect(projectContextBox?.width ?? 0).toBeGreaterThanOrEqual(192);
+  expect(await projectContext.evaluate((element) => getComputedStyle(element).maxWidth)).toBe(
+    "none",
+  );
+  await expect(page.getByLabel("Current workflow phase")).toHaveCount(0);
   expect(
     Math.abs(
       (workspaceNavigationBox?.y ?? 0) +
@@ -1014,7 +1024,7 @@ test("Workspace uses a compact top menu and one phase-chat sidebar", async ({ pa
   await expect(conversationHeader.getByText("Planning", { exact: true })).toHaveCount(0);
   await expect(conversationHeader.getByText("Stage", { exact: true })).toHaveCount(0);
   expect(transcriptBox?.height ?? 0).toBeGreaterThan(740);
-  expect(composerShellBox?.width ?? 0).toBeGreaterThan((conversationMainBox?.width ?? 0) - 300);
+  expect(composerShellBox?.width ?? 0).toBeGreaterThan((conversationMainBox?.width ?? 0) - 320);
   expect(composerShellBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(
     conversationMainBox?.width ?? 0,
   );
@@ -1022,6 +1032,39 @@ test("Workspace uses a compact top menu and one phase-chat sidebar", async ({ pa
   const phaseChatsBox = await phaseChats.boundingBox();
   expect(phaseChatsBox?.width ?? 0).toBeGreaterThanOrEqual(180);
   expect(phaseChatsBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(190);
+  expect(await phaseChats.evaluate((element) => getComputedStyle(element).position)).toBe("fixed");
+  expect(await phaseChats.evaluate((element) => getComputedStyle(element).overflowY)).toBe("auto");
+  expect(Math.abs((phaseChatsBox?.y ?? 0) - (conversationChromeBox?.y ?? 0))).toBeLessThanOrEqual(
+    1,
+  );
+  expect(conversationChromeBox?.x ?? 0).toBeGreaterThanOrEqual(
+    (phaseChatsBox?.x ?? 0) + (phaseChatsBox?.width ?? 0) - 1,
+  );
+
+  const sidebarScroll = await phaseChats.evaluate((sidebar) => {
+    const filler = document.createElement("div");
+    filler.dataset.testScrollFiller = "true";
+    filler.style.height = "1600px";
+    filler.style.flex = "0 0 auto";
+    sidebar.append(filler);
+    const topBeforeScroll = sidebar.getBoundingClientRect().top;
+    sidebar.scrollTop = sidebar.scrollHeight;
+    return {
+      clientHeight: sidebar.clientHeight,
+      scrollHeight: sidebar.scrollHeight,
+      scrollTop: sidebar.scrollTop,
+      topBeforeScroll,
+      topAfterScroll: sidebar.getBoundingClientRect().top,
+    };
+  });
+  expect(sidebarScroll.scrollHeight).toBeGreaterThan(sidebarScroll.clientHeight);
+  expect(sidebarScroll.scrollTop).toBeGreaterThan(0);
+  expect(sidebarScroll.topAfterScroll).toBe(sidebarScroll.topBeforeScroll);
+  await phaseChats.evaluate((sidebar) => {
+    sidebar.querySelector("[data-test-scroll-filler]")?.remove();
+    sidebar.scrollTop = 0;
+  });
+
   await phaseChats.getByRole("button", { name: "Collapse phase chats" }).click();
   await expect
     .poll(async () => (await phaseChats.boundingBox())?.width ?? Number.POSITIVE_INFINITY)
@@ -1041,6 +1084,9 @@ test("Workspace uses a compact top menu and one phase-chat sidebar", async ({ pa
   expect(compactHeaderBox?.x).toBe(0);
   expect(compactHeaderBox?.width).toBe(820);
   expect(compactHeaderBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(64);
+  expect(await phaseChats.evaluate((element) => getComputedStyle(element).position)).toBe(
+    "relative",
+  );
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(820);
 });
 
@@ -1146,7 +1192,7 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
   `);
   await page.waitForFunction(() => {
     const sidebar = document.querySelector(".conversation-stage-sidebar");
-    return sidebar !== null && getComputedStyle(sidebar).position === "absolute";
+    return sidebar !== null && getComputedStyle(sidebar).position === "fixed";
   });
 
   for (const viewport of [
@@ -1170,7 +1216,8 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
     expect(phasesBox).not.toBeNull();
     expect(dialogueBox).not.toBeNull();
     expect(recoveryBox).not.toBeNull();
-    if (viewport.width > 880) {
+    if (viewport.width > 900) {
+      expect(await rail.evaluate((element) => getComputedStyle(element).position)).toBe("fixed");
       expect(phasesBox?.x ?? 0).toBeGreaterThanOrEqual(
         (railBox?.x ?? 0) + (railBox?.width ?? 0) - 1,
       );
@@ -1178,6 +1225,7 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
         (railBox?.x ?? 0) + (railBox?.width ?? 0) - 1,
       );
     } else {
+      expect(await rail.evaluate((element) => getComputedStyle(element).position)).toBe("relative");
       expect(phasesBox?.x ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(1);
       expect(phasesBox?.y ?? 0).toBeGreaterThanOrEqual(
         (railBox?.y ?? 0) + (railBox?.height ?? 0) - 1,
@@ -1367,13 +1415,12 @@ test("Project archiving lives only in project Settings", async ({ page }) => {
   expect((errorDialogBox?.x ?? 0) + (errorDialogBox?.width ?? 0) / 2).toBeCloseTo(390 / 2, 0);
   expect((errorDialogBox?.y ?? 0) + (errorDialogBox?.height ?? 0) / 2).toBeCloseTo(844 / 2, 0);
   expect((errorDialogBox?.y ?? 0) + (errorDialogBox?.height ?? 0)).toBeLessThanOrEqual(844);
-  await deleteDialog.getByRole("button", { name: "Cancel" }).click();
+  await deleteDialog.getByRole("button", { name: "Keep GitHub repository instead" }).click();
+  await deleteDialog.getByRole("button", { name: "Yes, delete project" }).click();
   await expect(deleteDialog).toBeHidden();
-
-  await page.getByRole("button", { name: "Menu", exact: true }).click();
-  await workspaceNavigation.getByRole("button", { name: "Portfolio", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Portfolio" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Archive project" })).toHaveCount(0);
+  await expect(page.getByRole("main", { name: "New project" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Name of project" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Portfolio" })).toBeHidden();
 });
 
 test("Usage, Settings, and Admin use the regular application sidebar", async ({ page }) => {

@@ -95,7 +95,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     );
     expect(screen.queryByRole("navigation", { name: "Project journey" })).not.toBeInTheDocument();
     expect(screen.getByRole("navigation", { name: "Workspace sections" })).toBeVisible();
-    expect(screen.getByLabelText("Current workflow phase")).toHaveTextContent("3Plan");
+    expect(screen.queryByLabelText("Current workflow phase")).not.toBeInTheDocument();
 
     const workspaceShell = document.querySelector(".workspace-shell");
     if (!(workspaceShell instanceof HTMLElement)) throw new Error("Workspace shell not found");
@@ -311,7 +311,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
 
     await user.click(pointer);
     expect(await screen.findByRole("button", { name: "Work" })).toHaveClass("on");
-    expect(screen.getByLabelText("Current workflow phase")).toHaveTextContent("2Project Manager");
+    expect(screen.queryByLabelText("Current workflow phase")).not.toBeInTheDocument();
     expect(
       await screen.findByTestId("phase-goal", undefined, { timeout: 3_000 }),
     ).toBeInTheDocument();

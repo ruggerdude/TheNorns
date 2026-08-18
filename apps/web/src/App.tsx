@@ -23,7 +23,6 @@ import { Login, type LoginMode } from "./Login";
 import { PortfolioMenu } from "./PortfolioMenu";
 import { ProjectMembers } from "./ProjectMembers";
 import { type ProjectOpenOptions, type ProjectSummary, Projects } from "./Projects";
-import type { QcReviewJourney } from "./QcWorkspace";
 import { type StaffingEdit, StrategyReview, type StrategyReviewDto } from "./StrategyReview";
 import { AuthenticatedHeaderActions } from "./UserMenu";
 import { WorkspaceSettings, prefetchProjectRules } from "./WorkspaceSettings";
@@ -435,28 +434,12 @@ function layout(nodes: GraphNodeDto[]): Map<string, { x: number; y: number }> {
   return positions;
 }
 
-type ProjectJourneyStage = 1 | 2 | 3 | 4 | 5 | 6;
-
-interface ProjectJourneyState {
-  current: ProjectJourneyStage;
-  skipped: ProjectJourneyStage[];
-  qc: QcReviewJourney | null;
-}
-
-const PROJECT_JOURNEY: ReadonlyArray<{ id: ProjectJourneyStage; label: string }> = [
-  { id: 1, label: "Define" },
-  { id: 2, label: "Project Manager" },
-  { id: 3, label: "Plan" },
-  { id: 4, label: "Quality Control" },
-  { id: 5, label: "Plan Review" },
-  { id: 6, label: "Development" },
-];
-
 function ProjectGraph({
   project,
   onBack,
   onOpenProject,
   onProjectArchived,
+  onProjectDeleted,
   onLogout,
   user,
   onOpenAccount,
@@ -473,6 +456,7 @@ function ProjectGraph({
   onBack: () => void;
   onOpenProject: (project: ProjectSummary) => void;
   onProjectArchived: (projectId: string) => void;
+  onProjectDeleted: (projectId: string) => void;
   onLogout: (message: string) => void;
   user: CurrentUser | null;
   onOpenAccount: () => void;
@@ -526,11 +510,6 @@ function ProjectGraph({
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>(
     initialWorkRoute || initialConversationId ? "work" : "overview",
   );
-  const [projectJourney, setProjectJourney] = useState<ProjectJourneyState>(() => ({
-    current: project.status === "planned" ? 3 : initialWorkRoute || initialConversationId ? 2 : 1,
-    skipped: [],
-    qc: null,
-  }));
   const [mobileWorkspaceNavOpen, setMobileWorkspaceNavOpen] = useState(false);
   const previousInitialWorkRoute = useRef(initialWorkRoute);
   const suppressRouteExitReset = useRef(false);
@@ -669,11 +648,6 @@ function ProjectGraph({
   const selectWorkspaceTab = useCallback(
     (nextTab: WorkspaceTab) => {
       setWorkspaceTab(nextTab);
-      if (nextTab === "work") {
-        setProjectJourney((current) =>
-          current.current === 1 ? { current: 2, skipped: [], qc: null } : current,
-        );
-      }
       setMobileWorkspaceNavOpen(false);
       if (nextTab !== "work") {
         suppressRouteExitReset.current = true;
@@ -1418,12 +1392,6 @@ function ProjectGraph({
             </div>
           ) : null}
         </nav>
-        <div className="workspace-current-phase" aria-label="Current workflow phase">
-          <span>{projectJourney.current}</span>
-          <strong>
-            {PROJECT_JOURNEY.find((stage) => stage.id === projectJourney.current)?.label}
-          </strong>
-        </div>
         {user ? (
           <AuthenticatedHeaderActions
             user={user}
@@ -1637,18 +1605,6 @@ function ProjectGraph({
                   void loadLatestRelationalPlanningRun();
                   void loadPhaseExecution();
                 }}
-                onJourneyStageChange={(current, skipped = [], qc = null) =>
-                  setProjectJourney((previous) =>
-                    previous.current === current &&
-                    previous.skipped.length === skipped.length &&
-                    previous.skipped.every((stage, index) => stage === skipped[index]) &&
-                    previous.qc?.active === qc?.active &&
-                    previous.qc?.round === qc?.round &&
-                    previous.qc?.maxRounds === qc?.maxRounds
-                      ? previous
-                      : { current, skipped, qc },
-                  )
-                }
                 onConversationSelected={onConversationSelected}
                 onNewConversation={onNewConversation}
                 onUnauthorized={() => onLogout("Session expired. Sign in again.")}
@@ -1673,6 +1629,7 @@ function ProjectGraph({
               projectId={project.id}
               projectName={project.name}
               onProjectArchived={onProjectArchived}
+              onProjectDeleted={onProjectDeleted}
               onPreferencesChanged={setUpdatePreferences}
               onUnauthorized={() => onLogout("Session expired. Sign in again.")}
             />
@@ -2347,6 +2304,15 @@ export function App(): React.ReactElement {
     [activeProject?.id],
   );
 
+  const closeDeletedProject = useCallback((id: string) => {
+    setOpenProjects((current) => current.filter((project) => project.id !== id));
+    setActiveProject(null);
+    setWorkConversationRoute(null);
+    setRoutedProjectId(null);
+    setNewProjectRequested(true);
+    window.history.pushState(null, "", "/");
+  }, []);
+
   const openConversation = useCallback(
     (projectId: string, conversationId: string, replace = false) => {
       const route = { projectId, conversationId };
@@ -2559,6 +2525,7 @@ export function App(): React.ReactElement {
       onBack={openPortfolio}
       onOpenProject={openProject}
       onProjectArchived={closeProject}
+      onProjectDeleted={closeDeletedProject}
       onLogout={logout}
       user={user}
       onOpenAccount={openAccount}

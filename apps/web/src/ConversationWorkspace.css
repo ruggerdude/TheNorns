@@ -5943,12 +5943,31 @@
    development phases. These sit after the legacy sidebar rules. */
 .conversation-work-tab-plan.has-plan-workspace,
 .conversation-stage-workspace {
-  padding-left: 11.5rem;
+  padding-left: 12rem;
 }
 
 .conversation-stage-sidebar {
+  position: fixed;
+  z-index: 12;
+  top: 4rem;
+  bottom: 0.5rem;
+  left: 0.5rem;
   width: 11.5rem;
+  max-height: none;
   padding-inline: 0.55rem;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.conversation-workspace.has-phase-chats .conversation-thread-chrome {
+  margin-left: 12rem;
+}
+
+.conversation-workspace.has-phase-chats:has(.conversation-stage-sidebar.is-collapsed)
+  .conversation-thread-chrome {
+  margin-left: 4.25rem;
 }
 
 .conversation-stage-sidebar nav button {
@@ -5970,11 +5989,11 @@
 }
 
 .conversation-work-tab-development-chat {
-  padding-left: 11.5rem;
+  padding-left: 12rem;
 }
 
 .conversation-work-tab-development-chat:has(.conversation-stage-sidebar.is-collapsed) {
-  padding-left: 3.75rem;
+  padding-left: 4.25rem;
 }
 
 .conversation-development-phases {
@@ -6044,7 +6063,7 @@
   min-width: 0;
 }
 
-@media (max-width: 880px) {
+@media (max-width: 900px) {
   .conversation-work-tab-plan.has-plan-workspace,
   .conversation-stage-workspace,
   .conversation-work-tab-development-chat,
@@ -6056,8 +6075,18 @@
     position: relative;
     inset: auto;
     width: auto;
+    max-height: none;
     border-right: 0;
     border-bottom: 1px solid var(--line);
+    overflow: visible;
+    overscroll-behavior: auto;
+    scrollbar-gutter: auto;
+  }
+
+  .conversation-workspace.has-phase-chats .conversation-thread-chrome,
+  .conversation-workspace.has-phase-chats:has(.conversation-stage-sidebar.is-collapsed)
+    .conversation-thread-chrome {
+    margin-left: 0;
   }
 
   .conversation-stage-sidebar nav {

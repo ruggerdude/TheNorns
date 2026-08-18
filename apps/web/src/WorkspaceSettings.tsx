@@ -217,12 +217,14 @@ export function WorkspaceSettings({
   projectId,
   projectName,
   onProjectArchived,
+  onProjectDeleted,
   onPreferencesChanged,
   onUnauthorized,
 }: {
   projectId: string;
   projectName: string;
   onProjectArchived: (projectId: string) => void;
+  onProjectDeleted?: (projectId: string) => void;
   onPreferencesChanged: (preferences: UpdatePreferences) => void;
   onUnauthorized: () => void;
 }): React.ReactElement {
@@ -386,7 +388,7 @@ export function WorkspaceSettings({
         delete_github_repository: deleteGitHubRepository,
       });
       setDeleteDialogOpen(false);
-      onProjectArchived(projectId);
+      (onProjectDeleted ?? onProjectArchived)(projectId);
     } catch (caught) {
       if (caught instanceof UnauthorizedError) handleUnauthorized();
       else setDeleteError(caught instanceof Error ? caught : new Error(String(caught)));
