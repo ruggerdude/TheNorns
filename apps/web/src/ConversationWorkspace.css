@@ -4070,7 +4070,9 @@
 
 @media (max-width: 880px) {
   .conversation-work-tab-plan.has-plan-workspace,
-  .conversation-stage-workspace {
+  .conversation-stage-workspace,
+  .conversation-work-tab-development-chat,
+  .conversation-work-tab-development-chat:has(.conversation-stage-sidebar.is-collapsed) {
     padding-left: 0;
   }
 
@@ -5968,15 +5970,22 @@
 }
 
 .conversation-work-tab-development-chat {
-  padding-left: 0;
+  padding-left: 11.5rem;
+}
+
+.conversation-work-tab-development-chat:has(.conversation-stage-sidebar.is-collapsed) {
+  padding-left: 3.75rem;
 }
 
 .conversation-development-phases {
   position: relative;
   inset: auto;
   display: grid;
+  min-width: 0;
   width: auto;
-  overflow: visible;
+  max-width: 100%;
+  flex: 0 0 auto;
+  overflow: hidden;
   grid-template-columns: auto minmax(15rem, 1fr) minmax(10rem, 0.45fr);
   align-items: center;
   gap: 0.65rem 1rem;
@@ -6020,6 +6029,8 @@
 
 .conversation-development-phases ol {
   display: grid;
+  width: 100%;
+  min-width: 0;
   grid-auto-columns: minmax(11rem, 1fr);
   grid-auto-flow: column;
   gap: 0.45rem;
@@ -6027,9 +6038,17 @@
   padding-bottom: 0.2rem;
 }
 
+.conversation-development-phases li,
+.conversation-development-phases li button,
+.conversation-work-tab-development-chat > :not(.conversation-stage-sidebar) {
+  min-width: 0;
+}
+
 @media (max-width: 880px) {
   .conversation-work-tab-plan.has-plan-workspace,
-  .conversation-stage-workspace {
+  .conversation-stage-workspace,
+  .conversation-work-tab-development-chat,
+  .conversation-work-tab-development-chat:has(.conversation-stage-sidebar.is-collapsed) {
     padding-left: 0;
   }
 

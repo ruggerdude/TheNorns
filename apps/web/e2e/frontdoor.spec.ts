@@ -1087,6 +1087,132 @@ test("Phase plans use full-width sections instead of a squeezed three-column tab
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(640);
 });
 
+test("Development rail, phases, dialogue, and recovery controls never overlap", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1920, height: 900 });
+  await page.goto("/");
+  await page.setContent(`
+    <link rel="stylesheet" href="http://localhost:5173/src/styles.css" />
+    <link rel="stylesheet" href="http://localhost:5173/src/ConversationWorkspace.css" />
+    <main
+      class="conversation-has-phase-chats conversation-work-tab-development-chat"
+      style="height: 820px"
+    >
+      <aside class="conversation-stage-sidebar" aria-label="Phase chats">
+        <header><div><span class="eyebrow">Project chats</span><h2>Chats</h2></div></header>
+        <button class="conversation-stage-new"><span>＋</span><strong>New work</strong></button>
+        <nav>
+          <button data-state="complete"><span>1</span><strong>1. Define</strong></button>
+          <button data-state="complete"><span>2</span><strong>2. Project Manager</strong></button>
+          <button data-state="active"><span>6</span><strong>6. Development</strong></button>
+        </nav>
+      </aside>
+      <section class="conversation-development-phases" aria-label="Development phases">
+        <header><div><h2>Phases</h2></div></header>
+        <div class="conversation-development-phase-list">
+          <ol>
+            ${[
+              "Foundation: scaffold, auth, and database",
+              "Core engine: GP parsing, track picker, one-page cheat sheet",
+              "AI providers and settings",
+              "End-to-end verification against reference sheet",
+            ]
+              .map(
+                (title, index) => `
+                  <li data-state="${index === 0 ? "blocked" : "queued"}">
+                    <button><span class="conversation-development-phase-index">${index + 1}</span><span><strong>${title}</strong><small>${index === 0 ? "Blocked" : "Queued"}</small></span></button>
+                  </li>`,
+              )
+              .join("")}
+          </ol>
+        </div>
+      </section>
+      <section class="conversation-agent-dialogue" aria-label="Agent dialogue">
+        <header><div><h3>Agent dialogue</h3></div><span class="badge">Blocked</span></header>
+        <div class="conversation-development-recovery">
+          <div><h4>Development needs a decision</h4><p>The agent reached its turn limit before it finished.</p></div>
+          <div class="conversation-development-recovery-actions">
+            <button class="btn btn-primary">Continue current agent</button>
+            <div class="conversation-development-agent-switch">
+              <select class="select"><option>Claude Opus 4.8</option></select>
+              <button class="btn">Switch agent and retry</button>
+            </div>
+            <button class="btn btn-danger">Stop development</button>
+          </div>
+        </div>
+      </section>
+    </main>
+  `);
+  await page.waitForFunction(() => {
+    const sidebar = document.querySelector(".conversation-stage-sidebar");
+    return sidebar !== null && getComputedStyle(sidebar).position === "absolute";
+  });
+
+  for (const viewport of [
+    { width: 1920, height: 900 },
+    { width: 1280, height: 720 },
+    { width: 820, height: 900 },
+  ]) {
+    await page.setViewportSize(viewport);
+    const rail = page.getByRole("complementary", { name: "Phase chats" });
+    const phases = page.getByRole("region", { name: "Development phases" });
+    const dialogue = page.getByRole("region", { name: "Agent dialogue" });
+    const recovery = page.locator(".conversation-development-recovery");
+    const [railBox, phasesBox, dialogueBox, recoveryBox] = await Promise.all([
+      rail.boundingBox(),
+      phases.boundingBox(),
+      dialogue.boundingBox(),
+      recovery.boundingBox(),
+    ]);
+
+    expect(railBox).not.toBeNull();
+    expect(phasesBox).not.toBeNull();
+    expect(dialogueBox).not.toBeNull();
+    expect(recoveryBox).not.toBeNull();
+    if (viewport.width > 880) {
+      expect(phasesBox?.x ?? 0).toBeGreaterThanOrEqual(
+        (railBox?.x ?? 0) + (railBox?.width ?? 0) - 1,
+      );
+      expect(dialogueBox?.x ?? 0).toBeGreaterThanOrEqual(
+        (railBox?.x ?? 0) + (railBox?.width ?? 0) - 1,
+      );
+    } else {
+      expect(phasesBox?.x ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(1);
+      expect(phasesBox?.y ?? 0).toBeGreaterThanOrEqual(
+        (railBox?.y ?? 0) + (railBox?.height ?? 0) - 1,
+      );
+    }
+    expect(dialogueBox?.y ?? 0).toBeGreaterThanOrEqual(
+      (phasesBox?.y ?? 0) + (phasesBox?.height ?? 0) - 1,
+    );
+    expect(recoveryBox?.x ?? 0).toBeGreaterThanOrEqual(dialogueBox?.x ?? 0);
+    expect((recoveryBox?.x ?? 0) + (recoveryBox?.width ?? 0)).toBeLessThanOrEqual(viewport.width);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+      viewport.width,
+    );
+  }
+
+  await page.setViewportSize({ width: 1920, height: 900 });
+  await page
+    .getByRole("complementary", { name: "Phase chats" })
+    .evaluate((element) => element.classList.add("is-collapsed"));
+  await expect
+    .poll(
+      async () =>
+        (await page.getByRole("complementary", { name: "Phase chats" }).boundingBox())?.width ??
+        Number.POSITIVE_INFINITY,
+    )
+    .toBeLessThanOrEqual(64);
+  const [collapsedRailBox, collapsedPhasesBox] = await Promise.all([
+    page.getByRole("complementary", { name: "Phase chats" }).boundingBox(),
+    page.getByRole("region", { name: "Development phases" }).boundingBox(),
+  ]);
+  expect(collapsedPhasesBox?.x ?? 0).toBeGreaterThanOrEqual(
+    (collapsedRailBox?.x ?? 0) + (collapsedRailBox?.width ?? 0) - 1,
+  );
+});
+
 test("A project with focused work still opens on Overview from Portfolio", async ({ page }) => {
   await prepare(page, "github", { conversationWorkspace: true, focusedPlanningRun: true });
   await page.goto("/");
