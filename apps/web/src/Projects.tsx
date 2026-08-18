@@ -32,19 +32,7 @@ import {
   describeBlocker,
   parseGitHubRepoRef,
 } from "./projectSourceRequest";
-import {
-  Alert,
-  Badge,
-  Brand,
-  Button,
-  Field,
-  Input,
-  NavigationRailToggle,
-  Select,
-  Spinner,
-  TextArea,
-  useNavigationRail,
-} from "./ui";
+import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 import { useSingleFlightPolling } from "./useSingleFlightPolling";
 import {
   UPDATE_DETAIL_OPTIONS,
@@ -537,14 +525,14 @@ export function Projects({
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dialog, setDialog] = useState(newProjectRequested);
-  const { navigationRailCollapsed, toggleNavigationRail } = useNavigationRail();
+  const showProjectSetup = dialog || (projects !== null && projects.length === 0);
   // DESIGN P1 bug fix: the New Project view is a full page swapped in-place,
   // so the document keeps whatever scroll offset the dashboard had (and the
   // objective textarea's old autoFocus used to yank it further down). Land at
   // the top like a real page navigation.
   useEffect(() => {
-    if (dialog) window.scrollTo(0, 0);
-  }, [dialog]);
+    if (showProjectSetup) window.scrollTo(0, 0);
+  }, [showProjectSetup]);
   // Starting point and source are independent. New work can create a GitHub
   // repository or use an already-initialized local Git repository approved in
   // Connections; Existing work can adopt either source.
@@ -917,14 +905,14 @@ export function Projects({
   }, [onUnauthorized, selectedConnectionId]);
 
   useEffect(() => {
-    if (dialog && scenario === "existing_repo" && selectedConnectionId) {
+    if (showProjectSetup && scenario === "existing_repo" && selectedConnectionId) {
       void loadRepositories();
     }
-  }, [dialog, loadRepositories, scenario, selectedConnectionId]);
+  }, [loadRepositories, scenario, selectedConnectionId, showProjectSetup]);
 
   useSingleFlightPolling({
     enabled:
-      dialog &&
+      showProjectSetup &&
       localExecutionCapabilities.legacy_local_creation_available &&
       sourceKind === "local",
     intervalMs: 4_000,
@@ -1650,11 +1638,9 @@ export function Projects({
     localCloneReady;
   return (
     <div
-      className={`app-shell${dialog ? " project-setup-view" : ""}${
-        navigationRailCollapsed ? " navigation-collapsed" : ""
-      }`}
+      className={`app-shell global-compact-shell${showProjectSetup ? " project-setup-view" : ""}`}
     >
-      <header className="topbar">
+      <header className="topbar global-top-menu">
         <div className="topbar-main">
           <Brand onHome={openPortfolio} />
           <PortfolioMenu
@@ -1665,7 +1651,6 @@ export function Projects({
             onUnauthorized={onUnauthorized}
           />
         </div>
-        <NavigationRailToggle collapsed={navigationRailCollapsed} onToggle={toggleNavigationRail} />
         {user && onOpenUsage ? (
           <AuthenticatedHeaderActions
             user={user}
@@ -1683,7 +1668,10 @@ export function Projects({
           />
         ) : null}
       </header>
-      <main className="page-container project-dashboard core-portfolio-page" hidden={dialog}>
+      <main
+        className="page-container project-dashboard core-portfolio-page"
+        hidden={showProjectSetup}
+      >
         {error ? <Alert testId="projects-error">{error}</Alert> : null}
         <header className="page-header portfolio-page-header core-portfolio-header">
           <div>
@@ -2087,7 +2075,7 @@ export function Projects({
         </details>
       </main>
 
-      {dialog ? (
+      {showProjectSetup ? (
         <>
           <main className="page-container wizard-page" aria-label="New project">
             <section className="wizard-shell">

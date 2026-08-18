@@ -3484,7 +3484,10 @@ button:disabled {
      .card, with padding scaled up for a full-page form. */
   border: 1px solid var(--line);
   padding: clamp(1.5rem, 3vw, 2.5rem);
-  background: color-mix(in srgb, var(--surface) 95%, transparent);
+  background-color: #11182a;
+}
+:root[data-theme="light"] .wizard-shell {
+  background-color: #fff;
 }
 .project-setup-view .wizard-shell > .form-stack,
 .project-setup-view .wizard-shell > [data-testid="wizard-blocker-step"] {
@@ -8308,4 +8311,107 @@ h4 {
   > .workspace-page-work
   > .workspace-tab-panel:has(.conversation-workspace.is-chat-index) {
   overflow-y: auto;
+}
+
+/* Portfolio, project setup, and global account pages share the compact top
+   menu. The only desktop sidebar is the phase-chat rail inside a project. */
+@media (min-width: 901px) {
+  .global-compact-shell {
+    min-height: 100dvh;
+    padding-top: 3.5rem;
+    padding-left: 0;
+  }
+
+  .global-compact-shell > .global-top-menu {
+    position: fixed;
+    inset: 0 0 auto;
+    z-index: 40;
+    display: flex;
+    width: 100%;
+    height: 3.5rem;
+    padding: 0.35rem 0.7rem;
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 0.55rem;
+    border-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+  }
+
+  .global-compact-shell > .global-top-menu .topbar-main {
+    display: flex;
+    min-width: 0;
+    width: auto;
+    flex: 0 1 auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .global-compact-shell > .global-top-menu .brand {
+    min-height: 2.35rem;
+    padding: 0 0.7rem 0 0;
+    border-right: 1px solid rgba(255, 255, 255, 0.2);
+    border-bottom: 0;
+  }
+
+  .global-compact-shell > .global-top-menu .portfolio-navigation {
+    display: flex;
+    min-width: 0;
+    width: auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .global-compact-shell > .global-top-menu .portfolio-new-project,
+  .global-compact-shell > .global-top-menu .portfolio-switcher button {
+    width: auto;
+    min-height: 2.25rem;
+    padding: 0.35rem 0.6rem;
+    font-size: var(--text-xs);
+  }
+
+  .global-compact-shell > .global-top-menu .portfolio-switcher {
+    position: relative;
+    display: flex;
+  }
+
+  .global-compact-shell > .global-top-menu .portfolio-switcher-panel {
+    position: absolute;
+    top: calc(100% + 0.45rem);
+    left: 0;
+    z-index: 50;
+    width: min(20rem, calc(100vw - 2rem));
+  }
+
+  .global-compact-shell > .global-top-menu > .header-actions {
+    display: flex;
+    width: auto;
+    margin: 0 0 0 auto;
+    padding: 0;
+    align-items: center;
+    gap: 0.15rem;
+    border: 0;
+  }
+
+  .global-compact-shell
+    > .global-top-menu
+    > .header-actions
+    :is(.btn, .theme-toggle, .header-user-menu, .user-chip) {
+    width: auto;
+  }
+
+  .global-compact-shell > .global-top-menu .user-menu-popover {
+    top: calc(100% + 0.45rem);
+    right: 0;
+    bottom: auto;
+    left: auto;
+  }
+
+  .global-compact-shell > :is(.project-dashboard, .global-page-content) {
+    width: 100%;
+    max-width: none;
+    margin-inline: 0;
+  }
 }

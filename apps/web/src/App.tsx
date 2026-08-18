@@ -48,19 +48,7 @@ import {
   buildRelationalGraphReadModel,
 } from "./relationalGraphReadModel";
 import { ThemeToggle, useTheme } from "./theme";
-import {
-  Alert,
-  Badge,
-  Brand,
-  Button,
-  Field,
-  Input,
-  NavigationRailToggle,
-  Select,
-  Spinner,
-  TextArea,
-  useNavigationRail,
-} from "./ui";
+import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 import { type UpdatePreferences, resolveUpdatePreferences } from "./workspacePreferences";
 
 const GraphCanvas = lazy(() =>
@@ -2058,15 +2046,9 @@ function GlobalPageShell({
   onSignOut: () => void;
   children: ReactNode;
 }): React.ReactElement {
-  const { navigationRailCollapsed, toggleNavigationRail } = useNavigationRail();
-
   return (
-    <div
-      className={`app-shell global-page-shell${
-        navigationRailCollapsed ? " navigation-collapsed" : ""
-      }`}
-    >
-      <header className="topbar">
+    <div className="app-shell global-page-shell global-compact-shell">
+      <header className="topbar global-top-menu">
         <div className="topbar-main">
           <Brand onHome={onOpenPortfolio} />
           <PortfolioMenu
@@ -2077,7 +2059,6 @@ function GlobalPageShell({
             onUnauthorized={onSignOut}
           />
         </div>
-        <NavigationRailToggle collapsed={navigationRailCollapsed} onToggle={toggleNavigationRail} />
         <AuthenticatedHeaderActions
           user={user}
           activeView={page === "device-authorization" ? null : page}

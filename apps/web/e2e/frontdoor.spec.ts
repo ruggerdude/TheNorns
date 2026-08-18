@@ -623,6 +623,7 @@ async function clickUntilVisible(trigger: Locator, result: Locator) {
 
 async function openExistingProjectWizard(page: Page) {
   const existing = page.getByRole("button", { name: /^existing/i });
+  if (await existing.isVisible()) return existing;
   const newProject = page.getByRole("button", { name: "New project", exact: true });
   if (await newProject.isVisible()) {
     await clickUntilVisible(newProject, existing);
@@ -763,7 +764,11 @@ test("Directed adoption carries its direction into the brief-first phased journe
 test("New project creates from a name and lands in the workspace", async ({ page }) => {
   const observed = await prepare(page, "new");
   await page.goto("/");
-  await page.getByRole("button", { name: /new project/i }).click();
+
+  // A workspace without projects goes straight to setup. It must never expose
+  // the empty legacy Portfolio view first.
+  await expect(page.getByRole("main", { name: "New project" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Portfolio" })).toBeHidden();
 
   // DESIGN R2: setup replaces only the main content. The application rail
   // and its Portfolio/New project navigation remain stable.
@@ -778,10 +783,17 @@ test("New project creates from a name and lands in the workspace", async ({ page
     portfolioNavigation.getByRole("button", { name: "Portfolio", exact: true }),
   ).toBeVisible();
   await expect(page.getByText("Guided setup")).toHaveCount(0);
+  const globalTopMenu = page.locator(".global-compact-shell > .global-top-menu");
+  const globalTopMenuBox = await globalTopMenu.boundingBox();
+  expect(globalTopMenuBox?.x).toBe(0);
+  expect(globalTopMenuBox?.y).toBe(0);
+  expect(globalTopMenuBox?.width).toBe(page.viewportSize()?.width);
+  expect(globalTopMenuBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(58);
+  await expect(page.locator(".navigation-rail-toggle")).toHaveCount(0);
   const setupPage = await page.getByRole("main", { name: "New project" }).boundingBox();
   const setupWidth = setupPage?.width ?? 0;
   expect(setupWidth).toBeGreaterThan(900);
-  expect(setupWidth).toBeLessThanOrEqual(1216);
+  expect(setupWidth).toBeLessThanOrEqual(page.viewportSize()?.width ?? Number.POSITIVE_INFINITY);
 
   // The wizard shell carries card chrome, so it needs a card's breathing room.
   // It previously had padding: 0 and no surface, which put every label and
@@ -1261,10 +1273,10 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
   );
 });
 
-test("A project with focused work still opens on Overview from Portfolio", async ({ page }) => {
+test("A project with focused work still opens on Overview after adoption", async ({ page }) => {
   await prepare(page, "github", { conversationWorkspace: true, focusedPlanningRun: true });
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Portfolio", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Name of project" })).toBeVisible();
   await selectExistingGitHubRepository(page);
   await page.getByRole("button", { name: /adopt project/i }).click();
 
@@ -1423,7 +1435,7 @@ test("Project archiving lives only in project Settings", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Portfolio" })).toBeHidden();
 });
 
-test("Usage, Settings, and Admin use the regular application sidebar", async ({ page }) => {
+test("Usage, Settings, and Admin use the compact global top menu", async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 1080 });
   await prepare(page, "github");
   await page.goto("/");
@@ -1440,12 +1452,14 @@ test("Usage, Settings, and Admin use the regular application sidebar", async ({ 
   await expect(page.getByRole("navigation", { name: "Open projects" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Close", exact: true })).toHaveCount(0);
 
-  const globalRail = page.locator(".global-page-shell > .topbar");
-  const globalRailBox = await globalRail.boundingBox();
-  expect(globalRailBox).not.toBeNull();
-  expect(globalRailBox?.x).toBe(0);
-  expect(globalRailBox?.width).toBe(240);
-  expect(globalRailBox?.height).toBe(1080);
+  const globalTopMenu = page.locator(".global-page-shell > .global-top-menu");
+  const globalTopMenuBox = await globalTopMenu.boundingBox();
+  expect(globalTopMenuBox).not.toBeNull();
+  expect(globalTopMenuBox?.x).toBe(0);
+  expect(globalTopMenuBox?.y).toBe(0);
+  expect(globalTopMenuBox?.width).toBe(1920);
+  expect(globalTopMenuBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(58);
+  await expect(page.locator(".navigation-rail-toggle")).toHaveCount(0);
 
   await page.getByRole("button", { name: "Settings", exact: true }).click();
   await expect(page.getByTestId("account-panel")).toBeVisible();
@@ -1453,7 +1467,7 @@ test("Usage, Settings, and Admin use the regular application sidebar", async ({ 
     "aria-current",
     "page",
   );
-  await expect(globalRail).toBeVisible();
+  await expect(globalTopMenu).toBeVisible();
 
   await page.getByRole("button", { name: "Admin", exact: true }).click();
   await expect(page.getByTestId("admin-panel")).toBeVisible();
@@ -1461,7 +1475,7 @@ test("Usage, Settings, and Admin use the regular application sidebar", async ({ 
     "aria-current",
     "page",
   );
-  await expect(globalRail).toBeVisible();
+  await expect(globalTopMenu).toBeVisible();
 
   await page.getByRole("button", { name: "Show active projects" }).click();
   await page.getByRole("button", { name: "front-door-app" }).click();
