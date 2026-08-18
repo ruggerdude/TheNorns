@@ -5148,6 +5148,203 @@ describe("conversation workspace", () => {
     expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
   });
 
+  it("explains an automatic budget refusal once and retries the same task with a higher limit", async () => {
+    const execution = executionConversation();
+    const approvedVersion = planVersion({ status: "approved" });
+    const handoff = handoffFor(approvedVersion, execution.id);
+    const taskId = "task:phase%3Aphase-1:task-core-api";
+    const failure =
+      "runtime: the coding agent produced no commit because Claude Code returned an error result: API Error: 402 the run's remaining budget cannot cover this request";
+    let recovered = false;
+    let recoveryBody: Record<string, unknown> | null = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) {
+          return Response.json({
+            work_items: [
+              {
+                work_item: {
+                  ...workItem,
+                  status: "blocked",
+                  phase_id: "phase-1",
+                  execution_started_at: now,
+                },
+                conversations: [execution],
+              },
+            ],
+          });
+        }
+        if (url.endsWith(`/conversations/${execution.id}`)) {
+          return detailResponse([], null, null, {
+            workItem: {
+              ...workItem,
+              status: "blocked",
+              phase_id: "phase-1",
+              execution_started_at: now,
+            },
+            conversation: execution,
+            planVersions: [approvedVersion],
+            handoff,
+          });
+        }
+        if (url.endsWith(`/conversations/${execution.id}/execution`)) {
+          return Response.json({
+            project_id: projectId,
+            conversation_id: execution.id,
+            presentation: "active",
+            target: { execution_target_id: "grant-office", name: "Office Mac mini" },
+            run: {
+              run_id: recovered ? "run-budget-2" : "run-budget-1",
+              state: recovered ? "created" : "failed",
+              can_stop: recovered,
+              cancellation: null,
+            },
+          });
+        }
+        if (url.endsWith("/capabilities/execution-models")) {
+          return Response.json({
+            ready: true,
+            required_environment: [],
+            models: [
+              {
+                id: "gpt-5.6-sol",
+                provider: "openai",
+                label: "GPT-5.6 Sol",
+                available: true,
+                unavailable_reason: null,
+              },
+            ],
+          });
+        }
+        if (url.endsWith(`/phases/phase-1/tasks/${encodeURIComponent(taskId)}/recovery`)) {
+          recoveryBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          recovered = true;
+          return Response.json(
+            {
+              action: "retry",
+              replayed: false,
+              started: true,
+              phase_id: "phase-1",
+              task_id: taskId,
+              prior_run_id: "run-budget-1",
+              run_id: "run-budget-2",
+              attempt: 2,
+              dispatch_job_id: "dispatch-budget-2",
+              detail: "attempt 2 was queued for dispatch",
+            },
+            { status: 202 },
+          );
+        }
+        if (url.endsWith("/phases/phase-1/execution")) {
+          return Response.json({
+            schema_version: 2,
+            project_id: projectId,
+            phase: {
+              id: "phase-1",
+              objective_summary: "Deliver conversation-first planning",
+              status: "active",
+              completed_tasks: 0,
+              total_tasks: 1,
+            },
+            tasks: [
+              {
+                id: taskId,
+                aggregate_version: recovered ? 9 : 7,
+                title: "Core API",
+                state: recovered ? "assigned" : "failed",
+                complexity: "moderate",
+                risk: "medium",
+                dependencies: [],
+                assignment: {
+                  provider: "anthropic",
+                  model: "claude-sonnet-5",
+                  status: "active",
+                  budget_limit_usd: recovered ? 100 : 50,
+                },
+                cost: {
+                  spend_usd: 0.824514,
+                  input_tokens: 1200,
+                  output_tokens: 800,
+                  budget_usd: recovered ? 100 : 50,
+                  last_usage_at: now,
+                },
+                implementation_agent: {
+                  profile_id: "agent-claude",
+                  provider: "anthropic",
+                  model: "claude-sonnet-5",
+                  roles: ["implementation"],
+                },
+                reviewer_agent: null,
+                run: {
+                  id: recovered ? "run-budget-2" : "run-budget-1",
+                  state: recovered ? "created" : "failed",
+                  attempt: recovered ? 2 : 1,
+                  verification_status: "pending",
+                  commit_sha: null,
+                  failure_detail: recovered ? null : failure,
+                  published_branch: null,
+                  pull_request_url: null,
+                  publication_note: null,
+                },
+                failed_verification_commands: [],
+                evidence_count: 0,
+                reviews: [],
+              },
+            ],
+          });
+        }
+        if (url.includes(`/phases/phase-1/tasks/${encodeURIComponent(taskId)}/run-log`)) {
+          return Response.json({
+            run_id: recovered ? "run-budget-2" : "run-budget-1",
+            entries: [],
+            truncated: false,
+            total_entries: 0,
+          });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={execution.id}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "The automatic execution limit stopped this attempt",
+      }),
+    ).toBeVisible();
+    expect(screen.getByText(/you did not set it separately/i)).toBeVisible();
+    expect(screen.getByText(/actually used \$0\.82/i)).toBeVisible();
+    expect(screen.getAllByText(failure)).toHaveLength(1);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Switch agent and retry" })).toBeEnabled(),
+    );
+    expect(screen.getByRole("button", { name: "Stop development" })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "Increase limit to $100.00 and retry" }));
+    await waitFor(() =>
+      expect(recoveryBody).toMatchObject({
+        action: "retry",
+        failed_run_id: "run-budget-1",
+        expected_task_version: 7,
+        adjustment: { budget_limit_usd: 100 },
+      }),
+    );
+    expect(await screen.findByText("Preparing the task for the local agent.")).toBeVisible();
+    expect(
+      screen.queryByRole("heading", {
+        name: "The automatic execution limit stopped this attempt",
+      }),
+    ).not.toBeInTheDocument();
+  });
+
   it("matches plan phases to their task ids instead of whichever task row arrives first", async () => {
     const execution = executionConversation();
     const core = makeCoreApiModule();

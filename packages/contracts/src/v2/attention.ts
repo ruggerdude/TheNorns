@@ -176,6 +176,7 @@ export const V2PhaseExecution = z
       z
         .object({
           id: V2EntityId,
+          aggregate_version: z.number().int().positive().default(1),
           title: V2NonEmptyString,
           state: V2NonEmptyString,
           complexity: V2NonEmptyString,
@@ -186,9 +187,26 @@ export const V2PhaseExecution = z
               provider: V2NonEmptyString,
               model: V2NonEmptyString,
               status: V2NonEmptyString,
+              budget_limit_usd: z.number().nonnegative().default(0),
             })
             .strict()
             .nullable(),
+          cost: z
+            .object({
+              spend_usd: z.number().nonnegative().nullable(),
+              input_tokens: z.number().int().nonnegative().nullable(),
+              output_tokens: z.number().int().nonnegative().nullable(),
+              budget_usd: z.number().nonnegative().nullable(),
+              last_usage_at: V2IsoDateTime.nullable(),
+            })
+            .strict()
+            .default({
+              spend_usd: null,
+              input_tokens: null,
+              output_tokens: null,
+              budget_usd: null,
+              last_usage_at: null,
+            }),
           implementation_agent: V2AgentIdentity.nullable(),
           reviewer_agent: V2AgentIdentity.nullable(),
           run: z

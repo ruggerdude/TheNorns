@@ -219,6 +219,58 @@ export function getConversationPhaseExecution(
   );
 }
 
+export interface DevelopmentTaskRetryResult {
+  action: "retry";
+  replayed: boolean;
+  started: boolean;
+  phase_id: string;
+  task_id: string;
+  prior_run_id: string;
+  run_id: string | null;
+  attempt: number | null;
+  dispatch_job_id: string | null;
+  detail: string;
+}
+
+export interface DevelopmentTaskCancelResult {
+  action: "cancel";
+  replayed: boolean;
+  phase_id: string;
+  task_id: string;
+  prior_run_id: string;
+  phase_status: "cancelled";
+}
+
+export function recoverDevelopmentTask(
+  projectId: string,
+  phaseId: string,
+  taskId: string,
+  body:
+    | {
+        action: "retry";
+        failed_run_id: string;
+        expected_task_version: number;
+        idempotency_key: string;
+        adjustment?: {
+          budget_limit_usd?: number;
+          provider?: string;
+          model?: string;
+        };
+      }
+    | {
+        action: "cancel";
+        failed_run_id: string;
+        expected_task_version: number;
+        idempotency_key: string;
+        reason: string;
+      },
+): Promise<DevelopmentTaskRetryResult | DevelopmentTaskCancelResult> {
+  return requestJson(
+    `/api/v2/projects/${encodeURIComponent(projectId)}/phases/${encodeURIComponent(phaseId)}/tasks/${encodeURIComponent(taskId)}/recovery`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+}
+
 export async function getProjectRunCancellation(
   projectId: string,
   runId: string,

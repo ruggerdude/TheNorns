@@ -1039,7 +1039,7 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     expect(decision.rows).toEqual([{ reason_class: "failed_run", status: "open" }]);
   });
 
-  it("retries terminal work as immutable attempt N+1 and replays the recovery idempotently", async () => {
+  it("raises an automatic task limit, retries as attempt N+1, and replays idempotently", async () => {
     const scheduled = await schedule();
     const transactions = new PGliteTransactionRunner(pg);
     const dispatch = new Phase4DispatchRepository(transactions);
@@ -1072,6 +1072,16 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     const task = await pg.query<{ aggregate_version: number }>(
       "SELECT aggregate_version FROM tasks WHERE id='task-1'",
     );
+    await pg.query(
+      `INSERT INTO agent_profiles (
+         id, provider, runtime, model, reasoning_effort, roles, capabilities,
+         context_limit_tokens, security_restrictions, status, active_workload, cost_metadata
+       ) VALUES (
+         'agent-2','anthropic','claude_code','claude-sonnet-5',NULL,
+         '["implementation"]'::jsonb,'["typescript"]'::jsonb,200000,
+         '[]'::jsonb,'available',0,'{"billing_mode":"subscription"}'::jsonb
+       )`,
+    );
     const phaseLaunch = new PhaseLaunchService(
       transactions,
       coordinator,
@@ -1101,6 +1111,11 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       correlation_id: "correlation-retry",
       causation_id: scheduled.run_id,
       issued_at: "2026-07-16T20:05:00.000Z",
+      adjustment: {
+        budget_limit_usd: 25,
+        provider: "anthropic",
+        model: "claude-sonnet-5",
+      },
     };
     const first = await recovery.retry(input);
     expect(first).toMatchObject({
@@ -1154,20 +1169,36 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       reservations: number;
       jobs: number;
       recovery_audits: number;
+      assignment_budget: string | number;
+      phase_budget: string | number;
+      replacement_reservation: string | number;
+      replacement_agent: string;
     }>(
       `SELECT
          (SELECT count(*)::int FROM agent_runs WHERE task_id='task-1') AS runs,
          (SELECT count(*)::int FROM budget_reservations WHERE task_id='task-1') AS reservations,
          (SELECT count(*)::int FROM dispatch_jobs WHERE task_id='task-1') AS jobs,
          (SELECT count(*)::int FROM audit_events
-           WHERE audit_type='execution.recovery.applied') AS recovery_audits`,
+           WHERE audit_type='execution.recovery.applied') AS recovery_audits,
+         (SELECT budget_limit_usd FROM agent_assignments
+           WHERE id='assignment-1') AS assignment_budget,
+         (SELECT approved_budget_usd FROM phases WHERE id='phase-1') AS phase_budget,
+         (SELECT amount_usd FROM budget_reservations
+           WHERE run_id=$1) AS replacement_reservation,
+         (SELECT agent_profile_id FROM agent_assignments
+           WHERE id='assignment-1') AS replacement_agent`,
+      [first.run_id],
     );
-    expect(counts.rows[0]).toEqual({
+    expect(counts.rows[0]).toMatchObject({
       runs: 2,
       reservations: 2,
       jobs: 2,
       recovery_audits: 1,
     });
+    expect(Number(counts.rows[0]?.assignment_budget)).toBe(25);
+    expect(Number(counts.rows[0]?.phase_budget)).toBe(25);
+    expect(Number(counts.rows[0]?.replacement_reservation)).toBe(25);
+    expect(counts.rows[0]?.replacement_agent).toBe("agent-2");
   });
 
   it("safely cancels a terminal failed phase and makes the project phase slot available", async () => {

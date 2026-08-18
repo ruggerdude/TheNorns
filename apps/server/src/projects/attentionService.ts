@@ -1317,6 +1317,7 @@ export class AttentionService {
       );
       const tasks = await sql.query<{
         id: string;
+        aggregate_version: number;
         title: string;
         state: string;
         complexity: string;
@@ -1331,6 +1332,7 @@ export class AttentionService {
         reviewer_model: string | null;
         reviewer_roles: unknown;
         assignment_status: string | null;
+        assignment_budget_limit_usd: string | number | null;
         run_id: string | null;
         run_state: string | null;
         attempt: number | null;
@@ -1343,11 +1345,12 @@ export class AttentionService {
         command_results: unknown;
         evidence_count: number;
       }>(
-        `SELECT t.id, t.title, t.state, t.complexity, t.risk,
+        `SELECT t.id, t.aggregate_version, t.title, t.state, t.complexity, t.risk,
           COALESCE((SELECT jsonb_agg(d.predecessor_task_id ORDER BY d.predecessor_task_id)
                     FROM task_dependencies d WHERE d.successor_task_id=t.id),'[]'::jsonb) AS dependencies,
           profile.id AS implementation_profile_id, profile.provider, profile.model,
           profile.roles AS implementation_roles, assignment.status AS assignment_status,
+          assignment.budget_limit_usd AS assignment_budget_limit_usd,
           reviewer.id AS reviewer_profile_id, reviewer.provider AS reviewer_provider,
           reviewer.model AS reviewer_model, reviewer.roles AS reviewer_roles,
           run.id AS run_id, run.state AS run_state, run.attempt, run.verification_status,
@@ -1436,6 +1439,7 @@ export class AttentionService {
         phase: phaseRowForContract,
         tasks: tasks.rows.map((task) => ({
           id: task.id,
+          aggregate_version: task.aggregate_version,
           title: task.title,
           state: task.state,
           complexity: task.complexity,
@@ -1443,7 +1447,12 @@ export class AttentionService {
           dependencies: task.dependencies,
           assignment:
             task.provider && task.model && task.assignment_status
-              ? { provider: task.provider, model: task.model, status: task.assignment_status }
+              ? {
+                  provider: task.provider,
+                  model: task.model,
+                  status: task.assignment_status,
+                  budget_limit_usd: Number(task.assignment_budget_limit_usd ?? 0),
+                }
               : null,
           implementation_agent:
             task.implementation_profile_id && task.provider && task.model

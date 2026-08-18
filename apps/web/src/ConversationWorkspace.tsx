@@ -127,6 +127,7 @@ import {
   patchConversationPlanReview,
   proposeExecutionConversationAction,
   proposeHumanWaitAnswer,
+  recoverDevelopmentTask,
   renamePlanningWorkItem,
   resolveConversation,
   resumeConversationPlanReview,
@@ -3719,10 +3720,156 @@ function developmentRunStatusMessage(task: DevelopmentTask | null): string {
     case "failed":
     case "cancelled":
     case "expired":
-      return task.run.failure_detail?.trim() || `This attempt ${task.run.state}.`;
+      return `This attempt ${task.run.state}. Choose a recovery action below.`;
     default:
       return `Current run status: ${task.run.state.replaceAll("_", " ")}.`;
   }
+}
+
+function isAutomaticLimitFailure(detail: string | null | undefined): boolean {
+  return /(?:remaining budget|budget cannot cover|budget_exhausted|api error:\s*402)/i.test(
+    detail ?? "",
+  );
+}
+
+function usd(value: number): string {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD" }).format(value);
+}
+
+function suggestedDevelopmentLimit(current: number): number {
+  return Math.ceil(Math.max(current * 2, current + 25, 25) / 25) * 25;
+}
+
+function DevelopmentBudgetRecovery({
+  projectId,
+  phaseId,
+  task,
+  onRecovered,
+  onUnauthorized,
+}: {
+  projectId: string;
+  phaseId: string;
+  task: DevelopmentTask;
+  onRecovered: () => Promise<void>;
+  onUnauthorized: () => void;
+}): React.ReactElement {
+  const [models, setModels] = useState<ExecutionModelCapability[] | null>(null);
+  const [selectedModel, setSelectedModel] = useState("");
+  const [busy, setBusy] = useState<"budget" | "agent" | "stop" | null>(null);
+  const [recoveryError, setRecoveryError] = useState<string | null>(null);
+  const run = task.run;
+  const currentLimit = task.assignment?.budget_limit_usd ?? task.cost.budget_usd ?? 0;
+  const nextLimit = suggestedDevelopmentLimit(currentLimit);
+  const spent = task.cost.spend_usd;
+
+  useEffect(() => {
+    let current = true;
+    void getExecutionModelCapabilities()
+      .then((response) => {
+        if (!current) return;
+        const available = response.models.filter(
+          (model) =>
+            model.available &&
+            (model.provider !== task.assignment?.provider || model.id !== task.assignment?.model),
+        );
+        setModels(available);
+        setSelectedModel(available[0] ? `${available[0].provider}:${available[0].id}` : "");
+      })
+      .catch(() => {
+        if (current) setModels([]);
+      });
+    return () => {
+      current = false;
+    };
+  }, [task.assignment?.model, task.assignment?.provider]);
+
+  const recover = async (
+    action: "budget" | "agent" | "stop",
+    adjustment?: { budget_limit_usd?: number; provider?: string; model?: string },
+  ): Promise<void> => {
+    if (!run || busy) return;
+    setBusy(action);
+    setRecoveryError(null);
+    const unique = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Date.now();
+    try {
+      await recoverDevelopmentTask(projectId, phaseId, task.id, {
+        ...(action === "stop"
+          ? {
+              action: "cancel" as const,
+              reason: "Stopped by the user from the Development chat.",
+            }
+          : { action: "retry" as const, adjustment }),
+        failed_run_id: run.id,
+        expected_task_version: task.aggregate_version,
+        idempotency_key: `development-${action}-${run.id}-${unique}`,
+      });
+      await onRecovered();
+    } catch (caught) {
+      if (caught instanceof UnauthorizedError) onUnauthorized();
+      else setRecoveryError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const switchAgent = (): void => {
+    const [provider, ...modelParts] = selectedModel.split(":");
+    const model = modelParts.join(":");
+    if (!provider || !model) return;
+    void recover("agent", { provider, model });
+  };
+
+  return (
+    <section className="conversation-development-recovery" aria-labelledby="recovery-title">
+      <div>
+        <span className="eyebrow">Development needs a decision</span>
+        <h4 id="recovery-title">The automatic execution limit stopped this attempt</h4>
+        <p>
+          The Project Manager assigned this task a {usd(currentLimit)} safety limit from the
+          approved plan. You did not set it separately.
+          {spent === null
+            ? " No metered spend was available for this attempt."
+            : ` The attempt actually used ${usd(spent)} before the gateway needed more headroom for its next request.`}
+        </p>
+      </div>
+      <div className="conversation-development-recovery-actions">
+        <Button
+          variant="primary"
+          disabled={busy !== null}
+          onClick={() => void recover("budget", { budget_limit_usd: nextLimit })}
+        >
+          {busy === "budget" ? "Retrying…" : `Increase limit to ${usd(nextLimit)} and retry`}
+        </Button>
+        <div className="conversation-development-agent-switch">
+          <Select
+            aria-label="Replacement development agent"
+            value={selectedModel}
+            disabled={busy !== null || models === null || models.length === 0}
+            onChange={(event) => setSelectedModel(event.target.value)}
+          >
+            {models === null ? <option value="">Loading agents…</option> : null}
+            {models?.length === 0 ? <option value="">No other agent available</option> : null}
+            {models?.map((model) => (
+              <option key={`${model.provider}:${model.id}`} value={`${model.provider}:${model.id}`}>
+                {model.label}
+              </option>
+            ))}
+          </Select>
+          <Button disabled={busy !== null || !selectedModel} onClick={switchAgent}>
+            {busy === "agent" ? "Switching…" : "Switch agent and retry"}
+          </Button>
+        </div>
+        <Button variant="danger" disabled={busy !== null} onClick={() => void recover("stop")}>
+          {busy === "stop" ? "Stopping…" : "Stop development"}
+        </Button>
+      </div>
+      {recoveryError ? <Alert>{recoveryError}</Alert> : null}
+      <details>
+        <summary>Technical details</summary>
+        <p>{run?.failure_detail}</p>
+      </details>
+    </section>
+  );
 }
 
 function developmentStateLabel(state: DevelopmentPhaseState): string {
@@ -3816,6 +3963,7 @@ function DevelopmentAgentDialogue({
   phase,
   loading,
   error,
+  onRecovered,
   onUnauthorized,
 }: {
   projectId: string;
@@ -3823,6 +3971,7 @@ function DevelopmentAgentDialogue({
   phase: DevelopmentPhaseItem | null;
   loading: boolean;
   error: string | null;
+  onRecovered: () => Promise<void>;
   onUnauthorized: () => void;
 }): React.ReactElement {
   const task = phase?.task ?? null;
@@ -3909,7 +4058,15 @@ function DevelopmentAgentDialogue({
               onUnauthorized={onUnauthorized}
             />
           ) : null}
-          {task?.run?.failure_detail ? (
+          {task?.run && phaseId && isAutomaticLimitFailure(task.run.failure_detail) ? (
+            <DevelopmentBudgetRecovery
+              projectId={projectId}
+              phaseId={phaseId}
+              task={task}
+              onRecovered={onRecovered}
+              onUnauthorized={onUnauthorized}
+            />
+          ) : task?.run?.failure_detail ? (
             <Alert testId={`development-task-failure-${task.id}`}>{task.run.failure_detail}</Alert>
           ) : null}
         </div>
@@ -5916,6 +6073,17 @@ function ConversationThread({
                       phaseExecutionLoading || detail.work_item.status === "awaiting_approval"
                     }
                     error={phaseExecutionError}
+                    onRecovered={async () => {
+                      const phaseId = detail.work_item.phase_id;
+                      if (phaseId) {
+                        const next = await getConversationPhaseExecution(
+                          detail.work_item.project_id,
+                          phaseId,
+                        );
+                        setPhaseExecution(next);
+                      }
+                      await onRefreshSoft();
+                    }}
                     onUnauthorized={onUnauthorized}
                   />
                 ) : null}

@@ -8048,6 +8048,28 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           failed_run_id: z.string().trim().min(1),
           expected_task_version: z.number().int().positive(),
           idempotency_key: z.string().trim().min(1),
+          adjustment: z
+            .object({
+              budget_limit_usd: z.number().positive().max(10_000).optional(),
+              provider: z.string().trim().min(1).optional(),
+              model: z.string().trim().min(1).optional(),
+            })
+            .strict()
+            .superRefine((adjustment, ctx) => {
+              if ((adjustment.provider === undefined) !== (adjustment.model === undefined)) {
+                ctx.addIssue({
+                  code: z.ZodIssueCode.custom,
+                  message: "provider and model must be changed together",
+                });
+              }
+              if (adjustment.budget_limit_usd === undefined && adjustment.provider === undefined) {
+                ctx.addIssue({
+                  code: z.ZodIssueCode.custom,
+                  message: "a retry adjustment must change the budget or agent",
+                });
+              }
+            })
+            .optional(),
         })
         .strict(),
       z
@@ -8091,7 +8113,10 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       try {
         const result =
           body.data.action === "retry"
-            ? await recoveryActions.retry(common)
+            ? await recoveryActions.retry({
+                ...common,
+                ...(body.data.adjustment ? { adjustment: body.data.adjustment } : {}),
+              })
             : await recoveryActions.cancel({ ...common, reason: body.data.reason });
         if (!result.replayed) {
           stores.audit(

@@ -47,6 +47,11 @@ export interface Phase4RecoveryBaseInput {
   correlation_id: string;
   causation_id: string | null;
   issued_at: string;
+  adjustment?: {
+    budget_limit_usd?: number | undefined;
+    provider?: string | undefined;
+    model?: string | undefined;
+  };
   /**
    * The generic decision-resolution route owns closure when it orchestrates
    * recovery, so failed resolution can leave the decision open and retryable.
@@ -122,6 +127,20 @@ function errorBody(body: unknown): { code: string; detail: string } {
           ? record.error
           : "recovery could not be applied",
   };
+}
+
+function recoveryAdjustmentMatches(
+  stored: unknown,
+  expected: Phase4RecoveryBaseInput["adjustment"],
+): boolean {
+  if (!expected) return stored === null || stored === undefined;
+  if (typeof stored !== "object" || stored === null) return false;
+  const record = stored as Record<string, unknown>;
+  return (
+    record.budget_limit_usd === expected.budget_limit_usd &&
+    record.provider === expected.provider &&
+    record.model === expected.model
+  );
 }
 
 function assertExecuted(result: V2CommandExecutionResult): {
@@ -214,6 +233,7 @@ export class Phase4RecoveryActionService {
         failed_run_id: input.failed_run_id,
         expected_task_version: input.expected_task_version,
         retry_policy_ref: "retry-policy:terminal-failure",
+        adjustment: input.adjustment,
       });
       const execution = await executeV2ApplicationCommand({
         command,
@@ -262,6 +282,78 @@ export class Phase4RecoveryActionService {
             );
           }
 
+          if (retry.adjustment) {
+            const assignmentResult = await tx.executor.query<{
+              id: string;
+              budget_limit_usd: string | number;
+              agent_profile_id: string;
+            }>(
+              `SELECT assignment.id, assignment.budget_limit_usd,
+                      assignment.agent_profile_id
+                 FROM tasks task
+                 JOIN agent_assignments assignment
+                   ON assignment.id=task.designated_assignment_id
+                WHERE task.project_id=$1 AND task.phase_id=$2 AND task.id=$3
+                FOR UPDATE OF assignment`,
+              [retry.project_id, retry.phase_id, retry.task_id],
+            );
+            const assignment = assignmentResult.rows[0];
+            if (!assignment) {
+              return failure(
+                "recovery_assignment_not_found",
+                "the task no longer has an agent assignment to adjust",
+              );
+            }
+
+            let agentProfileId = assignment.agent_profile_id;
+            if (retry.adjustment.provider && retry.adjustment.model) {
+              const profileResult = await tx.executor.query<{ id: string }>(
+                `SELECT id FROM agent_profiles
+                  WHERE provider=$1 AND model=$2 AND status IN ('available','busy')
+                  ORDER BY CASE WHEN status='available' THEN 0 ELSE 1 END,
+                           active_workload, id
+                  LIMIT 1`,
+                [retry.adjustment.provider, retry.adjustment.model],
+              );
+              const profile = profileResult.rows[0];
+              if (!profile) {
+                return failure(
+                  "recovery_agent_unavailable",
+                  `${retry.adjustment.provider} ${retry.adjustment.model} is not available for development`,
+                );
+              }
+              agentProfileId = profile.id;
+            }
+
+            const currentBudget = Number(assignment.budget_limit_usd);
+            const nextBudget = retry.adjustment.budget_limit_usd ?? currentBudget;
+            if (
+              retry.adjustment.budget_limit_usd !== undefined &&
+              retry.adjustment.budget_limit_usd <= currentBudget
+            ) {
+              return failure(
+                "recovery_budget_not_increased",
+                `the new automatic limit must be greater than the current $${currentBudget.toFixed(2)} limit`,
+              );
+            }
+            await tx.executor.query(
+              `UPDATE agent_assignments
+                  SET agent_profile_id=$2, budget_limit_usd=$3,
+                      aggregate_version=aggregate_version+1, updated_at=$4
+                WHERE id=$1`,
+              [assignment.id, agentProfileId, nextBudget, retry.issued_at],
+            );
+            if (retry.adjustment.budget_limit_usd !== undefined) {
+              await tx.executor.query(
+                `UPDATE phases
+                    SET approved_budget_usd=GREATEST(approved_budget_usd,$2),
+                        aggregate_version=aggregate_version+1, updated_at=$3
+                  WHERE id=$1`,
+                [retry.phase_id, nextBudget, retry.issued_at],
+              );
+            }
+          }
+
           const actor = {
             actor_type: retry.actor.actor_type,
             actor_id: retry.actor.actor_id,
@@ -308,6 +400,7 @@ export class Phase4RecoveryActionService {
               task_id: retry.task_id,
               failed_run_id: retry.failed_run_id,
               prepared: true,
+              adjustment: retry.adjustment ?? null,
             },
           };
         },
@@ -553,7 +646,8 @@ export class Phase4RecoveryActionService {
         body.action !== "retry" ||
         body.task_id !== input.task_id ||
         body.failed_run_id !== input.failed_run_id ||
-        body.prepared !== true
+        body.prepared !== true ||
+        !recoveryAdjustmentMatches(body.adjustment, input.adjustment)
       ) {
         throw new Phase4RecoveryActionError(
           "idempotency_conflict",

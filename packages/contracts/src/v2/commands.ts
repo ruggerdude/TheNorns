@@ -89,6 +89,28 @@ export const V2RetryTaskCommand = V2ApplicationCommandBase.extend({
   failed_run_id: V2EntityId,
   expected_task_version: V2PositiveVersion,
   retry_policy_ref: V2EntityId,
+  adjustment: z
+    .object({
+      budget_limit_usd: z.number().positive().max(10_000).optional(),
+      provider: V2NonEmptyString.optional(),
+      model: V2NonEmptyString.optional(),
+    })
+    .strict()
+    .superRefine((adjustment, ctx) => {
+      if ((adjustment.provider === undefined) !== (adjustment.model === undefined)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "provider and model must be changed together",
+        });
+      }
+      if (adjustment.budget_limit_usd === undefined && adjustment.provider === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "a retry adjustment must change the budget or agent",
+        });
+      }
+    })
+    .optional(),
 }).strict();
 export type V2RetryTaskCommandT = z.infer<typeof V2RetryTaskCommand>;
 
