@@ -3702,9 +3702,16 @@
 .conversation-plan-workspace .conversation-plan-card h3,
 .qc-new-plan-review .conversation-plan-card h3 {
   max-width: 70rem;
-  font-size: clamp(1.05rem, 1.5vw, 1.28rem);
+  font-size: clamp(0.95rem, 1.1vw, 1.05rem);
   line-height: 1.42;
   letter-spacing: -0.02em;
+}
+
+.conversation-plan-workspace .conversation-plan-summary > div,
+.qc-new-plan-review .conversation-plan-summary > div {
+  justify-items: center;
+  background: color-mix(in srgb, var(--info) 8%, var(--surface));
+  text-align: center;
 }
 
 .conversation-plan-task {
@@ -3986,7 +3993,8 @@
 
 .conversation-archived-pm li {
   display: grid;
-  max-width: 62rem;
+  width: 100%;
+  max-width: none;
   gap: 0.35rem;
   padding: 0.85rem 1rem;
   border: 1px solid var(--line);
@@ -3995,9 +4003,9 @@
 }
 
 .conversation-archived-pm li[data-role="user"] {
-  justify-self: end;
-  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
-  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+  justify-self: stretch;
+  border-color: var(--line);
+  background: var(--surface);
 }
 
 .conversation-archived-pm li p {
@@ -6113,4 +6121,57 @@
 .conversation-has-phase-chats > .conversation-thread-root {
   min-height: 0;
   flex: 1;
+}
+
+/* The conversation title bar duplicated information already present in each
+   workspace. Keep its overflow menu available without reserving a full row. */
+.conversation-thread {
+  position: relative;
+}
+
+.conversation-thread-chrome {
+  position: absolute;
+  inset: 0 0 auto;
+  display: block;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  pointer-events: none;
+}
+
+.conversation-thread-chrome .conversation-header-identity {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.conversation-thread-chrome .conversation-sidebar-toggle {
+  display: none;
+}
+
+.conversation-thread-chrome .conversation-header-actions {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  display: flex;
+  width: auto;
+  pointer-events: auto;
+}
+
+.conversation-workspace.has-phase-chats .conversation-thread-chrome,
+.conversation-workspace.has-phase-chats:has(.conversation-stage-sidebar.is-collapsed)
+  .conversation-thread-chrome {
+  margin-left: 0;
+}
+
+@media (min-width: 901px) {
+  .conversation-stage-sidebar {
+    top: 0.5rem;
+  }
 }
