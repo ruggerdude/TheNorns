@@ -102,6 +102,12 @@ function activityForTool(name: string, input: unknown, worktreePath: string): st
       ? (input as Record<string, unknown>)
       : {};
   const file = visiblePath(fields.file_path ?? fields.path, worktreePath);
+  if (name === "Read") {
+    return file ? `Reading ${file}` : "Reading project files";
+  }
+  if (name === "Glob" || name === "Grep") {
+    return "Searching project files";
+  }
   if (name === "Edit" || name === "Write") {
     return file ? `Editing ${file}` : "Editing project files";
   }
@@ -123,14 +129,15 @@ function activityForTool(name: string, input: unknown, worktreePath: string): st
     if (/\b(?:build|lint|typecheck|tsc|check)\b/i.test(command)) {
       return `Verifying the implementation · ${command}`;
     }
-    return null;
+    return `Running a development command · ${command}`;
   }
-  // Reads, searches, and other internal bookkeeping made the old feed look
-  // busy without telling the user what changed.
   return null;
 }
 
-function visibleActivity(message: unknown, worktreePath: string): string[] {
+function visibleTranscript(
+  message: unknown,
+  worktreePath: string,
+): Array<{ kind: "message" | "tool"; text: string }> {
   if (!message || typeof message !== "object" || Array.isArray(message)) return [];
   const record = message as Record<string, unknown>;
   if (record.type !== "assistant") return [];
@@ -138,13 +145,18 @@ function visibleActivity(message: unknown, worktreePath: string): string[] {
   if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) return [];
   const content = (envelope as Record<string, unknown>).content;
   if (!Array.isArray(content)) return [];
-  const updates: string[] = [];
+  const updates: Array<{ kind: "message" | "tool"; text: string }> = [];
   for (const item of content) {
     if (!item || typeof item !== "object" || Array.isArray(item)) continue;
     const block = item as Record<string, unknown>;
+    if (block.type === "text" && typeof block.text === "string") {
+      const text = block.text.trim().slice(0, 2_000);
+      if (text) updates.push({ kind: "message", text });
+      continue;
+    }
     if (block.type === "tool_use" && typeof block.name === "string") {
       const activity = activityForTool(block.name, block.input, worktreePath);
-      if (activity) updates.push(activity);
+      if (activity) updates.push({ kind: "tool", text: activity });
     }
   }
   return updates;
@@ -436,8 +448,8 @@ export class ClaudeCodeRuntime implements CodingRuntime {
           observedStopReason = `permission_denied:${msg.tool_name}`;
         }
         if (msg.type === "assistant") {
-          for (const text of visibleActivity(message, request.worktreePath)) {
-            request.onLog?.(JSON.stringify({ type: "norns_activity", text }));
+          for (const entry of visibleTranscript(message, request.worktreePath)) {
+            request.onLog?.(JSON.stringify({ type: "norns_activity", ...entry }));
           }
         } else if (msg.type === "system") {
           request.onLog?.(JSON.stringify(message).slice(0, 500));

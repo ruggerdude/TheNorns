@@ -81,7 +81,7 @@ describe("RunLog polling", () => {
 
     expect(screen.queryByText(/old run output/)).not.toBeInTheDocument();
     expect(screen.getByText(/new run second line/)).toBeVisible();
-    expect(screen.getByText(/Development activity · 2 useful updates/)).toBeVisible();
+    expect(screen.getByText(/Development chat · 2 readable updates/)).toBeVisible();
     expect(mock.calls.some((call) => call.url.endsWith("/run-log?after=100"))).toBe(true);
     expect(mock.calls.filter((call) => call.url.endsWith("/run-log"))).toHaveLength(2);
     expect(mock.calls[0]?.url).toContain(
@@ -128,11 +128,21 @@ describe("readable RunLog activity", () => {
           text: "Editing apps/web/src/RunLog.tsx",
         }),
       },
+      {
+        sequence: 6,
+        occurred_at: "2026-07-25T17:00:05.000Z",
+        chunk: JSON.stringify({
+          type: "norns_activity",
+          kind: "message",
+          text: "I updated the run transcript and am verifying it now.",
+        }),
+      },
     ]);
 
     expect(activities.map((activity) => activity.text)).toEqual([
       "Running a development command",
       "Editing apps/web/src/RunLog.tsx",
+      "I updated the run transcript and am verifying it now.",
     ]);
   });
 
@@ -150,11 +160,18 @@ describe("readable RunLog activity", () => {
         chunk:
           '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"secret command contents",',
       },
+      {
+        sequence: 12,
+        occurred_at: "2026-07-25T17:00:02.000Z",
+        chunk:
+          '{"type":"assistant","message":{"content":[{"type":"text","text":"I created the scaffold.\\nNext I will verify the authentication flow',
+      },
     ]);
 
     expect(activities.map((activity) => activity.text)).toEqual([
-      "Inspecting project files",
+      "Reading project files",
       "Running a development command",
+      "I created the scaffold.\nNext I will verify the authentication flow…",
     ]);
     expect(activities.map((activity) => activity.text).join(" ")).not.toContain("private-file");
     expect(activities.map((activity) => activity.text).join(" ")).not.toContain("secret command");

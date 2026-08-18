@@ -45,15 +45,64 @@ type RunActivity = {
 };
 
 const LEGACY_TOOL_ACTIVITY: Record<string, string> = {
-  Read: "Inspecting project files",
-  Glob: "Inspecting project files",
-  Grep: "Inspecting project files",
+  Read: "Reading project files",
+  Glob: "Searching project files",
+  Grep: "Searching project files",
   Edit: "Editing project files",
   Write: "Editing project files",
   Bash: "Running a development command",
 };
 
-function legacyToolActivity(value: unknown, raw: string): string | null {
+type TranscriptFragment = Pick<RunActivity, "kind" | "text">;
+
+function decodedJsonStringPrefix(raw: string, marker: string, after = 0): string | null {
+  const markerAt = raw.indexOf(marker, after);
+  if (markerAt < 0) return null;
+  let cursor = markerAt + marker.length;
+  let value = "";
+  let closed = false;
+  while (cursor < raw.length && value.length < 2_000) {
+    const character = raw[cursor];
+    cursor += 1;
+    if (character === '"') {
+      closed = true;
+      break;
+    }
+    if (character !== "\\") {
+      value += character ?? "";
+      continue;
+    }
+    const escaped = raw[cursor];
+    cursor += 1;
+    if (escaped === undefined) break;
+    const simpleEscapes: Record<string, string> = {
+      '"': '"',
+      "\\": "\\",
+      "/": "/",
+      b: "\b",
+      f: "\f",
+      n: "\n",
+      r: "\r",
+      t: "\t",
+    };
+    if (escaped in simpleEscapes) {
+      value += simpleEscapes[escaped];
+      continue;
+    }
+    if (escaped === "u") {
+      const hex = raw.slice(cursor, cursor + 4);
+      if (!/^[0-9a-fA-F]{4}$/.test(hex)) break;
+      value += String.fromCharCode(Number.parseInt(hex, 16));
+      cursor += 4;
+    }
+  }
+  const text = value.trim();
+  if (!text) return null;
+  return closed ? text : `${text}…`;
+}
+
+function legacyTranscript(value: unknown, raw: string): TranscriptFragment[] {
+  const fragments: TranscriptFragment[] = [];
   const names: string[] = [];
   if (value && typeof value === "object" && !Array.isArray(value)) {
     const record = value as Record<string, unknown>;
@@ -64,6 +113,10 @@ function legacyToolActivity(value: unknown, raw: string): string | null {
         for (const item of content) {
           if (!item || typeof item !== "object" || Array.isArray(item)) continue;
           const block = item as Record<string, unknown>;
+          if (block.type === "text" && typeof block.text === "string") {
+            const text = block.text.trim().slice(0, 2_000);
+            if (text) fragments.push({ kind: "message", text });
+          }
           if (block.type === "tool_use" && typeof block.name === "string") {
             names.push(block.name);
           }
@@ -71,85 +124,82 @@ function legacyToolActivity(value: unknown, raw: string): string | null {
       }
     }
   }
-  // Older runners can truncate a large assistant SDK event before the JSON
-  // closes. Recover only a fixed allowlist of tool names from that envelope;
-  // never expose its free-form input, command, path, prompt, or reasoning.
-  if (names.length === 0 && /"type"\s*:\s*"assistant"/.test(raw)) {
+  const isAssistant = /"type"\s*:\s*"assistant"/.test(raw);
+  // Older runners truncated each Claude SDK event at 500 characters. Recover
+  // only visible text blocks and a fixed allowlist of tool names. Thinking
+  // blocks, signatures, prompts, tool inputs, commands, and paths stay hidden.
+  if (isAssistant && fragments.length === 0) {
+    const textBlockAt = raw.indexOf('"type":"text"');
+    if (textBlockAt >= 0) {
+      const text = decodedJsonStringPrefix(raw, '"text":"', textBlockAt);
+      if (text) fragments.push({ kind: "message", text });
+    }
+  }
+  if (names.length === 0 && isAssistant) {
     for (const match of raw.matchAll(/"name"\s*:\s*"(Read|Glob|Grep|Edit|Write|Bash)"/g)) {
       if (match[1]) names.push(match[1]);
     }
   }
-  const priority = ["Edit", "Write", "Bash", "Read", "Glob", "Grep"];
-  const name = priority.find((candidate) => names.includes(candidate));
-  return name ? (LEGACY_TOOL_ACTIVITY[name] ?? null) : null;
+  for (const name of [...new Set(names)]) {
+    const text = LEGACY_TOOL_ACTIVITY[name];
+    if (text) fragments.push({ kind: "tool", text });
+  }
+  return fragments;
 }
 
-function activityFromEntry(entry: RunLogEntryDto): RunActivity | null {
+function activitiesFromEntry(entry: RunLogEntryDto): RunActivity[] {
   const chunk = entry.chunk.trim();
-  if (!chunk) return null;
+  if (!chunk) return [];
+  const activities = (fragments: TranscriptFragment[]): RunActivity[] =>
+    fragments.map((fragment) => ({
+      sequence: entry.sequence,
+      occurredAt: entry.occurred_at,
+      ...fragment,
+    }));
   let value: unknown;
   try {
     value = JSON.parse(chunk);
   } catch {
-    const legacyActivity = legacyToolActivity(null, chunk);
-    if (legacyActivity) {
-      return {
-        sequence: entry.sequence,
-        occurredAt: entry.occurred_at,
-        kind: "tool",
-        text: legacyActivity,
-      };
-    }
-    if (chunk.startsWith("{")) return null;
-    return {
-      sequence: entry.sequence,
-      occurredAt: entry.occurred_at,
-      kind: "message",
-      text: chunk,
-    };
+    const legacy = legacyTranscript(null, chunk);
+    if (legacy.length > 0) return activities(legacy);
+    if (chunk.startsWith("{")) return [];
+    return activities([{ kind: "message", text: chunk }]);
   }
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
   const record = value as Record<string, unknown>;
   if (record.type === "norns_activity" && typeof record.text === "string") {
-    return {
-      sequence: entry.sequence,
-      occurredAt: entry.occurred_at,
-      kind: "tool",
-      text: record.text,
-    };
-  }
-  const legacyActivity = legacyToolActivity(record, chunk);
-  if (legacyActivity) {
-    return {
-      sequence: entry.sequence,
-      occurredAt: entry.occurred_at,
-      kind: "tool",
-      text: legacyActivity,
-    };
+    return activities([
+      {
+        kind: record.kind === "message" ? "message" : "tool",
+        text: record.text,
+      },
+    ]);
   }
   if (record.type === "result") {
-    return {
-      sequence: entry.sequence,
-      occurredAt: entry.occurred_at,
-      kind: "result",
-      text: record.is_error ? "Agent run ended with an error" : "Agent finished its implementation",
-    };
+    return activities([
+      {
+        kind: "result",
+        text: record.is_error
+          ? "Agent run ended with an error"
+          : "Agent finished its implementation",
+      },
+    ]);
   }
-  return null;
+  return activities(legacyTranscript(record, chunk));
 }
 
 export function readableRunActivities(entries: RunLogEntryDto[]): RunActivity[] {
   const activities: RunActivity[] = [];
   for (const entry of entries) {
-    const activity = activityFromEntry(entry);
-    if (!activity) continue;
-    const previous = activities.at(-1);
-    if (previous?.kind === "reasoning" && activity.kind === "reasoning") {
-      activities[activities.length - 1] = activity;
-      continue;
+    for (const activity of activitiesFromEntry(entry)) {
+      const previous = activities.at(-1);
+      if (previous?.kind === "reasoning" && activity.kind === "reasoning") {
+        activities[activities.length - 1] = activity;
+        continue;
+      }
+      if (previous?.kind === activity.kind && previous.text === activity.text) continue;
+      activities.push(activity);
     }
-    if (previous?.kind === activity.kind && previous.text === activity.text) continue;
-    activities.push(activity);
   }
   if (activities.length === 0 && entries.length > 0) {
     const latest = entries.at(-1);
@@ -280,9 +330,9 @@ export function RunLog({
   return (
     <details className="run-log" data-testid={`task-run-log-${taskId}`} open={active}>
       <summary>
-        Development activity
+        Development chat
         {totalEntries !== null
-          ? ` · ${activities.length} useful update${activities.length === 1 ? "" : "s"}`
+          ? ` · ${activities.length} readable update${activities.length === 1 ? "" : "s"}`
           : runId
             ? ""
             : " · not available"}
@@ -300,8 +350,8 @@ export function RunLog({
           </span>
         ) : (
           <ol className="run-activity-list" data-testid={`task-run-log-output-${taskId}`}>
-            {activities.map((activity) => (
-              <li key={activity.sequence} data-kind={activity.kind}>
+            {activities.map((activity, index) => (
+              <li key={`${activity.sequence}:${index}`} data-kind={activity.kind}>
                 <span aria-hidden="true" />
                 <p>{activity.text}</p>
                 <time dateTime={activity.occurredAt}>

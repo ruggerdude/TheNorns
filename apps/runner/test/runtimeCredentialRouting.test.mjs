@@ -378,3 +378,58 @@ test("omitted credential mode preserves legacy direct-construction SDK seams", a
   assert.equal(claude.outcome, "completed");
   assert.equal(claudeSpawned, true);
 });
+
+test("Claude emits readable messages and tool actions without hidden reasoning", async () => {
+  const logs = [];
+  const worktreePath = "/tmp/norns-readable-transcript";
+  const runtime = new ClaudeCodeRuntime({
+    queryImpl: () => ({
+      async interrupt() {},
+      async *[Symbol.asyncIterator]() {
+        yield {
+          type: "assistant",
+          message: {
+            content: [
+              { type: "thinking", thinking: "hidden chain of thought" },
+              { type: "text", text: "I found the configuration and am updating it now." },
+              {
+                type: "tool_use",
+                name: "Read",
+                input: { file_path: `${worktreePath}/src/config.ts` },
+              },
+              {
+                type: "tool_use",
+                name: "Bash",
+                input: { command: "pnpm test --token=must-not-appear" },
+              },
+            ],
+          },
+        };
+        yield { type: "result", subtype: "success", result: "done" };
+      },
+    }),
+  });
+
+  const result = await runtime.run({
+    runId: "run-readable-transcript",
+    worktreePath,
+    prompt: "Do the work.",
+    onLog: (chunk) => logs.push(JSON.parse(chunk)),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.deepEqual(logs, [
+    {
+      type: "norns_activity",
+      kind: "message",
+      text: "I found the configuration and am updating it now.",
+    },
+    { type: "norns_activity", kind: "tool", text: "Reading src/config.ts" },
+    {
+      type: "norns_activity",
+      kind: "tool",
+      text: "Running tests · pnpm test --token=[redacted]",
+    },
+  ]);
+  assert.doesNotMatch(JSON.stringify(logs), /hidden chain of thought|must-not-appear/);
+});

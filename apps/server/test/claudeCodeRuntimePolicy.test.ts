@@ -94,7 +94,16 @@ describe("Claude Code unattended execution policy", () => {
     });
 
     expect(logs.map((line) => JSON.parse(line))).toEqual([
-      { type: "norns_activity", text: "Running tests · pnpm test --filter web" },
+      {
+        type: "norns_activity",
+        kind: "tool",
+        text: "Reading apps/web/src/App.tsx",
+      },
+      {
+        type: "norns_activity",
+        kind: "tool",
+        text: "Running tests · pnpm test --filter web",
+      },
     ]);
     expect(logs.join(" ")).not.toContain("/isolated/worktree");
   });
