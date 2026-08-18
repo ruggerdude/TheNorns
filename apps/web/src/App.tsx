@@ -2290,7 +2290,7 @@ export function App(): React.ReactElement {
     setActiveProject(null);
     setWorkConversationRoute(null);
     setRoutedProjectId(null);
-    setNewProjectRequested(true);
+    setNewProjectRequested(false);
     window.history.pushState(null, "", "/");
   }, []);
 

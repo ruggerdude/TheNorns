@@ -765,10 +765,12 @@ test("New project creates from a name and lands in the workspace", async ({ page
   const observed = await prepare(page, "new");
   await page.goto("/");
 
-  // A workspace without projects goes straight to setup. It must never expose
-  // the empty legacy Portfolio view first.
+  // Portfolio remains the stable landing page even before the first project.
+  await expect(page.getByRole("heading", { name: "Portfolio", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "No projects yet" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create your first project" })).toBeVisible();
+  await page.getByRole("button", { name: "New project", exact: true }).first().click();
   await expect(page.getByRole("main", { name: "New project" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Portfolio" })).toBeHidden();
 
   // DESIGN R2: setup replaces only the main content. The application rail
   // and its Portfolio/New project navigation remain stable.
@@ -1276,6 +1278,7 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
 test("A project with focused work still opens on Overview after adoption", async ({ page }) => {
   await prepare(page, "github", { conversationWorkspace: true, focusedPlanningRun: true });
   await page.goto("/");
+  await page.getByRole("button", { name: "New project", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Name of project" })).toBeVisible();
   await selectExistingGitHubRepository(page);
   await page.getByRole("button", { name: /adopt project/i }).click();
@@ -1287,6 +1290,10 @@ test("A project with focused work still opens on Overview after adoption", async
     .getByRole("navigation", { name: "Portfolio navigation" });
   await portfolioNavigation.getByRole("button", { name: "Portfolio", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Portfolio", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Portfolio overview" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Status", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Create project" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Enter front-door-app" })).toBeVisible();
   await page.getByRole("button", { name: "Show active projects" }).click();
   await page.getByRole("button", { name: "front-door-app", exact: true }).click();
 
@@ -1430,9 +1437,9 @@ test("Project archiving lives only in project Settings", async ({ page }) => {
   await deleteDialog.getByRole("button", { name: "Keep GitHub repository instead" }).click();
   await deleteDialog.getByRole("button", { name: "Yes, delete project" }).click();
   await expect(deleteDialog).toBeHidden();
-  await expect(page.getByRole("main", { name: "New project" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Name of project" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Portfolio" })).toBeHidden();
+  await expect(page.getByRole("heading", { name: "Portfolio", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "No projects yet" })).toBeVisible();
+  await expect(page.getByRole("main", { name: "New project" })).toBeHidden();
 });
 
 test("Usage, Settings, and Admin use the compact global top menu", async ({ page }) => {

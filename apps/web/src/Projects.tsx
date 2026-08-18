@@ -390,116 +390,6 @@ async function requestVerb(
   }
 }
 
-export function AttentionDecisionForm({
-  item,
-  busy,
-  onResolve,
-}: {
-  item: AttentionItemDto & { decision: NonNullable<AttentionItemDto["decision"]> };
-  busy: boolean;
-  onResolve: (input: {
-    selectedOptionId: string;
-    rationale: string;
-    directionTarget: string;
-    directionText: string;
-    idempotencyKey: string;
-  }) => Promise<void>;
-}): React.ReactElement {
-  const [selectedOptionId, setSelectedOptionId] = useState(item.decision.recommendation_option_id);
-  const [rationale, setRationale] = useState("");
-  const [directionTarget, setDirectionTarget] = useState("project_manager");
-  const [directionText, setDirectionText] = useState("");
-  const [idempotencyKey] = useState(
-    () => `decision-${item.decision.decision_point_id}-${globalThis.crypto.randomUUID()}`,
-  );
-  const recoveryDecision =
-    item.decision.options.some((option) => option.id === "retry") &&
-    item.decision.options.some((option) => option.id === "cancel");
-
-  return (
-    <section className="decision-response" aria-label={`Respond to ${item.title}`}>
-      <div className="decision-options" role="radiogroup" aria-label="Decision options">
-        {item.decision.options.map((option) => {
-          const recommended = option.id === item.decision.recommendation_option_id;
-          return (
-            <label className={selectedOptionId === option.id ? "is-selected" : ""} key={option.id}>
-              <input
-                type="radio"
-                name={`decision-${item.decision.decision_point_id}`}
-                value={option.id}
-                checked={selectedOptionId === option.id}
-                onChange={() => setSelectedOptionId(option.id)}
-              />
-              <span>
-                <strong>{option.label}</strong>
-                {recommended ? <Badge tone="info">Recommended</Badge> : null}
-                <small>
-                  Impact: {option.impact} · Risk: {option.risk}
-                </small>
-              </span>
-            </label>
-          );
-        })}
-      </div>
-      <Field label="Decision rationale">
-        <TextArea
-          value={rationale}
-          placeholder="Explain the strategic judgment so it becomes part of project memory…"
-          onChange={(event) => setRationale(event.target.value)}
-        />
-      </Field>
-      <div className="decision-direction-grid">
-        <Field label="Direct subsequent work to">
-          <Select
-            value={directionTarget}
-            onChange={(event) => setDirectionTarget(event.target.value)}
-          >
-            <option value="project_manager">Project Manager</option>
-            <option value="implementation_agent">Implementation Agent</option>
-            <option value="reviewer">QC Reviewer</option>
-            <option value="all_agents">All agents</option>
-          </Select>
-        </Field>
-        <Field label="Optional direction for subsequent work">
-          <TextArea
-            value={directionText}
-            placeholder="Constraints or instructions for the next orchestration/rework step…"
-            onChange={(event) => setDirectionText(event.target.value)}
-          />
-        </Field>
-      </div>
-      <p className="meta">
-        {recoveryDecision
-          ? "Retry starts a fresh fenced attempt. Cancel phase closes the phase and every unfinished task."
-          : "Direction is recorded in project memory. Delivery to the selected agent remains pending until a coordinator context-assembly step consumes it; active runs are not interrupted."}
-      </p>
-      <Button
-        variant="primary"
-        disabled={busy || !selectedOptionId || !rationale.trim()}
-        onClick={() =>
-          void onResolve({
-            selectedOptionId,
-            rationale: rationale.trim(),
-            directionTarget,
-            directionText: directionText.trim(),
-            idempotencyKey,
-          })
-        }
-      >
-        {busy
-          ? recoveryDecision
-            ? "Applying recovery…"
-            : "Recording decision…"
-          : recoveryDecision && selectedOptionId === "retry"
-            ? "Retry safely"
-            : recoveryDecision && selectedOptionId === "cancel"
-              ? "Cancel phase"
-              : "Resolve decision"}
-      </Button>
-    </section>
-  );
-}
-
 export function Projects({
   onOpenProject,
   onUnauthorized,
@@ -525,7 +415,7 @@ export function Projects({
   const [projects, setProjects] = useState<ProjectSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dialog, setDialog] = useState(newProjectRequested);
-  const showProjectSetup = dialog || (projects !== null && projects.length === 0);
+  const showProjectSetup = Boolean(dialog);
   // DESIGN P1 bug fix: the New Project view is a full page swapped in-place,
   // so the document keeps whatever scroll offset the dashboard had (and the
   // objective textarea's old autoFocus used to yank it further down). Land at
@@ -582,8 +472,6 @@ export function Projects({
   const [creating, setCreating] = useState(false);
   const [creationStatus, setCreationStatus] = useState<string | null>(null);
   const [attention, setAttention] = useState<PortfolioAttentionDto | null>(null);
-  const [attentionBusy, setAttentionBusy] = useState<string | null>(null);
-  const [resumePollIssue, setResumePollIssue] = useState<string | null>(null);
   const [roundsCount, setRoundsCount] = useState(1);
   // FRONT DOOR P2b: reviewer selector. "auto" means no explicit override
   // (the server's automatic opposite-provider default); any other value is
@@ -710,7 +598,7 @@ export function Projects({
   // portfolio loads. Ongoing portfolio status comes from the single aggregate
   // /attention poll below; repeating this fan-out used to issue one expensive
   // resume request per project every 15 seconds.
-  const resumePolling = useSingleFlightPolling({
+  useSingleFlightPolling({
     enabled: Boolean(projects?.length),
     intervalMs: null,
     maxBackoffMs: 120_000,
@@ -774,7 +662,6 @@ export function Projects({
       return { projectList, settled };
     },
     onSuccess: ({ projectList, settled }) => {
-      const failed = settled.filter((outcome) => outcome.status === "rejected").length;
       setResumeById((current) => {
         const next: Record<string, DashboardResumeSummary> = {};
         for (let index = 0; index < settled.length; index += 1) {
@@ -790,11 +677,6 @@ export function Projects({
         }
         return next;
       });
-      setResumePollIssue(
-        failed > 0
-          ? `${failed} project update${failed === 1 ? "" : "s"} failed; showing last known progress.`
-          : null,
-      );
     },
     onError: (pollError) => {
       if (pollError instanceof UnauthorizedError) onUnauthorized();
@@ -804,7 +686,6 @@ export function Projects({
   useEffect(() => {
     if (projects?.length === 0) {
       setResumeById({});
-      setResumePollIssue(null);
     }
   }, [projects]);
 
@@ -983,7 +864,7 @@ export function Projects({
     },
   });
 
-  const attentionPolling = useSingleFlightPolling({
+  useSingleFlightPolling({
     intervalMs: 10_000,
     maxBackoffMs: 120_000,
     resourceKey: "portfolio-attention",
@@ -1000,92 +881,6 @@ export function Projects({
       if (pollError instanceof UnauthorizedError) onUnauthorized();
     },
   });
-  const refreshAttention = attentionPolling.refresh;
-
-  const dispositionAttention = useCallback(
-    async (item: AttentionItemDto, disposition: "acknowledged" | "snoozed") => {
-      setAttentionBusy(item.key);
-      try {
-        const response = await fetch("/api/v2/attention/disposition", {
-          method: "POST",
-          headers: authHeaders(true),
-          body: JSON.stringify({
-            item_key: item.key,
-            condition_fingerprint: item.condition_fingerprint,
-            disposition,
-            snoozed_until:
-              disposition === "snoozed" ? new Date(Date.now() + 60 * 60_000).toISOString() : null,
-          }),
-        });
-        if (response.status === 401) throw new UnauthorizedError();
-        if (!response.ok)
-          throw new ApiError("Attention item changed; refresh and try again", response.status);
-        await refreshAttention();
-      } catch (error) {
-        error instanceof UnauthorizedError
-          ? onUnauthorized()
-          : setError(error instanceof Error ? error.message : String(error));
-      } finally {
-        setAttentionBusy(null);
-      }
-    },
-    [onUnauthorized, refreshAttention],
-  );
-
-  const resolveDecision = useCallback(
-    async (
-      item: AttentionItemDto,
-      input: {
-        selectedOptionId: string;
-        rationale: string;
-        directionTarget: string;
-        directionText: string;
-        idempotencyKey: string;
-      },
-    ) => {
-      const decision = item.decision;
-      if (!decision) return;
-      setAttentionBusy(item.key);
-      try {
-        const response = await fetch(
-          `/api/v2/projects/${item.project_id}/decision-points/${encodeURIComponent(decision.decision_point_id)}/resolve`,
-          {
-            method: "POST",
-            headers: authHeaders(true),
-            body: JSON.stringify({
-              expected_condition_fingerprint: decision.condition_fingerprint,
-              selected_option_id: input.selectedOptionId,
-              rationale: input.rationale,
-              direction_target: input.directionTarget,
-              direction_text: input.directionText,
-              idempotency_key: input.idempotencyKey,
-            }),
-          },
-        );
-        if (response.status === 401) throw new UnauthorizedError();
-        if (!response.ok) {
-          const body = (await response.json().catch(() => ({}))) as {
-            message?: string;
-            detail?: string;
-          };
-          throw new ApiError(
-            body.message ??
-              body.detail ??
-              "Decision changed; review the latest options and try again",
-            response.status,
-          );
-        }
-        await refreshAttention();
-      } catch (error) {
-        error instanceof UnauthorizedError
-          ? onUnauthorized()
-          : setError(error instanceof Error ? error.message : String(error));
-      } finally {
-        setAttentionBusy(null);
-      }
-    },
-    [onUnauthorized, refreshAttention],
-  );
 
   // Close the front door around a project that is ready to open. Creation is
   // inserted into the dashboard earlier so a later planning failure never
@@ -1546,24 +1341,10 @@ export function Projects({
     attention?.counts.active_runs ??
     Object.values(resumeById).reduce((sum, resume) => sum + resume.agents_active, 0);
   const actionableAttention = attention?.items.filter(isActionableAttention) ?? [];
-  const blockedProjects =
-    attention?.projects.filter((project) => project.health === "blocked").length ??
-    Object.values(resumeById).filter((resume) => resume.phases.some((phase) => phase.blocked))
-      .length;
   const hasStatusData =
     attention !== null ||
     Object.keys(resumeById).length > 0 ||
     (projects !== null && projects.length === 0);
-  const portfolioState = !hasStatusData
-    ? "Status unavailable"
-    : actionableAttention.length > 0 ||
-        (attention?.counts.approvals ?? 0) > 0 ||
-        (attention?.counts.blockers ?? 0) > 0 ||
-        blockedProjects > 0
-      ? "Needs attention"
-      : activeAgents > 0
-        ? "Work in progress"
-        : "Ready";
   const connectedGitHub =
     githubStatus?.connections.filter((connection) => connection.status === "connected") ?? [];
   const selectedConnection = connectedGitHub.find(
@@ -1675,215 +1456,53 @@ export function Projects({
         {error ? <Alert testId="projects-error">{error}</Alert> : null}
         <header className="page-header portfolio-page-header core-portfolio-header">
           <div>
-            <div className="eyebrow">Workspace overview</div>
             <h1>Portfolio</h1>
-            <p>Monitor active work, resolve exceptions, and open any project from one view.</p>
+            <p>Your projects, their current state, and the next place to work.</p>
           </div>
+          <Button variant="primary" onClick={openNewProject}>
+            Create project
+          </Button>
         </header>
-        <section
-          className="core-portfolio-status"
-          aria-labelledby="attention-heading"
-          aria-label="Portfolio summary"
+        {projects !== null && projects.length > 0 ? (
+          <section className="portfolio-glance" aria-label="Portfolio overview">
+            <div>
+              <strong>{projects.length}</strong>
+              <span>{projects.length === 1 ? "Project" : "Projects"}</span>
+            </div>
+            <div>
+              <strong>{activeAgents}</strong>
+              <span>Active now</span>
+            </div>
+            <div className={actionableAttention.length > 0 ? "needs-attention" : ""}>
+              <strong>{hasStatusData ? actionableAttention.length : "—"}</strong>
+              <span>{hasStatusData ? "Need attention" : "Status unavailable"}</span>
+            </div>
+          </section>
+        ) : null}
+        <div
+          className="project-toolbar core-project-toolbar"
+          hidden={projects === null || projects.length === 0}
         >
-          <div className="core-portfolio-status-header">
-            <div>
-              <div className="core-status-title-row">
-                <h2 id="attention-heading">Status</h2>
-                <Badge
-                  tone={
-                    portfolioState === "Needs attention"
-                      ? "danger"
-                      : portfolioState === "Work in progress"
-                        ? "success"
-                        : portfolioState === "Status unavailable"
-                          ? "warn"
-                          : "info"
-                  }
-                >
-                  {portfolioState}
-                </Badge>
-              </div>
-              <p>
-                {!hasStatusData
-                  ? "Current status is unavailable"
-                  : actionableAttention.length > 0
-                    ? `${actionableAttention.length} item${actionableAttention.length === 1 ? "" : "s"} need review`
-                    : activeAgents > 0
-                      ? "Work is moving without intervention"
-                      : "Ready for the next project"}
-              </p>
-            </div>
-            <p
-              className="core-refresh-status"
-              data-testid="portfolio-refresh-status"
-              aria-live="polite"
-            >
-              {attentionPolling.error || resumePolling.error || resumePollIssue
-                ? `Refresh issue · showing last known data${
-                    attentionPolling.lastSuccessAt
-                      ? ` from ${attentionPolling.lastSuccessAt.toLocaleTimeString()}`
-                      : ""
-                  }.`
-                : attentionPolling.lastSuccessAt
-                  ? `Updated ${attentionPolling.lastSuccessAt.toLocaleTimeString([], {
-                      hour: "numeric",
-                      minute: "2-digit",
-                    })}`
-                  : "Refreshing status…"}
-            </p>
-          </div>
-
-          <div className="core-portfolio-metrics" aria-label="Portfolio attention summary">
-            <div>
-              <span>Projects</span>
-              <strong>{projects?.length ?? "—"}</strong>
-            </div>
-            <div>
-              <span>Active runs</span>
-              <strong>{attention?.counts.active_runs ?? activeAgents}</strong>
-            </div>
-            <div className={(attention?.counts.decisions ?? 0) > 0 ? "is-warning" : ""}>
-              <span>Decisions</span>
-              <strong>{attention?.counts.decisions ?? 0}</strong>
-            </div>
-            <div
-              className={(attention?.counts.blockers ?? blockedProjects) > 0 ? "is-critical" : ""}
-            >
-              <span>Blockers</span>
-              <strong>{attention?.counts.blockers ?? blockedProjects}</strong>
-            </div>
-          </div>
-
-          {attention ? (
-            attention.items.length ? (
-              <div className="attention-list core-attention-list" data-testid="attention-list">
-                {attention.items.map((item) => (
-                  <article className={`attention-item severity-${item.severity}`} key={item.key}>
-                    <div className="attention-item-main">
-                      <div className="attention-item-labels">
-                        <Badge
-                          tone={
-                            item.severity === "critical"
-                              ? "danger"
-                              : item.severity === "high"
-                                ? "warn"
-                                : "default"
-                          }
-                        >
-                          {item.severity}
-                        </Badge>
-                        <span>{item.project_name}</span>
-                        <span>·</span>
-                        <span>{item.kind.replaceAll("_", " ")}</span>
-                      </div>
-                      <h3>{item.title}</h3>
-                      <p>{item.summary}</p>
-                      <details>
-                        <summary>Why this needs judgment</summary>
-                        <p>{item.explanation}</p>
-                        <p>
-                          <strong>Recommendation:</strong> {item.recommendation}
-                        </p>
-                        <p>
-                          <strong>Impact:</strong> {item.impact}
-                        </p>
-                        <p>
-                          <strong>Intended outcome:</strong> {item.resumes}
-                        </p>
-                        <p className="meta">
-                          The decision is recorded immediately. Any task-state change or resumed
-                          work occurs through a subsequent coordinator handoff.
-                        </p>
-                        {item.tradeoffs.length ? (
-                          <ul>
-                            {item.tradeoffs.map((tradeoff) => (
-                              <li key={tradeoff}>{tradeoff}</li>
-                            ))}
-                          </ul>
-                        ) : null}
-                      </details>
-                      {item.decision ? (
-                        <AttentionDecisionForm
-                          item={{ ...item, decision: item.decision }}
-                          busy={attentionBusy === item.key}
-                          onResolve={(input) => resolveDecision(item, input)}
-                        />
-                      ) : item.kind === "decision" ? (
-                        <Alert>
-                          Open the project to inspect the affected task. This decision cannot be
-                          cleared by acknowledging the notification.
-                        </Alert>
-                      ) : null}
-                    </div>
-                    <div className="attention-actions">
-                      <Button
-                        variant="primary"
-                        className="btn-small"
-                        onClick={() => {
-                          const project = projects?.find(
-                            (candidate) => candidate.id === item.project_id,
-                          );
-                          if (project) {
-                            onOpenProject({
-                              ...project,
-                              ...(item.phase_id ? { focus_phase_id: item.phase_id } : {}),
-                              ...(item.task_id ? { focus_task_id: item.task_id } : {}),
-                            });
-                          }
-                        }}
-                      >
-                        Open project
-                      </Button>
-                      {item.kind !== "decision" ? (
-                        <>
-                          <Button
-                            className="btn-small"
-                            disabled={attentionBusy === item.key}
-                            onClick={() => void dispositionAttention(item, "acknowledged")}
-                          >
-                            Acknowledge
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            className="btn-small"
-                            disabled={attentionBusy === item.key}
-                            onClick={() => void dispositionAttention(item, "snoozed")}
-                          >
-                            Snooze 1h
-                          </Button>
-                        </>
-                      ) : null}
-                    </div>
-                  </article>
-                ))}
-              </div>
-            ) : (
-              <div className="attention-clear">
-                <strong>No strategic intervention is waiting.</strong>
-                <span>Active work will continue to update here.</span>
-              </div>
-            )
-          ) : (
-            <Alert>Portfolio status is unavailable. Refresh to try again.</Alert>
-          )}
-        </section>
-        <div className="project-toolbar core-project-toolbar">
           <div>
             <h2>Projects</h2>
-            <p>Open a project to continue planning, review decisions, or follow active work.</p>
+            <p>Select a project to continue where you left off.</p>
           </div>
-          <span className="project-count">{visible?.length ?? 0}</span>
         </div>
         {projects === null ? (
           <Spinner label="Loading projects…" />
         ) : visible?.length === 0 ? (
-          <div className="empty">
-            <div>
-              <div className="empty-icon">◇</div>
-              <strong>No projects yet</strong>
-              <p>Create your first project to begin planning.</p>
+          <section className="portfolio-empty-state" aria-labelledby="empty-portfolio-heading">
+            <div className="portfolio-empty-mark" aria-hidden="true">
+              <span />
+              <span />
+              <span />
             </div>
-          </div>
+            <h2 id="empty-portfolio-heading">No projects yet</h2>
+            <p>Create your first project to turn an idea into a plan and begin development.</p>
+            <Button variant="primary" onClick={openNewProject}>
+              Create your first project
+            </Button>
+          </section>
         ) : (
           <div className="proj-stack" data-testid="project-list">
             {visible?.map((project) => {
@@ -1894,6 +1513,7 @@ export function Projects({
               const projectAttention = actionableAttention.filter(
                 (item) => item.project_id === project.id,
               );
+              const primaryAttention = projectAttention[0];
               const failedRun = projectAttention.find((item) => item.kind === "failed_run");
               const stalledRun = projectAttention.find((item) => item.kind === "stalled_run");
               const decisionsWaiting =
@@ -1949,7 +1569,15 @@ export function Projects({
                   aria-label={`Enter ${project.name}`}
                   onClick={(event) => {
                     event.preventDefault();
-                    onOpenProject(project);
+                    onOpenProject({
+                      ...project,
+                      ...(primaryAttention?.phase_id
+                        ? { focus_phase_id: primaryAttention.phase_id }
+                        : {}),
+                      ...(primaryAttention?.task_id
+                        ? { focus_task_id: primaryAttention.task_id }
+                        : {}),
+                    });
                   }}
                 >
                   <div className="core-project-identity">
@@ -2023,6 +1651,9 @@ export function Projects({
                         aiProviderLabel(project.reviewer_provider)}
                     </span>
                   </div>
+                  <span className="portfolio-card-arrow" aria-hidden="true">
+                    →
+                  </span>
                 </a>
               );
             })}

@@ -104,11 +104,12 @@ describe("portfolio truthfulness", () => {
 
     renderProjects();
 
-    expect((await screen.findAllByText("Needs attention")).length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Needs attention").length).toBeGreaterThan(0);
+    const overview = await screen.findByLabelText("Portfolio overview");
+    expect(within(overview).getByText("Need attention")).toBeVisible();
     expect(screen.queryByText("No urgent interventions")).not.toBeInTheDocument();
-    expect(await screen.findByTestId("proj-row")).toHaveClass("s-red");
-    expect(screen.getByText("Run failed", { selector: ".badge" })).toBeVisible();
+    const projectCard = await screen.findByTestId("proj-row");
+    expect(projectCard).toHaveClass("s-red");
+    expect(within(projectCard).getByText("Run failed", { selector: ".badge" })).toBeVisible();
     expect(screen.queryByTestId("pr-phase")).not.toBeInTheDocument();
   });
 
@@ -197,14 +198,13 @@ describe("portfolio truthfulness", () => {
 
     renderProjects();
 
-    expect((await screen.findAllByText("Needs attention")).length).toBeGreaterThan(0);
-    expect(screen.getByText("Coding needs a restart")).toBeVisible();
-    expect(screen.getAllByText("Needs attention").length).toBeGreaterThan(0);
-    expect(
-      within(screen.getByLabelText("Portfolio attention summary")).getByText("Blockers")
-        .parentElement,
-    ).toHaveTextContent("1");
-    expect(await screen.findByTestId("proj-row")).toHaveClass("s-red");
+    const overview = await screen.findByLabelText("Portfolio overview");
+    expect(within(overview).getByText("Need attention")).toBeVisible();
+    expect(screen.queryByText("Coding needs a restart")).not.toBeInTheDocument();
+    expect(overview).toHaveTextContent("1Need attention");
+    const projectCard = await screen.findByTestId("proj-row");
+    expect(within(projectCard).getByText("Needs attention", { selector: ".badge" })).toBeVisible();
+    expect(projectCard).toHaveClass("s-red");
     expect(screen.queryByText("No urgent interventions")).not.toBeInTheDocument();
     expect(screen.queryByText("Draft")).not.toBeInTheDocument();
   });
@@ -260,11 +260,9 @@ describe("portfolio truthfulness", () => {
 
     renderProjects();
 
-    expect(await screen.findByText("Status unavailable")).toBeVisible();
-    expect(screen.getByText("Current status is unavailable")).toBeVisible();
-    expect(screen.getByTestId("portfolio-refresh-status")).toHaveTextContent(
-      "Refresh issue · showing last known data",
-    );
+    const overview = await screen.findByLabelText("Portfolio overview");
+    expect(within(overview).getByText("Status unavailable")).toBeVisible();
+    expect(overview).toHaveTextContent("—Status unavailable");
     expect(screen.queryByText("No urgent interventions")).not.toBeInTheDocument();
   });
 });
