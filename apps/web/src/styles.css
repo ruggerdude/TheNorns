@@ -8159,9 +8159,12 @@ h4 {
   .workspace-compact-shell > .workspace-top-menu .portfolio-new-project,
   .workspace-compact-shell > .workspace-top-menu .portfolio-switcher button {
     width: auto;
+    height: 2.25rem;
     min-height: 2.25rem;
     padding: 0.35rem 0.6rem;
     font-size: var(--text-xs);
+    line-height: 1;
+    white-space: nowrap;
   }
 
   .workspace-compact-shell > .workspace-top-menu .portfolio-switcher {
@@ -8367,9 +8370,12 @@ h4 {
   .global-compact-shell > .global-top-menu .portfolio-new-project,
   .global-compact-shell > .global-top-menu .portfolio-switcher button {
     width: auto;
+    height: 2.25rem;
     min-height: 2.25rem;
     padding: 0.35rem 0.6rem;
     font-size: var(--text-xs);
+    line-height: 1;
+    white-space: nowrap;
   }
 
   .global-compact-shell > .global-top-menu .portfolio-switcher {

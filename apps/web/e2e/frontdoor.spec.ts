@@ -769,7 +769,16 @@ test("New project creates from a name and lands in the workspace", async ({ page
   await expect(page.getByRole("heading", { name: "Portfolio", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "No projects yet" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Create your first project" })).toBeVisible();
-  await page.getByRole("button", { name: "New project", exact: true }).first().click();
+  await expect(page.locator(".portfolio-empty-mark svg")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create project" })).toHaveCount(0);
+  const newProjectButton = page.getByRole("button", { name: "New project", exact: true }).first();
+  const portfolioButton = page.getByRole("button", { name: "Portfolio", exact: true }).first();
+  const [newProjectBox, portfolioBox] = await Promise.all([
+    newProjectButton.boundingBox(),
+    portfolioButton.boundingBox(),
+  ]);
+  expect(newProjectBox?.height).toBe(portfolioBox?.height);
+  await newProjectButton.click();
   await expect(page.getByRole("main", { name: "New project" })).toBeVisible();
 
   // DESIGN R2: setup replaces only the main content. The application rail
@@ -1292,7 +1301,13 @@ test("A project with focused work still opens on Overview after adoption", async
   await expect(page.getByRole("heading", { name: "Portfolio", exact: true })).toBeVisible();
   await expect(page.getByRole("region", { name: "Portfolio overview" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Status", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Create project" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Create project" })).toHaveCount(0);
+  const portfolioLandingNavigation = page.getByRole("navigation", {
+    name: "Portfolio navigation",
+  });
+  await expect(
+    portfolioLandingNavigation.getByRole("button", { name: "New project", exact: true }),
+  ).toBeVisible();
   await expect(page.getByRole("link", { name: "Enter front-door-app" })).toBeVisible();
   await page.getByRole("button", { name: "Show active projects" }).click();
   await page.getByRole("button", { name: "front-door-app", exact: true }).click();

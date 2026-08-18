@@ -32,7 +32,18 @@ import {
   describeBlocker,
   parseGitHubRepoRef,
 } from "./projectSourceRequest";
-import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
+import {
+  Alert,
+  Badge,
+  Brand,
+  BrandMark,
+  Button,
+  Field,
+  Input,
+  Select,
+  Spinner,
+  TextArea,
+} from "./ui";
 import { useSingleFlightPolling } from "./useSingleFlightPolling";
 import {
   UPDATE_DETAIL_OPTIONS,
@@ -1459,9 +1470,6 @@ export function Projects({
             <h1>Portfolio</h1>
             <p>Your projects, their current state, and the next place to work.</p>
           </div>
-          <Button variant="primary" onClick={openNewProject}>
-            Create project
-          </Button>
         </header>
         {projects !== null && projects.length > 0 ? (
           <section className="portfolio-glance" aria-label="Portfolio overview">
@@ -1493,9 +1501,7 @@ export function Projects({
         ) : visible?.length === 0 ? (
           <section className="portfolio-empty-state" aria-labelledby="empty-portfolio-heading">
             <div className="portfolio-empty-mark" aria-hidden="true">
-              <span />
-              <span />
-              <span />
+              <BrandMark size={38} />
             </div>
             <h2 id="empty-portfolio-heading">No projects yet</h2>
             <p>Create your first project to turn an idea into a plan and begin development.</p>

@@ -104,6 +104,8 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     ).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "No projects yet" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create your first project" })).toBeInTheDocument();
+    expect(document.querySelector(".portfolio-empty-mark svg")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Create project" })).not.toBeInTheDocument();
     expect(window.location.pathname).toBe("/");
     expect(mock.calls.some((call) => /^\/api\/projects\/[^/]+$/.test(call.url))).toBe(false);
   });

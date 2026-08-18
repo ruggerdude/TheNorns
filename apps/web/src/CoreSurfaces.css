@@ -85,36 +85,15 @@
 }
 
 .portfolio-empty-mark {
-  display: flex;
-  width: 64px;
-  height: 64px;
-  align-items: flex-end;
+  display: grid;
+  min-height: 48px;
+  align-items: center;
   justify-content: center;
-  gap: 5px;
-  padding: 15px;
-  border-radius: 18px;
-  color: var(--brand, var(--accent, #2144c7));
-  background: color-mix(in srgb, currentColor 10%, var(--surface, #fff));
+  opacity: 0.58;
 }
 
-.portfolio-empty-mark span {
-  width: 7px;
-  border-radius: 999px;
-  background: currentColor;
-}
-
-.portfolio-empty-mark span:nth-child(1) {
-  height: 14px;
-  opacity: 0.45;
-}
-
-.portfolio-empty-mark span:nth-child(2) {
-  height: 26px;
-}
-
-.portfolio-empty-mark span:nth-child(3) {
-  height: 20px;
-  opacity: 0.72;
+.portfolio-empty-mark svg {
+  display: block;
 }
 
 .core-portfolio-header h1,
