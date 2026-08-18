@@ -559,7 +559,6 @@ describe("conversation workspace", () => {
       />,
     );
 
-    expect(screen.getByText("Loading conversations…")).toBeInTheDocument();
     expect(screen.getByText("Loading work items…")).toBeInTheDocument();
     expect(await screen.findByText("Conversations could not be loaded.")).toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Try again" }));
@@ -3584,9 +3583,10 @@ describe("conversation workspace", () => {
       `/projects/${projectId}/work/execution-conversation-pending`,
     );
     expect(screen.queryByRole("region", { name: "Planning workflow" })).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Open linked development chat" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Development chat" })).toHaveAttribute(
+      "data-state",
+      "active",
+    );
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2_500);
@@ -4620,7 +4620,7 @@ describe("conversation workspace", () => {
     );
     expect(JSON.parse(String(create?.init?.body))).toMatchObject({ workflow: "quick" });
     expect(await screen.findByRole("heading", { name: "Development" })).toBeInTheDocument();
-    expect(screen.getByRole("complementary", { name: "Development phases" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Development phases" })).toBeInTheDocument();
     expect(screen.getByRole("region", { name: "Agent dialogue" })).toHaveTextContent(
       "Agent activity will appear here",
     );
@@ -4632,7 +4632,63 @@ describe("conversation workspace", () => {
     expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
   });
 
-  it("renames a conversation from its sidebar context menu", async () => {
+  it("auto-creates Plan Review after QC and exposes one collapsible phase-chat sidebar", async () => {
+    const version = planVersion({ status: "changes_requested" });
+    const review = planReview({
+      plan_version_id: version.id,
+      status: "cap_reached",
+      rounds_completed: 2,
+      max_rounds: 2,
+      completed_at: now,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) return listResponse();
+        if (url.endsWith(`/conversations/${conversationId}`)) {
+          return detailResponse([], null, null, {
+            planVersions: [version],
+            reviews: [review],
+          });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={conversationId}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    const phaseChats = await screen.findByRole("complementary", { name: "Phase chats" });
+    expect(document.querySelectorAll("aside")).toHaveLength(1);
+    expect(document.querySelector(".conversation-sidebar")).not.toBeInTheDocument();
+    expect(within(phaseChats).getByRole("button", { name: "Define" })).toHaveAttribute(
+      "data-state",
+      "complete",
+    );
+    expect(within(phaseChats).getByRole("button", { name: "Quality control" })).toHaveAttribute(
+      "data-state",
+      "complete",
+    );
+    expect(within(phaseChats).getByRole("button", { name: "Plan review" })).toHaveAttribute(
+      "data-state",
+      "active",
+    );
+    await userEvent.click(within(phaseChats).getByRole("button", { name: "Collapse phase chats" }));
+    expect(within(phaseChats).getByRole("button", { name: "Plan review" })).toHaveAttribute(
+      "title",
+      "5. Plan Review",
+    );
+  });
+
+  // These organization-menu tests document the removed multi-rail UI. They
+  // remain skipped until the legacy endpoints are deleted in a server cleanup.
+  it.skip("renames a conversation from its sidebar context menu", async () => {
     const renamed = {
       ...workItem,
       title: "Release readiness",
@@ -4683,7 +4739,7 @@ describe("conversation workspace", () => {
     expect(patchedBody).toEqual({ title: "Release readiness" });
   });
 
-  it("deletes a chat family from its sidebar context menu", async () => {
+  it.skip("deletes a chat family from its sidebar context menu", async () => {
     let archived = false;
     const deleted: string[] = [];
     vi.stubGlobal(
@@ -4734,7 +4790,7 @@ describe("conversation workspace", () => {
     ).toBeInTheDocument();
   });
 
-  it("keeps chat-family navigation persistent, searchable, and collapsible", async () => {
+  it.skip("keeps chat-family navigation persistent, searchable, and collapsible", async () => {
     const execution = executionConversation();
     const secondWorkItem = {
       ...workItem,
@@ -4856,7 +4912,7 @@ describe("conversation workspace", () => {
     expect(sidebar).not.toHaveClass("is-collapsed");
   });
 
-  it("pins chats and creates, renames, moves into, and deletes personal folders", async () => {
+  it.skip("pins chats and creates, renames, moves into, and deletes personal folders", async () => {
     const folder = {
       schema_version: 2 as const,
       id: "folder-release",
@@ -5129,7 +5185,7 @@ describe("conversation workspace", () => {
     );
     expect(await screen.findByRole("heading", { name: "Agent dialogue" })).toBeVisible();
     expect(screen.queryByTestId("conversation-development-running")).not.toBeInTheDocument();
-    const phases = screen.getByRole("complementary", { name: "Development phases" });
+    const phases = screen.getByRole("region", { name: "Development phases" });
     expect(phases).toHaveTextContent("Core API");
     expect(phases).toHaveTextContent("In progress");
     expect(screen.getByRole("list", { name: "Agent activity transcript" })).toHaveTextContent(
@@ -5493,7 +5549,7 @@ describe("conversation workspace", () => {
     expect(screen.getByRole("list", { name: "Agent activity transcript" })).toHaveTextContent(
       "working now",
     );
-    const phases = screen.getByRole("complementary", { name: "Development phases" });
+    const phases = screen.getByRole("region", { name: "Development phases" });
     const phaseButtons = within(phases).getAllByRole("button");
     expect(within(phases).getByText(core.title)).toBeInTheDocument();
     expect(within(phases).getByText(web.title)).toBeInTheDocument();
@@ -6066,18 +6122,13 @@ describe("conversation workspace", () => {
     expect(
       screen.queryByRole("textbox", { name: "Message the project PM" }),
     ).not.toBeInTheDocument();
-    const archivedConversationButton = screen.getByRole("button", {
-      name: `Open Plan with PM conversation for ${workItem.title} (archived)`,
-    });
-    expect(archivedConversationButton).toHaveAttribute("data-status", "archived");
-    expect(archivedConversationButton).not.toHaveTextContent(/tokens|requests|usage|\$/i);
     const executionConversationButton = screen.getByRole("button", {
-      name: `Open Development chat conversation for ${workItem.title} (active)`,
+      name: "Development chat",
     });
-    expect(executionConversationButton).toHaveAttribute("data-status", "active");
+    expect(executionConversationButton).toHaveAttribute("data-state", "active");
     expect(executionConversationButton).not.toHaveTextContent(/tokens|requests|usage|\$/i);
 
-    await user.click(screen.getByRole("button", { name: "Open linked development chat" }));
+    await user.click(executionConversationButton);
     expect(
       await screen.findByRole("textbox", { name: "Message the development chat" }),
     ).toBeEnabled();
@@ -6887,7 +6938,7 @@ describe("conversation workspace", () => {
     );
   });
 
-  it("shows two work tabs with no QC history and three once a review exists", async () => {
+  it("creates only the reached phase chats before a plan exists", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -6908,9 +6959,15 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await screen.findByRole("button", { name: "Plan with PM" });
-    expect(screen.getByRole("button", { name: "Development chat" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Define" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Original PM/ })).toHaveAttribute(
+      "data-state",
+      "active",
+    );
+    expect(screen.queryByRole("button", { name: "Plan" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Quality control" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Plan review" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Development chat" })).not.toBeInTheDocument();
   });
 
   it("keeps planning visible until QC actually owns the work", async () => {
@@ -6934,8 +6991,8 @@ describe("conversation workspace", () => {
       />,
     );
 
-    expect(await screen.findByRole("button", { name: "Plan with PM" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: /Original PM/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Quality control" })).not.toBeInTheDocument();
   });
 
   it("hides the QC tab when the project has review turned off (zero rounds)", async () => {
@@ -6959,11 +7016,11 @@ describe("conversation workspace", () => {
       />,
     );
 
-    await screen.findByRole("button", { name: "Plan with PM" });
-    expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
+    await screen.findByRole("button", { name: /Original PM/ });
+    expect(screen.queryByRole("button", { name: "Quality control" })).not.toBeInTheDocument();
   });
 
-  it("removes all planning navigation and shows finding choices when QC needs the user", async () => {
+  it("keeps completed phase chats available while QC needs the user", async () => {
     const review = planReview({
       status: "awaiting_human",
       paused_checkpoint: "after_review",
@@ -6993,8 +7050,18 @@ describe("conversation workspace", () => {
 
     expect(await screen.findByRole("heading", { name: "Quality control" })).toBeInTheDocument();
     expect(screen.getAllByText("Round 1 of 3").length).toBeGreaterThan(0);
-    expect(screen.queryByRole("button", { name: "Plan with PM" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "QC" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Define" })).toHaveAttribute(
+      "data-state",
+      "complete",
+    );
+    expect(screen.getByRole("button", { name: /Original PM/ })).toHaveAttribute(
+      "data-state",
+      "complete",
+    );
+    expect(screen.getByRole("button", { name: "Quality control" })).toHaveAttribute(
+      "data-state",
+      "active",
+    );
     expect(screen.getByRole("combobox", { name: "Quality control finding action" })).toHaveValue(
       "all",
     );
@@ -7002,14 +7069,15 @@ describe("conversation workspace", () => {
     expect(
       screen.getByRole("textbox", { name: "Question for the QC reviewer" }),
     ).toBeInTheDocument();
-    const workspace = screen.getByTestId("conversation-workspace");
-    await waitFor(() => expect(workspace).toHaveClass("is-sidebar-collapsed"));
-    const conversationHeader = document.querySelector(".conversation-header");
-    if (!(conversationHeader instanceof HTMLElement)) throw new Error("Header not found");
-    await userEvent.click(
-      within(conversationHeader).getByRole("button", { name: "Expand work items" }),
+    await userEvent.click(screen.getByRole("button", { name: "Collapse phase chats" }));
+    expect(screen.getByRole("button", { name: "Expand phase chats" })).toHaveAttribute(
+      "title",
+      "Expand phase chats",
     );
-    expect(workspace).not.toHaveClass("is-sidebar-collapsed");
+    expect(screen.getByRole("button", { name: "Quality control" })).toHaveAttribute(
+      "title",
+      "4. Quality Control",
+    );
   });
 
   it("opens PM progress on the first Send to PM click while the handoff request is pending", async () => {

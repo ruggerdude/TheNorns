@@ -93,29 +93,14 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     expect(screen.getByRole("region", { name: "Project details" })).toHaveTextContent(
       /Coordinator|Reviewer/i,
     );
-    const journey = screen.getByRole("navigation", { name: "Project journey" });
-    expect(within(journey).getAllByRole("listitem")).toHaveLength(6);
-    for (const label of [
-      "Define the project",
-      "Project Manager",
-      "Plan",
-      "Quality Control",
-      "Plan Review",
-      "Deployment",
-    ]) {
-      expect(within(journey).getByText(label)).toBeVisible();
-    }
-    expect(within(journey).getByText("Plan").closest("li")).toHaveAttribute("aria-current", "step");
-    expect(within(journey).getByText("Define the project").closest("li")).toHaveClass(
-      "is-complete",
-    );
+    expect(screen.queryByRole("navigation", { name: "Project journey" })).not.toBeInTheDocument();
+    expect(screen.getByRole("navigation", { name: "Workspace sections" })).toBeVisible();
+    expect(screen.getByLabelText("Current workflow phase")).toHaveTextContent("3Plan");
 
     const workspaceShell = document.querySelector(".workspace-shell");
     if (!(workspaceShell instanceof HTMLElement)) throw new Error("Workspace shell not found");
-    await userEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
-    expect(workspaceShell).toHaveClass("navigation-collapsed");
-    await userEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
-    expect(workspaceShell).not.toHaveClass("navigation-collapsed");
+    expect(workspaceShell).toHaveClass("workspace-compact-shell");
+    expect(screen.queryByRole("button", { name: "Collapse sidebar" })).not.toBeInTheDocument();
 
     // Overview is the default tab, and it's the one already marked "on".
     expect(await screen.findByRole("button", { name: "Overview" })).toHaveClass("on");
@@ -326,10 +311,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
 
     await user.click(pointer);
     expect(await screen.findByRole("button", { name: "Work" })).toHaveClass("on");
-    expect(screen.getByText("Project Manager").closest("li")).toHaveAttribute(
-      "aria-current",
-      "step",
-    );
+    expect(screen.getByLabelText("Current workflow phase")).toHaveTextContent("2Project Manager");
     expect(
       await screen.findByTestId("phase-goal", undefined, { timeout: 3_000 }),
     ).toBeInTheDocument();

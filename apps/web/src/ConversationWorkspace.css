@@ -4089,6 +4089,288 @@
   }
 }
 
+/* One navigation model: the only in-work rail is the phase chat list. */
+.conversation-workspace.has-phase-chats {
+  display: block;
+}
+
+.conversation-workspace.has-phase-chats > .conversation-main {
+  width: 100%;
+}
+
+.conversation-has-phase-chats,
+.conversation-stage-workspace {
+  position: relative;
+  padding-left: 13rem;
+  background: color-mix(in srgb, var(--surface-2) 24%, var(--surface));
+}
+
+.conversation-has-phase-chats:has(.conversation-stage-sidebar.is-collapsed),
+.conversation-stage-workspace:has(.conversation-stage-sidebar.is-collapsed) {
+  padding-left: 3.75rem;
+}
+
+.conversation-stage-sidebar {
+  width: 13rem;
+  gap: 0.65rem;
+  padding: 0.65rem;
+  overflow: hidden;
+  transition: width 160ms ease;
+}
+
+.conversation-stage-sidebar.is-collapsed {
+  width: 3.75rem;
+  padding-inline: 0.45rem;
+}
+
+.conversation-stage-sidebar header {
+  display: flex;
+  min-height: 2rem;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.35rem;
+}
+
+.conversation-stage-sidebar header > div {
+  min-width: 0;
+}
+
+.conversation-stage-sidebar .conversation-stage-collapse {
+  display: grid;
+  width: 2rem;
+  min-width: 2rem;
+  height: 2rem;
+  padding: 0;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--ink-muted);
+  background: var(--surface);
+  font: inherit;
+  cursor: pointer;
+}
+
+.conversation-stage-new {
+  display: grid;
+  width: 100%;
+  min-height: 2.35rem;
+  grid-template-columns: 1.35rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.45rem 0.55rem;
+  border: 1px solid color-mix(in srgb, var(--brand-900) 35%, var(--line));
+  border-radius: var(--radius-sm);
+  color: var(--brand-900);
+  background: var(--brand-wash-subtle);
+  text-align: left;
+  cursor: pointer;
+}
+
+.conversation-stage-new strong,
+.conversation-stage-sidebar nav button strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-stage-sidebar nav button {
+  min-height: 2.55rem;
+  grid-template-columns: 1.65rem minmax(0, 1fr);
+  gap: 0.4rem;
+  padding: 0.45rem;
+}
+
+.conversation-stage-sidebar nav button > span:first-child {
+  display: grid;
+  width: 1.65rem;
+  height: 1.65rem;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--ink-muted);
+  background: var(--surface);
+}
+
+.conversation-stage-sidebar nav button[data-state="complete"] {
+  color: var(--brand-900);
+  background: color-mix(in srgb, var(--brand-900) 7%, var(--surface));
+}
+
+.conversation-stage-sidebar nav button[data-state="complete"] > span:first-child {
+  border-color: color-mix(in srgb, var(--brand-900) 62%, var(--line));
+  color: #fff;
+  background: var(--brand-900);
+}
+
+.conversation-stage-sidebar nav button[data-state="active"] {
+  border-color: color-mix(in srgb, var(--success) 55%, var(--line));
+  color: var(--ink);
+  background: color-mix(in srgb, var(--success) 13%, var(--surface));
+}
+
+.conversation-stage-sidebar nav button[data-state="active"] > span:first-child {
+  border-color: var(--success);
+  color: #fff;
+  background: var(--success);
+}
+
+.conversation-stage-sidebar nav button[aria-current="page"] {
+  box-shadow: inset 3px 0 0 currentColor;
+}
+
+.conversation-stage-sidebar.is-collapsed header > div,
+.conversation-stage-sidebar.is-collapsed .conversation-stage-new strong,
+.conversation-stage-sidebar.is-collapsed nav button strong {
+  display: none;
+}
+
+.conversation-stage-sidebar.is-collapsed header,
+.conversation-stage-sidebar.is-collapsed .conversation-stage-new,
+.conversation-stage-sidebar.is-collapsed nav button {
+  justify-content: center;
+}
+
+.conversation-stage-sidebar.is-collapsed .conversation-stage-new,
+.conversation-stage-sidebar.is-collapsed nav button {
+  grid-template-columns: 1.65rem;
+  padding-inline: 0.35rem;
+}
+
+.conversation-defined-brief {
+  display: grid;
+  align-content: start;
+  gap: 0.65rem;
+  padding: clamp(1rem, 3vw, 2.25rem);
+}
+
+.conversation-defined-brief h2,
+.conversation-defined-brief p {
+  margin: 0;
+}
+
+.conversation-defined-brief p {
+  max-width: 78ch;
+  white-space: pre-wrap;
+}
+
+.conversation-work-tab-development-chat {
+  padding-left: 13rem;
+}
+
+.conversation-work-tab-development-chat:has(.conversation-stage-sidebar.is-collapsed) {
+  padding-left: 3.75rem;
+}
+
+.conversation-development-phases {
+  position: relative;
+  inset: auto;
+  display: grid;
+  width: auto;
+  grid-template-columns: 1fr;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0.65rem 1rem;
+  border-right: 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.conversation-development-phases header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.conversation-development-phases header .eyebrow {
+  display: block;
+}
+
+.conversation-development-phase-progress {
+  display: grid;
+  min-width: 12rem;
+  grid-template-columns: auto auto;
+  gap: 0.15rem 0.6rem;
+}
+
+.conversation-development-phase-progress strong {
+  text-align: right;
+}
+
+.conversation-development-phase-progress progress {
+  grid-column: 1 / -1;
+}
+
+.conversation-development-phase-list {
+  min-width: 0;
+}
+
+.conversation-development-phases ol {
+  display: grid;
+  grid-auto-columns: minmax(12rem, 1fr);
+  grid-auto-flow: column;
+  gap: 0.4rem;
+  overflow-x: auto;
+  padding-bottom: 0.2rem;
+}
+
+/* The new-work view keeps a small chat index instead of folders, pins, and a
+   second navigation system. */
+.conversation-workspace.is-chat-index .conversation-search,
+.conversation-workspace.is-chat-index .conversation-folder-section,
+.conversation-workspace.is-chat-index .conversation-sidebar-section:not(.conversation-recent) {
+  display: none;
+}
+
+.conversation-workspace.is-chat-index .conversation-family-button {
+  grid-template-columns: 1rem minmax(0, 1fr);
+}
+
+.conversation-workspace.is-chat-index .conversation-family-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 880px) {
+  .conversation-has-phase-chats,
+  .conversation-stage-workspace,
+  .conversation-work-tab-development-chat,
+  .conversation-work-tab-development-chat:has(.conversation-stage-sidebar.is-collapsed) {
+    padding-left: 0;
+  }
+
+  .conversation-stage-sidebar,
+  .conversation-stage-sidebar.is-collapsed {
+    position: relative;
+    inset: auto;
+    width: auto;
+    padding: 0.45rem 0.6rem;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .conversation-stage-sidebar header,
+  .conversation-stage-sidebar .conversation-stage-new {
+    display: none;
+  }
+
+  .conversation-stage-sidebar nav {
+    display: grid;
+    grid-auto-columns: minmax(3rem, max-content);
+    grid-auto-flow: column;
+    overflow-x: auto;
+  }
+
+  .conversation-stage-sidebar.is-collapsed nav button strong {
+    display: block;
+  }
+
+  .conversation-stage-sidebar.is-collapsed nav button {
+    grid-template-columns: 1.65rem minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 640px) {
   .conversation-plan-task > details > .conversation-plan-task-heading {
     grid-template-columns: 2rem minmax(0, 1fr);
@@ -5772,4 +6054,25 @@
   .conversation-development-phase-list {
     grid-column: auto;
   }
+}
+
+/* Phase chats are the workspace body, so they must consume the remaining
+   height below the compact conversation header. Without this, the transcript
+   shrinks to its content and leaves the composer stranded mid-screen. */
+.conversation-has-phase-chats,
+.conversation-stage-workspace {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+
+.conversation-workspace.has-phase-chats {
+  display: flex;
+  flex-direction: column;
+}
+
+.conversation-has-phase-chats > .conversation-thread-root {
+  min-height: 0;
+  flex: 1;
 }

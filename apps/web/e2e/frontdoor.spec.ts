@@ -843,9 +843,7 @@ test("Authorized-only GitHub setup finishes installation before creating a new p
   ]);
 });
 
-test("Workspace uses left navigation and gives the conversation nearly the full viewport", async ({
-  page,
-}) => {
+test("Workspace uses a compact top menu and one phase-chat sidebar", async ({ page }) => {
   await page.setViewportSize({ width: 1920, height: 1080 });
   await prepare(page, "github", { conversationWorkspace: true });
   await page.goto("/");
@@ -856,17 +854,16 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   await expect(workspace).toBeVisible();
   const workspaceBox = await workspace.boundingBox();
   expect(workspaceBox).not.toBeNull();
-  expect(workspaceBox?.width).toBe(1680);
-  expect(workspaceBox?.x).toBe(240);
+  expect(workspaceBox?.width).toBe(1920);
+  expect(workspaceBox?.x).toBe(0);
 
-  const navigationRail = page.locator(".workspace-shell > .topbar");
-  const railBox = await navigationRail.boundingBox();
-  expect(railBox).not.toBeNull();
-  expect(railBox?.x).toBe(0);
-  expect(railBox?.width).toBe(240);
-  expect(railBox?.height).toBe(1080);
+  const topMenu = page.locator(".workspace-shell > .topbar");
+  const topMenuBox = await topMenu.boundingBox();
+  expect(topMenuBox).not.toBeNull();
+  expect(topMenuBox?.x).toBe(0);
+  expect(topMenuBox?.width).toBe(1920);
+  expect(topMenuBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(64);
   const projectContext = page.getByTestId("workspace-project-context");
-  await expect(projectContext.getByText("Project", { exact: true })).toBeVisible();
   await expect(projectContext.getByText("front-door-app", { exact: true })).toBeVisible();
   await expect(page.getByRole("navigation", { name: "Open projects" })).toHaveCount(0);
 
@@ -875,9 +872,13 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   const workspaceNavigationBox = await workspaceNavigation.boundingBox();
   expect(projectContextBox).not.toBeNull();
   expect(workspaceNavigationBox).not.toBeNull();
-  expect(workspaceNavigationBox?.y ?? 0).toBeGreaterThanOrEqual(
-    (projectContextBox?.y ?? 0) + (projectContextBox?.height ?? 0) + 8,
-  );
+  expect(
+    Math.abs(
+      (workspaceNavigationBox?.y ?? 0) +
+        (workspaceNavigationBox?.height ?? 0) / 2 -
+        ((projectContextBox?.y ?? 0) + (projectContextBox?.height ?? 0) / 2),
+    ),
+  ).toBeLessThanOrEqual(1);
 
   const workspacePortfolioNavigation = page
     .locator(".workspace-nav-start")
@@ -891,17 +892,12 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   const portfolioControlBox = await workspacePortfolioNavigation
     .locator(".portfolio-switcher")
     .boundingBox();
-  const usageButtonBox = await page
-    .getByRole("button", { name: "Usage", exact: true })
-    .boundingBox();
-  expect(portfolioButtonBox?.x).toBe(16);
-  expect(newProjectButtonBox?.x).toBe(16);
-  expect(newProjectButtonBox?.y ?? Number.POSITIVE_INFINITY).toBeLessThan(
-    portfolioButtonBox?.y ?? 0,
+  expect(newProjectButtonBox?.y).toBe(portfolioButtonBox?.y);
+  expect(newProjectButtonBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(40);
+  expect(portfolioControlBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(320);
+  expect((portfolioControlBox?.y ?? 0) + (portfolioControlBox?.height ?? 0)).toBeLessThanOrEqual(
+    topMenuBox?.height ?? 0,
   );
-  expect(usageButtonBox?.x).toBe(16);
-  expect(portfolioControlBox?.width ?? 0).toBeGreaterThanOrEqual(200);
-  expect(usageButtonBox?.width).toBe(portfolioControlBox?.width);
 
   await expect(page.getByRole("heading", { name: "Describe the project" })).toBeVisible();
   await workspaceNavigation.getByRole("button", { name: "Overview", exact: true }).click();
@@ -984,10 +980,17 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   await planHandoff.getByRole("button", { name: "Cancel" }).click();
   await expect(planHandoff).toHaveCount(0);
   await expect(page.getByRole("region", { name: "Planning workflow" })).toHaveCount(0);
-  const conversationSidebar = page.getByRole("complementary", {
-    name: "Project work items",
-  });
-  await expect(conversationSidebar).toBeVisible();
+  const phaseChats = page.getByRole("complementary", { name: "Phase chats" });
+  await expect(phaseChats).toBeVisible();
+  await expect(page.getByRole("complementary")).toHaveCount(1);
+  await expect(phaseChats.getByRole("button", { name: "Define", exact: true })).toHaveAttribute(
+    "data-state",
+    "complete",
+  );
+  await expect(phaseChats.getByRole("button", { name: /Project Manager/ })).toHaveAttribute(
+    "data-state",
+    "active",
+  );
   await expect(
     page.getByText("Plan the release dashboard and deployment health workflow.", { exact: true }),
   ).toHaveCount(0);
@@ -997,51 +1000,47 @@ test("Workspace uses left navigation and gives the conversation nearly the full 
   const conversationChromeBox = await page.locator(".conversation-thread-chrome").boundingBox();
   const transcriptBox = await page.locator(".conversation-thread-viewport").boundingBox();
   const composerShellBox = await page.locator(".conversation-composer").boundingBox();
-  const journeyBox = await page.getByRole("navigation", { name: "Project journey" }).boundingBox();
+  await expect(page.getByRole("navigation", { name: "Project journey" })).toHaveCount(0);
   expect(conversationBox?.y ?? 0).toBeGreaterThanOrEqual(
-    (journeyBox?.y ?? 0) + (journeyBox?.height ?? 0),
+    (topMenuBox?.y ?? 0) + (topMenuBox?.height ?? 0),
   );
   expect((conversationBox?.y ?? 0) + (conversationBox?.height ?? 0)).toBeGreaterThanOrEqual(
     (page.viewportSize()?.height ?? 0) - 12,
   );
-  expect(conversationMainBox?.width ?? 0).toBeGreaterThan((conversationBox?.width ?? 0) - 280);
-  expect(conversationMainBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThan(
-    (conversationBox?.width ?? 0) - 260,
-  );
+  expect(
+    Math.abs((conversationMainBox?.width ?? 0) - (conversationBox?.width ?? 0)),
+  ).toBeLessThanOrEqual(2);
   expect(conversationChromeBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(64);
   await expect(conversationHeader.getByText("Planning", { exact: true })).toHaveCount(0);
   await expect(conversationHeader.getByText("Stage", { exact: true })).toHaveCount(0);
   expect(transcriptBox?.height ?? 0).toBeGreaterThan(740);
-  expect(composerShellBox?.width ?? 0).toBeGreaterThan((conversationMainBox?.width ?? 0) - 160);
+  expect(composerShellBox?.width ?? 0).toBeGreaterThan((conversationMainBox?.width ?? 0) - 300);
   expect(composerShellBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(
     conversationMainBox?.width ?? 0,
   );
 
-  const sidebarBox = await conversationSidebar.boundingBox();
-  expect(sidebarBox?.width ?? 0).toBeGreaterThanOrEqual(268);
-  expect(sidebarBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(276);
-  await expect(conversationSidebar).not.toContainText(/tokens|requests|\$/i);
-  const conversationPickerRow = conversationSidebar.locator(".conversation-family-button").first();
-  const conversationPickerRowBox = await conversationPickerRow.boundingBox();
-  expect(conversationPickerRowBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(58);
-  await conversationPickerRow.click({ button: "right" });
-  await expect(page.getByRole("menuitem", { name: "Rename" })).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(page.getByRole("menuitem", { name: "Rename" })).toHaveCount(0);
-  await expect(conversationSidebar).toBeVisible();
+  const phaseChatsBox = await phaseChats.boundingBox();
+  expect(phaseChatsBox?.width ?? 0).toBeGreaterThanOrEqual(180);
+  expect(phaseChatsBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(190);
+  await phaseChats.getByRole("button", { name: "Collapse phase chats" }).click();
+  await expect
+    .poll(async () => (await phaseChats.boundingBox())?.width ?? Number.POSITIVE_INFINITY)
+    .toBeLessThanOrEqual(64);
+  await expect(phaseChats.getByTitle("1. Define")).toBeVisible();
+  await expect(phaseChats.getByTitle("2. Project Manager")).toBeVisible();
 
   await page.setViewportSize({ width: 1280, height: 720 });
-  const shortRailBox = await navigationRail.boundingBox();
+  const compactTopMenuBox = await topMenu.boundingBox();
   const userMenuBox = await page.locator(".user-chip").boundingBox();
-  expect(shortRailBox?.height).toBe(720);
-  expect((userMenuBox?.y ?? 0) + (userMenuBox?.height ?? 0)).toBeLessThanOrEqual(710);
+  expect(compactTopMenuBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(64);
+  expect((userMenuBox?.y ?? 0) + (userMenuBox?.height ?? 0)).toBeLessThanOrEqual(64);
 
   await page.setViewportSize({ width: 820, height: 900 });
-  const compactHeaderBox = await navigationRail.boundingBox();
+  const compactHeaderBox = await topMenu.boundingBox();
   expect(compactHeaderBox).not.toBeNull();
   expect(compactHeaderBox?.x).toBe(0);
   expect(compactHeaderBox?.width).toBe(820);
-  expect(compactHeaderBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThan(160);
+  expect(compactHeaderBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(64);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(820);
 });
 
@@ -1154,9 +1153,9 @@ test("Mobile workspace opens navigation as a drawer and keeps chat usable", asyn
   const conversationBox = await page.locator(".conversation-workspace").boundingBox();
   const composerBox = await composer.boundingBox();
   expect(topbarBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(58);
-  const journeyBox = await page.getByRole("navigation", { name: "Project journey" }).boundingBox();
+  await expect(page.getByRole("navigation", { name: "Project journey" })).toHaveCount(0);
   expect(conversationBox?.y ?? 0).toBeGreaterThanOrEqual(
-    (journeyBox?.y ?? 0) + (journeyBox?.height ?? 0),
+    (topbarBox?.y ?? 0) + (topbarBox?.height ?? 0),
   );
   expect((conversationBox?.y ?? 0) + (conversationBox?.height ?? 0)).toBeGreaterThanOrEqual(
     (page.viewportSize()?.height ?? 0) - 12,
@@ -1164,16 +1163,13 @@ test("Mobile workspace opens navigation as a drawer and keeps chat usable", asyn
   expect((composerBox?.y ?? 0) + (composerBox?.height ?? 0)).toBeLessThanOrEqual(844);
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 
-  await page.getByRole("button", { name: "Expand work items" }).click();
-  const conversationDrawer = page.getByRole("complementary", {
-    name: "Project work items",
-  });
-  await expect(conversationDrawer).toBeVisible();
-  const drawerBox = await conversationDrawer.boundingBox();
-  expect(drawerBox?.width ?? 0).toBeGreaterThan(260);
-  expect(drawerBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(382);
-  await page.getByRole("button", { name: "Close work items" }).click();
-  await expect(conversationDrawer).toBeHidden();
+  const phaseChats = page.getByRole("complementary", { name: "Phase chats" });
+  await expect(phaseChats).toBeVisible();
+  await expect(page.getByRole("complementary")).toHaveCount(1);
+  const phaseChatsBox = await phaseChats.boundingBox();
+  expect(phaseChatsBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(390);
+  await expect(phaseChats.getByTitle("1. Define")).toBeVisible();
+  await expect(phaseChats.getByTitle("2. Project Manager")).toBeVisible();
 
   await page.getByRole("button", { name: "Use conversation as plan" }).click();
   const planDialog = page.getByRole("dialog", { name: "Confirm QC Settings" });

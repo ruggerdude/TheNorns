@@ -3501,7 +3501,7 @@ function PlanGenerationProgress({
 type DevelopmentTask = V2PhaseExecutionT["tasks"][number];
 type DevelopmentPhaseState = "complete" | "active" | "verifying" | "waiting" | "blocked" | "queued";
 
-type PlanningStageView = "pm" | "plan" | "qc" | "plan_review";
+type PlanningStageView = "define" | "pm" | "plan" | "qc" | "plan_review" | "development";
 
 const PLAN_REVIEW_STATUSES = new Set(["converged", "cap_reached", "failed", "cancelled"]);
 
@@ -3515,86 +3515,170 @@ function planningStageForReviews(reviews: V2ConversationPlanReviewT[]): Planning
   return PLAN_REVIEW_STATUSES.has(latest.status) ? "plan_review" : "qc";
 }
 
+const PHASE_CHAT_ORDER: Record<PlanningStageView, number> = {
+  define: 1,
+  pm: 2,
+  plan: 3,
+  qc: 4,
+  plan_review: 5,
+  development: 6,
+};
+
+function phaseChatStorageKey(conversationId: string): string {
+  return `norns:phase-chat:${conversationId}`;
+}
+
+function storedPhaseChat(conversationId: string): PlanningStageView | null {
+  try {
+    const value = window.sessionStorage.getItem(phaseChatStorageKey(conversationId));
+    return value && value in PHASE_CHAT_ORDER ? (value as PlanningStageView) : null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberPhaseChat(conversationId: string, view: PlanningStageView): void {
+  try {
+    window.sessionStorage.setItem(phaseChatStorageKey(conversationId), view);
+  } catch {
+    // Navigation still works when session storage is unavailable.
+  }
+}
+
 function ConversationStageSidebar({
   view,
+  currentStage,
   hasPlan,
   hasQc,
   hasPlanReview,
   developmentConversationId,
   onSelect,
   onOpenConversation,
+  onNewWork,
 }: {
   view: PlanningStageView;
+  currentStage: number;
   hasPlan: boolean;
   hasQc: boolean;
   hasPlanReview: boolean;
   developmentConversationId: string | null;
   onSelect: (view: PlanningStageView) => void;
   onOpenConversation: (conversationId: string) => Promise<void>;
+  onNewWork?: () => void;
 }): React.ReactElement {
+  const [collapsed, setCollapsed] = useState(false);
+  const chats: Array<{
+    id: PlanningStageView;
+    title: string;
+    visible: boolean;
+  }> = [
+    { id: "define", title: "Define", visible: true },
+    { id: "pm", title: "Project Manager", visible: true },
+    { id: "plan", title: "Plan", visible: hasPlan },
+    { id: "qc", title: "Quality Control", visible: hasQc },
+    { id: "plan_review", title: "Plan Review", visible: hasPlanReview },
+    {
+      id: "development",
+      title: "Development",
+      visible: developmentConversationId !== null || currentStage === 6,
+    },
+  ];
+
+  const openChat = (chat: PlanningStageView) => {
+    if (chat === "development" && developmentConversationId) {
+      void onOpenConversation(developmentConversationId);
+      return;
+    }
+    onSelect(chat);
+  };
+
   return (
-    <aside className="conversation-stage-sidebar" aria-label="Project conversations">
+    <aside
+      className={`conversation-stage-sidebar${collapsed ? " is-collapsed" : ""}`}
+      aria-label="Phase chats"
+    >
       <header>
-        <span className="eyebrow">Project record</span>
-        <h2>Conversations</h2>
-      </header>
-      <nav>
+        <div>
+          <span className="eyebrow">Project chats</span>
+          <h2>Chats</h2>
+        </div>
         <button
           type="button"
-          aria-current={view === "pm" ? "page" : undefined}
-          onClick={() => onSelect("pm")}
+          className="conversation-stage-collapse"
+          aria-label={collapsed ? "Expand phase chats" : "Collapse phase chats"}
+          title={collapsed ? "Expand phase chats" : "Collapse phase chats"}
+          onClick={() => setCollapsed((value) => !value)}
         >
-          <span>01</span>
-          <span>
-            <strong>Original PM</strong>
-          </span>
+          <span aria-hidden="true">{collapsed ? "›" : "‹"}</span>
         </button>
-        {hasPlan ? (
-          <button
-            type="button"
-            aria-current={view === "plan" ? "page" : undefined}
-            onClick={() => onSelect("plan")}
-          >
-            <span>02</span>
-            <span>
-              <strong>Plan</strong>
-            </span>
-          </button>
-        ) : null}
-        {hasQc ? (
-          <button
-            type="button"
-            aria-current={view === "qc" ? "page" : undefined}
-            onClick={() => onSelect("qc")}
-          >
-            <span>03</span>
-            <span>
-              <strong>Quality control</strong>
-            </span>
-          </button>
-        ) : null}
-        {hasPlanReview ? (
-          <button
-            type="button"
-            aria-current={view === "plan_review" ? "page" : undefined}
-            onClick={() => onSelect("plan_review")}
-          >
-            <span>04</span>
-            <span>
-              <strong>Plan review</strong>
-            </span>
-          </button>
-        ) : null}
-        {developmentConversationId ? (
-          <button type="button" onClick={() => void onOpenConversation(developmentConversationId)}>
-            <span>{hasPlanReview ? "05" : "04"}</span>
-            <span>
-              <strong>Development</strong>
-            </span>
-          </button>
-        ) : null}
+      </header>
+      {onNewWork ? (
+        <button
+          type="button"
+          className="conversation-stage-new"
+          aria-label="Start new work"
+          title="Start new work"
+          onClick={onNewWork}
+        >
+          <span aria-hidden="true">＋</span>
+          <strong>New work</strong>
+        </button>
+      ) : null}
+      <nav>
+        {chats
+          .filter((chat) => chat.visible)
+          .map((chat) => {
+            const step = PHASE_CHAT_ORDER[chat.id];
+            const state =
+              step === currentStage ? "active" : step < currentStage ? "complete" : "next";
+            const accessibleTitle =
+              chat.id === "pm"
+                ? "Original PM · Project Manager"
+                : chat.id === "qc"
+                  ? "Quality control"
+                  : chat.id === "plan_review"
+                    ? "Plan review"
+                    : chat.id === "development"
+                      ? "Development chat"
+                      : chat.title;
+            return (
+              <button
+                type="button"
+                key={chat.id}
+                data-state={state}
+                aria-current={view === chat.id ? "page" : undefined}
+                aria-label={accessibleTitle}
+                title={`${step}. ${chat.title}`}
+                onClick={() => openChat(chat.id)}
+              >
+                <span aria-hidden="true">{step}</span>
+                <strong>{`${step}. ${chat.title}`}</strong>
+              </button>
+            );
+          })}
       </nav>
     </aside>
+  );
+}
+
+function DefinedProjectBrief({
+  title,
+  messages,
+}: {
+  title: string;
+  messages: V2WorkMessageT[];
+}): React.ReactElement {
+  const brief = messages.find((message) => message.role === "user");
+  const text = brief?.parts
+    .flatMap((part) => (part.type === "text" ? [part.text.trim()] : []))
+    .filter(Boolean)
+    .join("\n\n");
+  return (
+    <section className="conversation-defined-brief" aria-labelledby="defined-project-title">
+      <span className="eyebrow">1. Define</span>
+      <h2 id="defined-project-title">{title}</h2>
+      <p>{text || "The project brief will appear here after it is sent."}</p>
+    </section>
   );
 }
 
@@ -3912,47 +3996,34 @@ function developmentStateLabel(state: DevelopmentPhaseState): string {
   }
 }
 
-function DevelopmentPhaseSidebar({
+function DevelopmentPhaseStrip({
   phases,
   selectedId,
-  planningConversationId,
   onSelect,
-  onOpenConversation,
 }: {
   phases: DevelopmentPhaseItem[];
   selectedId: string | null;
-  planningConversationId: string | null;
   onSelect: (phaseId: string) => void;
-  onOpenConversation: (conversationId: string) => Promise<void>;
 }): React.ReactElement {
   const completed = phases.filter((phase) => phase.state === "complete").length;
   const progress = phases.length === 0 ? 0 : Math.round((completed / phases.length) * 100);
   return (
-    <aside className="conversation-development-phases" aria-label="Development phases">
+    <section className="conversation-development-phases" aria-label="Development phases">
       <header>
-        <span className="eyebrow">Workspace</span>
-        <h2>Development phases</h2>
-      </header>
-      <nav className="conversation-development-conversations" aria-label="Project conversations">
-        {planningConversationId ? (
-          <button type="button" onClick={() => void onOpenConversation(planningConversationId)}>
-            PM, Plan, QC &amp; Plan Review
-          </button>
-        ) : null}
-        <button type="button" aria-current="page">
-          Development chat
-        </button>
-      </nav>
-      <div className="conversation-development-phase-progress">
         <div>
-          <span>{completed} complete</span>
-          <strong>{progress}%</strong>
+          <span className="eyebrow">Development</span>
+          <h2>Phases</h2>
         </div>
-        <progress aria-label="Development phases completed" max={100} value={progress} />
-      </div>
+        <div className="conversation-development-phase-progress">
+          <span>
+            {completed} of {phases.length} complete
+          </span>
+          <strong>{progress}%</strong>
+          <progress aria-label="Development phases completed" max={100} value={progress} />
+        </div>
+      </header>
       {phases.length > 0 ? (
-        <details className="conversation-development-phase-list" open>
-          <summary>Development phases</summary>
+        <div className="conversation-development-phase-list">
           <ol>
             {phases.map((phase, index) => (
               <li key={phase.id} data-state={phase.state} data-phase-tone={index % 5}>
@@ -3972,11 +4043,11 @@ function DevelopmentPhaseSidebar({
               </li>
             ))}
           </ol>
-        </details>
+        </div>
       ) : (
         <p className="conversation-list-empty">Preparing the approved phases…</p>
       )}
-    </aside>
+    </section>
   );
 }
 
@@ -4108,6 +4179,7 @@ function ConversationThread({
   onInitialMessageStarted,
   onEditMessage,
   onOpenConversation,
+  onNewWork,
   onConversationModelChanged,
   onQcJourneyChange,
   onRefresh,
@@ -4127,6 +4199,7 @@ function ConversationThread({
   onInitialMessageStarted?: () => void;
   onEditMessage: (sourceMessageId: string, text: string) => Promise<void>;
   onOpenConversation: (conversationId: string) => Promise<void>;
+  onNewWork: () => void;
   onConversationModelChanged: (conversation: V2WorkConversationT) => void;
   onQcJourneyChange: (qc: QcReviewJourney) => void;
   onRefresh: () => Promise<void>;
@@ -4135,13 +4208,18 @@ function ConversationThread({
 }): React.ReactElement {
   const isPlanning = detail.conversation.kind === "planning";
   const isExecution = detail.conversation.kind === "execution_pm";
-  const [workTab, setWorkTab] = useState<"plan" | "implementation">(() =>
-    detail.conversation.kind === "execution_pm" ? "implementation" : "plan",
-  );
   const currentPlanningReviewStage = planningStageForReviews(detail.plan_reviews);
-  const [planningStageView, setPlanningStageView] = useState<PlanningStageView>(
-    currentPlanningReviewStage,
-  );
+  const [planningStageView, setPlanningStageView] = useState<PlanningStageView>(() => {
+    if (isExecution) return "development";
+    return (
+      storedPhaseChat(detail.conversation.id) ??
+      (detail.plan_reviews.length > 0
+        ? currentPlanningReviewStage
+        : detail.plan_versions.length > 0
+          ? "plan"
+          : "pm")
+    );
+  });
   const [streamError, setStreamError] = useState<string | null>(null);
   const [modelBusy, setModelBusy] = useState(false);
   const [modelError, setModelError] = useState<string | null>(null);
@@ -5719,8 +5797,30 @@ function ConversationThread({
   const hasEnteredQc = isPlanning && detail.plan_reviews.length > 0;
   useEffect(() => {
     if (!isPlanning) return;
-    setPlanningStageView(currentPlanningReviewStage);
-  }, [currentPlanningReviewStage, isPlanning]);
+    const requested = storedPhaseChat(detail.conversation.id);
+    if (requested) {
+      try {
+        window.sessionStorage.removeItem(phaseChatStorageKey(detail.conversation.id));
+      } catch {
+        // The requested chat was still applied for this render.
+      }
+      setPlanningStageView(requested);
+      return;
+    }
+    setPlanningStageView(
+      detail.plan_reviews.length > 0
+        ? currentPlanningReviewStage
+        : detail.plan_versions.length > 0
+          ? "plan"
+          : "pm",
+    );
+  }, [
+    currentPlanningReviewStage,
+    detail.conversation.id,
+    detail.plan_reviews.length,
+    detail.plan_versions.length,
+    isPlanning,
+  ]);
   const recoverableExecutionEffect = isPlanning
     ? ([...actionContext.effects.values()].find(isRecoverableExecutionEffect) ?? null)
     : null;
@@ -5803,6 +5903,29 @@ function ConversationThread({
       Date.parse(right.created_at) - Date.parse(left.created_at) ||
       right.attempt_number - left.attempt_number,
   )[0];
+  const hasPlanReview = latestReview ? PLAN_REVIEW_STATUSES.has(latestReview.status) : false;
+  const workflowStage = isExecution
+    ? 6
+    : linkedExecutionConversationId
+      ? 6
+      : hasPlanReview
+        ? 5
+        : hasEnteredQc
+          ? 4
+          : latestPlan
+            ? 3
+            : 2;
+  const selectPhaseChat = (next: PlanningStageView) => {
+    if (isExecution && next !== "development") {
+      const planningConversationId = detail.handoff?.source_conversation_id;
+      if (planningConversationId) {
+        rememberPhaseChat(planningConversationId, next);
+        void onOpenConversation(planningConversationId);
+      }
+      return;
+    }
+    setPlanningStageView(next);
+  };
   const pendingQcPreference = [...actionContext.actions.values()]
     .filter((action) => action.action_type === "send_plan_to_qc")
     .map(
@@ -5952,15 +6075,7 @@ function ConversationThread({
                     onPrepare={(parameters) => proposeExecutionAction("create_mockup", parameters)}
                   />
                 ) : null,
-                linkedExecutionConversationId ? (
-                  <Button
-                    className="btn-small"
-                    aria-label="Open linked development chat"
-                    onClick={() => onOpenConversation(linkedExecutionConversationId)}
-                  >
-                    Development chat
-                  </Button>
-                ) : null,
+                null,
                 planHeaderSummary,
               )}
             </div>
@@ -5989,37 +6104,9 @@ function ConversationThread({
                 </Button>
               </aside>
             ) : null}
-            {!hasEnteredQc && isPlanning && !latestPlan ? (
-              <nav className="conversation-work-tabs" aria-label="Work sections">
-                <button
-                  type="button"
-                  className={workTab === "plan" ? "on" : ""}
-                  aria-current={workTab === "plan" ? "page" : undefined}
-                  onClick={() => setWorkTab("plan")}
-                >
-                  Plan with PM
-                </button>
-                <button
-                  type="button"
-                  className={workTab === "implementation" ? "on" : ""}
-                  aria-current={workTab === "implementation" ? "page" : undefined}
-                  onClick={() => {
-                    if (isPlanning && linkedExecutionConversationId) {
-                      onOpenConversation(linkedExecutionConversationId);
-                      return;
-                    }
-                    setWorkTab("implementation");
-                  }}
-                >
-                  Development chat
-                </button>
-              </nav>
-            ) : null}
-            {!hasEnteredQc &&
-            ((isPlanning && workTab === "plan") ||
-              (isExecution && workTab === "implementation")) ? (
+            {!hasEnteredQc && (isPlanning || isExecution) ? (
               <div
-                className={`workspace-tab-panel ${
+                className={`workspace-tab-panel conversation-has-phase-chats ${
                   isExecution
                     ? "conversation-work-tab-development-chat"
                     : `conversation-work-tab-plan${latestPlan ? " has-plan-workspace" : ""}${
@@ -6032,27 +6119,30 @@ function ConversationThread({
                   isExecution ? "conversation-development-chat" : "conversation-work-tab-plan"
                 }
               >
-                {isPlanning && latestPlan ? (
-                  <ConversationStageSidebar
-                    view={planningStageView}
-                    hasPlan
-                    hasQc={false}
-                    hasPlanReview={false}
-                    developmentConversationId={linkedExecutionConversationId}
-                    onSelect={setPlanningStageView}
-                    onOpenConversation={onOpenConversation}
-                  />
+                <ConversationStageSidebar
+                  view={isExecution ? "development" : planningStageView}
+                  currentStage={workflowStage}
+                  hasPlan={isExecution || latestPlan !== undefined}
+                  hasQc={isExecution ? detail.project_runs_qc : false}
+                  hasPlanReview={isExecution ? detail.project_runs_qc : false}
+                  developmentConversationId={
+                    isExecution ? detail.conversation.id : linkedExecutionConversationId
+                  }
+                  onSelect={selectPhaseChat}
+                  onOpenConversation={onOpenConversation}
+                  onNewWork={onNewWork}
+                />
+                {isPlanning && planningStageView === "define" ? (
+                  <DefinedProjectBrief title={detail.work_item.title} messages={detail.messages} />
                 ) : null}
                 {isPlanning && latestPlan && planningStageView === "plan" ? (
                   <PlanningPlanWorkspace version={latestPlan} reviews={visiblePlanReviews} />
                 ) : null}
                 {isExecution ? (
-                  <DevelopmentPhaseSidebar
+                  <DevelopmentPhaseStrip
                     phases={developmentPhases}
                     selectedId={selectedDevelopmentPhase?.id ?? null}
-                    planningConversationId={detail.handoff?.source_conversation_id ?? null}
                     onSelect={setSelectedDevelopmentPhaseId}
-                    onOpenConversation={onOpenConversation}
                   />
                 ) : null}
                 {isExecution && detail.work_item.status === "awaiting_approval" ? (
@@ -6219,7 +6309,9 @@ function ConversationThread({
                     turnAnchor="bottom"
                     scrollToBottomOnThreadSwitch
                   >
-                    {!(isPlanning && latestPlan && planningStageView === "plan") ? (
+                    {!isPlanning ||
+                    planningStageView === "pm" ||
+                    (planningStageView === "plan" && !latestPlan) ? (
                       <>
                         <AuiIf condition={(state) => state.thread.messages.length === 0}>
                           <div className="conversation-welcome" data-testid="conversation-welcome">
@@ -6304,15 +6396,18 @@ function ConversationThread({
               >
                 <ConversationStageSidebar
                   view={planningStageView}
+                  currentStage={workflowStage}
                   hasPlan={latestPlan !== undefined}
                   hasQc
-                  hasPlanReview={
-                    latestReview ? PLAN_REVIEW_STATUSES.has(latestReview.status) : false
-                  }
+                  hasPlanReview={hasPlanReview}
                   developmentConversationId={linkedExecutionConversationId}
-                  onSelect={setPlanningStageView}
+                  onSelect={selectPhaseChat}
                   onOpenConversation={onOpenConversation}
+                  onNewWork={onNewWork}
                 />
+                {planningStageView === "define" ? (
+                  <DefinedProjectBrief title={detail.work_item.title} messages={detail.messages} />
+                ) : null}
                 {planningStageView === "pm" ? (
                   <ArchivedPmConversation messages={detail.messages} />
                 ) : null}
@@ -6386,20 +6481,6 @@ function ConversationThread({
                     view="plan_review"
                   />
                 ) : null}
-              </div>
-            ) : null}
-            {!hasEnteredQc && workTab === "implementation" && isPlanning ? (
-              <div
-                className="workspace-tab-panel conversation-work-tab-implementation"
-                data-testid="conversation-work-tab-implementation"
-              >
-                <div className="conversation-stage-placeholder">
-                  <strong>Development has not started yet.</strong>
-                  <p>
-                    Approve the plan when it is ready. Development will open as its own chat with
-                    the approved scope and live agent activity.
-                  </p>
-                </div>
               </div>
             ) : null}
           </section>
@@ -7551,18 +7632,20 @@ export function ConversationWorkspace({
       !showNew && detail?.conversation.kind === "planning" && detail.plan_reviews.length > 0;
     return (
       <header className="conversation-header">
-        <Button
-          className="btn-small conversation-sidebar-toggle"
-          aria-expanded={!conversationSidebarCollapsed || conversationListOpen}
-          aria-controls="project-conversations"
-          aria-label="Expand work items"
-          onClick={() => {
-            setConversationSidebarCollapsed(false);
-            setConversationListOpen(true);
-          }}
-        >
-          <span aria-hidden="true">☰</span>
-        </Button>
+        {showNew ? (
+          <Button
+            className="btn-small conversation-sidebar-toggle"
+            aria-expanded={!conversationSidebarCollapsed || conversationListOpen}
+            aria-controls="project-conversations"
+            aria-label="Open chats"
+            onClick={() => {
+              setConversationSidebarCollapsed(false);
+              setConversationListOpen(true);
+            }}
+          >
+            <span aria-hidden="true">☰</span>
+          </Button>
+        ) : null}
         <div className="conversation-header-identity">
           {!showingQc && executionTargetLabel ? (
             <span className="conversation-header-target">{executionTargetLabel}</span>
@@ -7678,10 +7761,10 @@ export function ConversationWorkspace({
 
   return (
     <div
-      className={`conversation-workspace${conversationSidebarCollapsed ? " is-sidebar-collapsed" : ""}`}
+      className={`conversation-workspace${conversationSidebarCollapsed ? " is-sidebar-collapsed" : ""}${showNew ? " is-chat-index" : " has-phase-chats"}`}
       data-testid="conversation-workspace"
     >
-      {conversationListOpen ? (
+      {showNew && conversationListOpen ? (
         <button
           type="button"
           className="conversation-sidebar-backdrop"
@@ -7690,365 +7773,371 @@ export function ConversationWorkspace({
           onClick={() => setConversationListOpen(false)}
         />
       ) : null}
-      <aside
-        className={`conversation-sidebar${conversationSidebarCollapsed ? " is-collapsed" : ""}${conversationListOpen ? " is-mobile-open" : ""}`}
-        id="project-conversations"
-        aria-label="Project work items"
-      >
-        <div className="conversation-sidebar-head">
-          <div className="conversation-sidebar-title">
-            <span className="conversation-sidebar-mark" aria-hidden="true">
-              N
-            </span>
-            <h2>Work items</h2>
-          </div>
-          <div>
-            <Button
-              className="btn-small conversation-sidebar-collapse"
-              variant="ghost"
-              aria-label={
-                conversationSidebarCollapsed ? "Expand work items" : "Collapse work items"
-              }
-              onClick={() => setConversationSidebarCollapsed((collapsed) => !collapsed)}
-            >
-              <span aria-hidden="true">{conversationSidebarCollapsed ? "›" : "‹"}</span>
-            </Button>
-            <Button
-              className="btn-small conversation-sidebar-close"
-              variant="ghost"
-              aria-label="Close work items"
-              onClick={() => setConversationListOpen(false)}
-            >
-              <span aria-hidden="true">×</span>
-            </Button>
-          </div>
-        </div>
-        <div className="conversation-sidebar-content">
-          <Button
-            className="conversation-sidebar-new"
-            aria-label="Start new work"
-            onClick={startNewWork}
-          >
-            New work
-          </Button>
-          <div className="conversation-search">
-            <Input
-              type="search"
-              aria-label="Search work"
-              placeholder="Search work"
-              value={conversationSearch}
-              onChange={(event) => setConversationSearch(event.target.value)}
-            />
-          </div>
-          {organizationError ? (
-            <Alert testId="conversation-organization-error">{organizationError}</Alert>
-          ) : null}
-          {!searching ? (
-            <>
-              <section
-                className="conversation-sidebar-section"
-                aria-labelledby="conversation-pinned"
-                data-organization-state={
-                  organizationAvailable === null
-                    ? "loading"
-                    : organizationAvailable
-                      ? "available"
-                      : "legacy"
-                }
+      {showNew ? (
+        <aside
+          className={`conversation-sidebar${conversationSidebarCollapsed ? " is-collapsed" : ""}${conversationListOpen ? " is-mobile-open" : ""}`}
+          id="project-conversations"
+          aria-label="Chats"
+        >
+          <div className="conversation-sidebar-head">
+            <div className="conversation-sidebar-title">
+              <span className="conversation-sidebar-mark" aria-hidden="true">
+                N
+              </span>
+              <h2>Chats</h2>
+            </div>
+            <div>
+              <Button
+                className="btn-small conversation-sidebar-collapse"
+                variant="ghost"
+                aria-label={conversationSidebarCollapsed ? "Expand chats" : "Collapse chats"}
+                onClick={() => setConversationSidebarCollapsed((collapsed) => !collapsed)}
               >
-                <h3 id="conversation-pinned">Pinned</h3>
-                {organizationAvailable === null ? (
-                  <Spinner label="Loading pins…" />
-                ) : pinnedFamilies.length > 0 ? (
-                  <div className="conversation-list">
-                    {pinnedFamilies.map(renderConversationFamily)}
-                  </div>
-                ) : (
-                  <p className="conversation-list-empty">
-                    {organizationAvailable
-                      ? "No pinned work yet."
-                      : "Pins are unavailable on this deployment."}
-                  </p>
-                )}
-              </section>
-              <section
-                className="conversation-sidebar-section conversation-folder-section"
-                aria-labelledby="conversation-folders"
-                data-organization-state={
-                  organizationAvailable === null
-                    ? "loading"
-                    : organizationAvailable
-                      ? "available"
-                      : "legacy"
-                }
+                <span aria-hidden="true">{conversationSidebarCollapsed ? "›" : "‹"}</span>
+              </Button>
+              <Button
+                className="btn-small conversation-sidebar-close"
+                variant="ghost"
+                aria-label="Close chats"
+                onClick={() => setConversationListOpen(false)}
               >
-                <div className="conversation-folder-heading">
-                  <h3 id="conversation-folders">Folders</h3>
-                  {organizationAvailable ? (
-                    <button
-                      type="button"
-                      aria-label="Create folder"
-                      onClick={() => setFolderEditor({ mode: "create", folderId: null, name: "" })}
-                    >
-                      ＋
-                    </button>
-                  ) : null}
-                </div>
-                {folderEditor ? (
-                  <form className="conversation-folder-editor" onSubmit={saveFolder}>
-                    <Input
-                      aria-label={
-                        folderEditor.mode === "create" ? "Folder name" : "New folder name"
-                      }
-                      value={folderEditor.name}
-                      maxLength={80}
-                      autoFocus
-                      disabled={folderBusy}
-                      onChange={(event) =>
-                        setFolderEditor((current) =>
-                          current ? { ...current, name: event.target.value } : current,
-                        )
-                      }
-                    />
-                    <div>
-                      <Button
-                        className="btn-small"
-                        variant="primary"
-                        type="submit"
-                        disabled={folderBusy || !folderEditor.name.trim()}
-                      >
-                        {folderBusy
-                          ? "Saving…"
-                          : folderEditor.mode === "create"
-                            ? "Create"
-                            : "Rename"}
-                      </Button>
-                      <Button
-                        className="btn-small"
+                <span aria-hidden="true">×</span>
+              </Button>
+            </div>
+          </div>
+          <div className="conversation-sidebar-content">
+            <Button
+              className="conversation-sidebar-new"
+              aria-label="Start new work"
+              onClick={startNewWork}
+            >
+              New work
+            </Button>
+            <div className="conversation-search">
+              <Input
+                type="search"
+                aria-label="Search work"
+                placeholder="Search work"
+                value={conversationSearch}
+                onChange={(event) => setConversationSearch(event.target.value)}
+              />
+            </div>
+            {organizationError ? (
+              <Alert testId="conversation-organization-error">{organizationError}</Alert>
+            ) : null}
+            {!searching ? (
+              <>
+                <section
+                  className="conversation-sidebar-section"
+                  aria-labelledby="conversation-pinned"
+                  data-organization-state={
+                    organizationAvailable === null
+                      ? "loading"
+                      : organizationAvailable
+                        ? "available"
+                        : "legacy"
+                  }
+                >
+                  <h3 id="conversation-pinned">Pinned</h3>
+                  {organizationAvailable === null ? (
+                    <Spinner label="Loading pins…" />
+                  ) : pinnedFamilies.length > 0 ? (
+                    <div className="conversation-list">
+                      {pinnedFamilies.map(renderConversationFamily)}
+                    </div>
+                  ) : (
+                    <p className="conversation-list-empty">
+                      {organizationAvailable
+                        ? "No pinned work yet."
+                        : "Pins are unavailable on this deployment."}
+                    </p>
+                  )}
+                </section>
+                <section
+                  className="conversation-sidebar-section conversation-folder-section"
+                  aria-labelledby="conversation-folders"
+                  data-organization-state={
+                    organizationAvailable === null
+                      ? "loading"
+                      : organizationAvailable
+                        ? "available"
+                        : "legacy"
+                  }
+                >
+                  <div className="conversation-folder-heading">
+                    <h3 id="conversation-folders">Folders</h3>
+                    {organizationAvailable ? (
+                      <button
                         type="button"
-                        disabled={folderBusy}
-                        onClick={() => setFolderEditor(null)}
+                        aria-label="Create folder"
+                        onClick={() =>
+                          setFolderEditor({ mode: "create", folderId: null, name: "" })
+                        }
                       >
-                        Cancel
-                      </Button>
-                    </div>
-                  </form>
-                ) : null}
-                {organizationAvailable === false ? (
-                  <p className="conversation-list-empty">
-                    Folders are unavailable on this deployment.
-                  </p>
-                ) : null}
-                {organizationAvailable && navigation?.folders.length === 0 && !folderEditor ? (
-                  <p className="conversation-list-empty">No folders yet.</p>
-                ) : null}
-                {navigation?.folders.map((folder) => {
-                  const families = folderFamilies(folder.id);
-                  return (
-                    <div className="conversation-folder" key={folder.id}>
-                      <div className="conversation-folder-row">
-                        <FolderIcon />
-                        <strong>{folder.name}</strong>
-                        <span>{families.length}</span>
-                        <button
-                          type="button"
-                          aria-label={`Rename folder ${folder.name}`}
-                          disabled={folderBusy}
-                          onClick={() =>
-                            setFolderEditor({
-                              mode: "rename",
-                              folderId: folder.id,
-                              name: folder.name,
-                            })
-                          }
+                        ＋
+                      </button>
+                    ) : null}
+                  </div>
+                  {folderEditor ? (
+                    <form className="conversation-folder-editor" onSubmit={saveFolder}>
+                      <Input
+                        aria-label={
+                          folderEditor.mode === "create" ? "Folder name" : "New folder name"
+                        }
+                        value={folderEditor.name}
+                        maxLength={80}
+                        autoFocus
+                        disabled={folderBusy}
+                        onChange={(event) =>
+                          setFolderEditor((current) =>
+                            current ? { ...current, name: event.target.value } : current,
+                          )
+                        }
+                      />
+                      <div>
+                        <Button
+                          className="btn-small"
+                          variant="primary"
+                          type="submit"
+                          disabled={folderBusy || !folderEditor.name.trim()}
                         >
-                          Rename
-                        </button>
-                        <button
+                          {folderBusy
+                            ? "Saving…"
+                            : folderEditor.mode === "create"
+                              ? "Create"
+                              : "Rename"}
+                        </Button>
+                        <Button
+                          className="btn-small"
                           type="button"
-                          aria-label={`Delete folder ${folder.name}`}
                           disabled={folderBusy}
-                          onClick={() => setDeleteFolderId(folder.id)}
+                          onClick={() => setFolderEditor(null)}
                         >
-                          Delete
-                        </button>
+                          Cancel
+                        </Button>
                       </div>
-                      {deleteFolderId === folder.id ? (
-                        <div className="conversation-folder-delete" role="alert">
-                          <span>Delete {folder.name}? Its work items move to Recent.</span>
-                          <div>
-                            <Button
-                              className="btn-small"
-                              variant="danger"
-                              disabled={folderBusy}
-                              onClick={() => void confirmDeleteFolder(folder)}
-                            >
-                              {folderBusy ? "Deleting…" : "Confirm delete"}
-                            </Button>
-                            <Button
-                              className="btn-small"
-                              disabled={folderBusy}
-                              onClick={() => setDeleteFolderId(null)}
-                            >
-                              Cancel
-                            </Button>
+                    </form>
+                  ) : null}
+                  {organizationAvailable === false ? (
+                    <p className="conversation-list-empty">
+                      Folders are unavailable on this deployment.
+                    </p>
+                  ) : null}
+                  {organizationAvailable && navigation?.folders.length === 0 && !folderEditor ? (
+                    <p className="conversation-list-empty">No folders yet.</p>
+                  ) : null}
+                  {navigation?.folders.map((folder) => {
+                    const families = folderFamilies(folder.id);
+                    return (
+                      <div className="conversation-folder" key={folder.id}>
+                        <div className="conversation-folder-row">
+                          <FolderIcon />
+                          <strong>{folder.name}</strong>
+                          <span>{families.length}</span>
+                          <button
+                            type="button"
+                            aria-label={`Rename folder ${folder.name}`}
+                            disabled={folderBusy}
+                            onClick={() =>
+                              setFolderEditor({
+                                mode: "rename",
+                                folderId: folder.id,
+                                name: folder.name,
+                              })
+                            }
+                          >
+                            Rename
+                          </button>
+                          <button
+                            type="button"
+                            aria-label={`Delete folder ${folder.name}`}
+                            disabled={folderBusy}
+                            onClick={() => setDeleteFolderId(folder.id)}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                        {deleteFolderId === folder.id ? (
+                          <div className="conversation-folder-delete" role="alert">
+                            <span>Delete {folder.name}? Its work items move to Recent.</span>
+                            <div>
+                              <Button
+                                className="btn-small"
+                                variant="danger"
+                                disabled={folderBusy}
+                                onClick={() => void confirmDeleteFolder(folder)}
+                              >
+                                {folderBusy ? "Deleting…" : "Confirm delete"}
+                              </Button>
+                              <Button
+                                className="btn-small"
+                                disabled={folderBusy}
+                                onClick={() => setDeleteFolderId(null)}
+                              >
+                                Cancel
+                              </Button>
+                            </div>
                           </div>
-                        </div>
-                      ) : null}
-                      {families.length > 0 ? (
-                        <div className="conversation-list">
-                          {families.map(renderConversationFamily)}
-                        </div>
-                      ) : null}
-                    </div>
-                  );
-                })}
-              </section>
-            </>
+                        ) : null}
+                        {families.length > 0 ? (
+                          <div className="conversation-list">
+                            {families.map(renderConversationFamily)}
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </section>
+              </>
+            ) : null}
+            <section
+              className="conversation-sidebar-section conversation-recent"
+              aria-labelledby="conversation-recent"
+            >
+              <h3 id="conversation-recent">{searching ? "Results" : "Recent"}</h3>
+              {groups === null ? <Spinner label="Loading work items…" /> : null}
+              {groups?.length === 0 ? (
+                <p className="conversation-list-empty">No work items yet.</p>
+              ) : null}
+              {groups?.length && visibleFamilies.length === 0 ? (
+                <p className="conversation-list-empty">No work items match your search.</p>
+              ) : null}
+              <div className="conversation-list">
+                {recentFamilies.map(renderConversationFamily)}
+              </div>
+            </section>
+          </div>
+          {conversationSidebarCollapsed ? (
+            <Button
+              className="conversation-sidebar-collapsed-new"
+              variant="ghost"
+              aria-label="Start new work"
+              onClick={startNewWork}
+            >
+              <ChatIcon />
+            </Button>
           ) : null}
-          <section
-            className="conversation-sidebar-section conversation-recent"
-            aria-labelledby="conversation-recent"
-          >
-            <h3 id="conversation-recent">{searching ? "Results" : "Recent"}</h3>
-            {groups === null ? <Spinner label="Loading work items…" /> : null}
-            {groups?.length === 0 ? (
-              <p className="conversation-list-empty">No work items yet.</p>
-            ) : null}
-            {groups?.length && visibleFamilies.length === 0 ? (
-              <p className="conversation-list-empty">No work items match your search.</p>
-            ) : null}
-            <div className="conversation-list">{recentFamilies.map(renderConversationFamily)}</div>
-          </section>
-        </div>
-        {conversationSidebarCollapsed ? (
-          <Button
-            className="conversation-sidebar-collapsed-new"
-            variant="ghost"
-            aria-label="Start new work"
-            onClick={startNewWork}
-          >
-            <ChatIcon />
-          </Button>
-        ) : null}
-        {conversationMenu
-          ? createPortal(
-              <div
-                className="conversation-context-menu"
-                role="menu"
-                aria-label="Conversation actions"
-                style={{
-                  left: conversationMenu.x,
-                  top: conversationMenu.y,
-                  maxHeight: `calc(100dvh - ${conversationMenu.y}px - 0.5rem)`,
-                }}
-              >
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setRenameTitle(conversationMenu.title);
-                    setRenamingWorkItemId(conversationMenu.workItemId);
-                    setConversationMenu(null);
+          {conversationMenu
+            ? createPortal(
+                <div
+                  className="conversation-context-menu"
+                  role="menu"
+                  aria-label="Conversation actions"
+                  style={{
+                    left: conversationMenu.x,
+                    top: conversationMenu.y,
+                    maxHeight: `calc(100dvh - ${conversationMenu.y}px - 0.5rem)`,
                   }}
                 >
-                  Rename title
-                </button>
-                {organizationAvailable && menuOrganization ? (
-                  <>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      disabled={organizationBusyWorkItemId === conversationMenu.workItemId}
-                      onClick={() =>
-                        void changeOrganization(conversationMenu.workItemId, {
-                          pinned: menuOrganization.pinned_at === null,
-                        })
-                      }
-                    >
-                      {menuOrganization.pinned_at ? "Unpin" : "Pin"}
-                    </button>
-                    <div className="conversation-context-menu-label">Move to folder</div>
-                    {menuOrganization.folder_id ? (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setRenameTitle(conversationMenu.title);
+                      setRenamingWorkItemId(conversationMenu.workItemId);
+                      setConversationMenu(null);
+                    }}
+                  >
+                    Rename title
+                  </button>
+                  {organizationAvailable && menuOrganization ? (
+                    <>
                       <button
                         type="button"
                         role="menuitem"
                         disabled={organizationBusyWorkItemId === conversationMenu.workItemId}
                         onClick={() =>
-                          void changeOrganization(conversationMenu.workItemId, { folder_id: null })
-                        }
-                      >
-                        Remove from folder
-                      </button>
-                    ) : null}
-                    {navigation?.folders.map((folder) => (
-                      <button
-                        type="button"
-                        role="menuitem"
-                        disabled={
-                          organizationBusyWorkItemId === conversationMenu.workItemId ||
-                          menuOrganization.folder_id === folder.id
-                        }
-                        key={`move:${conversationMenu.workItemId}:${folder.id}`}
-                        onClick={() =>
                           void changeOrganization(conversationMenu.workItemId, {
-                            folder_id: folder.id,
+                            pinned: menuOrganization.pinned_at === null,
                           })
                         }
                       >
-                        {folder.name}
+                        {menuOrganization.pinned_at ? "Unpin" : "Pin"}
                       </button>
-                    ))}
-                  </>
-                ) : null}
-                <div className="conversation-context-menu-danger">
-                  {conversationMenu.confirmDelete ? (
-                    <>
-                      <span>Delete this chat? Its history will be archived.</span>
+                      <div className="conversation-context-menu-label">Move to folder</div>
+                      {menuOrganization.folder_id ? (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={organizationBusyWorkItemId === conversationMenu.workItemId}
+                          onClick={() =>
+                            void changeOrganization(conversationMenu.workItemId, {
+                              folder_id: null,
+                            })
+                          }
+                        >
+                          Remove from folder
+                        </button>
+                      ) : null}
+                      {navigation?.folders.map((folder) => (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={
+                            organizationBusyWorkItemId === conversationMenu.workItemId ||
+                            menuOrganization.folder_id === folder.id
+                          }
+                          key={`move:${conversationMenu.workItemId}:${folder.id}`}
+                          onClick={() =>
+                            void changeOrganization(conversationMenu.workItemId, {
+                              folder_id: folder.id,
+                            })
+                          }
+                        >
+                          {folder.name}
+                        </button>
+                      ))}
+                    </>
+                  ) : null}
+                  <div className="conversation-context-menu-danger">
+                    {conversationMenu.confirmDelete ? (
+                      <>
+                        <span>Delete this chat? Its history will be archived.</span>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="is-danger"
+                          disabled={deleteWorkItemId === conversationMenu.workItemId}
+                          onClick={() => void deleteWork(conversationMenu.workItemId)}
+                        >
+                          {deleteWorkItemId === conversationMenu.workItemId
+                            ? "Deleting…"
+                            : "Confirm delete"}
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled={deleteWorkItemId === conversationMenu.workItemId}
+                          onClick={() =>
+                            setConversationMenu((current) =>
+                              current ? { ...current, confirmDelete: false } : current,
+                            )
+                          }
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
                       <button
                         type="button"
                         role="menuitem"
                         className="is-danger"
-                        disabled={deleteWorkItemId === conversationMenu.workItemId}
-                        onClick={() => void deleteWork(conversationMenu.workItemId)}
-                      >
-                        {deleteWorkItemId === conversationMenu.workItemId
-                          ? "Deleting…"
-                          : "Confirm delete"}
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        disabled={deleteWorkItemId === conversationMenu.workItemId}
                         onClick={() =>
                           setConversationMenu((current) =>
-                            current ? { ...current, confirmDelete: false } : current,
+                            current ? { ...current, confirmDelete: true } : current,
                           )
                         }
                       >
-                        Cancel
+                        Delete chat
                       </button>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      role="menuitem"
-                      className="is-danger"
-                      onClick={() =>
-                        setConversationMenu((current) =>
-                          current ? { ...current, confirmDelete: true } : current,
-                        )
-                      }
-                    >
-                      Delete chat
-                    </button>
-                  )}
-                </div>
-              </div>,
-              document.body,
-            )
-          : null}
-      </aside>
+                    )}
+                  </div>
+                </div>,
+                document.body,
+              )
+            : null}
+        </aside>
+      ) : null}
 
       <div className={`conversation-main${showNew ? " is-new-work" : ""}`}>
         {error ? (
@@ -8092,6 +8181,7 @@ export function ConversationWorkspace({
               }}
               onEditMessage={editConversationMessage}
               onOpenConversation={openConversationById}
+              onNewWork={startNewWork}
               onQcJourneyChange={handleQcJourneyChange}
               onConversationModelChanged={(conversation) => {
                 setDetail((current) => (current ? { ...current, conversation } : current));
@@ -8113,7 +8203,7 @@ export function ConversationWorkspace({
         ) : null}
         {!showNew && !detail && (groups === null || loadingDetail) ? (
           <div className="conversation-main-loading">
-            <Spinner label={groups === null ? "Loading conversations…" : "Loading conversation…"} />
+            <Spinner label={groups === null ? "Loading work items…" : "Loading conversation…"} />
           </div>
         ) : null}
         {!showNew && !detail && groupsLoadFailed ? (

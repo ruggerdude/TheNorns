@@ -15,7 +15,7 @@ import { pmModelOption } from "@norns/contracts";
 // before this change; it renders once `graph` exists and is otherwise
 // dormant behind the "No plan yet" hint.
 import type { Connection, Edge, Node } from "@xyflow/react";
-import { Fragment, Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { SettingsTab } from "./Account";
 import { Debates } from "./Debates";
@@ -444,85 +444,13 @@ interface ProjectJourneyState {
 }
 
 const PROJECT_JOURNEY: ReadonlyArray<{ id: ProjectJourneyStage; label: string }> = [
-  { id: 1, label: "Define the project" },
+  { id: 1, label: "Define" },
   { id: 2, label: "Project Manager" },
   { id: 3, label: "Plan" },
   { id: 4, label: "Quality Control" },
   { id: 5, label: "Plan Review" },
-  { id: 6, label: "Deployment" },
+  { id: 6, label: "Development" },
 ];
-
-function ProjectJourney({ current, skipped, qc }: ProjectJourneyState): React.ReactElement {
-  const skippedStages = new Set(skipped);
-  const qcStepState = (step: "qc" | "pm"): "current" | "complete" | "next" => {
-    if (qc?.active === "complete") return "complete";
-    if (qc?.active === step) return "current";
-    return step === "qc" || (step === "pm" && (qc?.round ?? 1) > 1) ? "complete" : "next";
-  };
-  return (
-    <nav className="project-journey" aria-label="Project journey">
-      <ol>
-        {PROJECT_JOURNEY.map((stage) => {
-          const isCurrent = stage.id === current;
-          const isSkipped = skippedStages.has(stage.id);
-          const isComplete = stage.id < current && !isSkipped;
-          const state = isCurrent
-            ? "current"
-            : isSkipped
-              ? "skipped"
-              : isComplete
-                ? "complete"
-                : "next";
-          return (
-            <li
-              className={`is-${state}`}
-              aria-current={isCurrent ? "step" : undefined}
-              key={stage.id}
-            >
-              <span className="project-journey-marker" aria-hidden="true">
-                {isComplete ? "✓" : stage.id}
-              </span>
-              <span className="project-journey-label">
-                <small>Step {stage.id}</small>
-                <strong>{stage.label}</strong>
-              </span>
-              <span className="sr-only">{` — ${state}`}</span>
-            </li>
-          );
-        })}
-      </ol>
-      {current === 4 && qc ? (
-        <fieldset className="project-journey-qc">
-          <legend className="sr-only">
-            Quality control cycle, round {qc.round} of {qc.maxRounds}
-          </legend>
-          {(["qc", "pm"] as const).map((step, index) => {
-            const state = qcStepState(step);
-            return (
-              <Fragment key={step}>
-                {index > 0 ? (
-                  <span className="project-journey-qc-loop" aria-hidden="true">
-                    ↔
-                  </span>
-                ) : null}
-                <span
-                  className={`project-journey-qc-step is-${state}`}
-                  aria-current={state === "current" ? "step" : undefined}
-                >
-                  <span aria-hidden="true">{state === "complete" ? "✓" : index + 1}</span>
-                  <strong>{step === "qc" ? "QC Review" : "PM Review"}</strong>
-                </span>
-              </Fragment>
-            );
-          })}
-          <small>
-            Round {qc.round} of {qc.maxRounds}
-          </small>
-        </fieldset>
-      ) : null}
-    </nav>
-  );
-}
 
 function ProjectGraph({
   project,
@@ -604,7 +532,6 @@ function ProjectGraph({
     qc: null,
   }));
   const [mobileWorkspaceNavOpen, setMobileWorkspaceNavOpen] = useState(false);
-  const { navigationRailCollapsed, toggleNavigationRail } = useNavigationRail();
   const previousInitialWorkRoute = useRef(initialWorkRoute);
   const suppressRouteExitReset = useRef(false);
   const [lastWorkspaceUpdateAt, setLastWorkspaceUpdateAt] = useState<Date | null>(null);
@@ -1328,10 +1255,8 @@ function ProjectGraph({
   // dashboard entry and fires no dashboard fetch.
 
   return (
-    <div className={`workspace-shell${navigationRailCollapsed ? " navigation-collapsed" : ""}`}>
-      {/* The shared rail names the active project explicitly; project
-          switching stays in Portfolio instead of duplicating browser tabs. */}
-      <header className="topbar">
+    <div className="workspace-shell workspace-compact-shell">
+      <header className="topbar workspace-top-menu">
         <div className="workspace-nav-start">
           <Brand onHome={onBack} />
           <PortfolioMenu
@@ -1342,11 +1267,9 @@ function ProjectGraph({
             onUnauthorized={() => onLogout("Session expired. Sign in again.")}
           />
           <div className="workspace-rail-project" data-testid="workspace-project-context">
-            <span>Project</span>
             <strong title={project.name}>{project.name}</strong>
           </div>
         </div>
-        <NavigationRailToggle collapsed={navigationRailCollapsed} onToggle={toggleNavigationRail} />
         <Button
           className="btn-small workspace-mobile-menu"
           aria-controls="workspace-navigation"
@@ -1495,6 +1418,12 @@ function ProjectGraph({
             </div>
           ) : null}
         </nav>
+        <div className="workspace-current-phase" aria-label="Current workflow phase">
+          <span>{projectJourney.current}</span>
+          <strong>
+            {PROJECT_JOURNEY.find((stage) => stage.id === projectJourney.current)?.label}
+          </strong>
+        </div>
         {user ? (
           <AuthenticatedHeaderActions
             user={user}
@@ -1506,7 +1435,6 @@ function ProjectGraph({
         ) : null}
       </header>
       <main className={`page workspace-page workspace-page-${workspaceTab}`}>
-        <ProjectJourney {...projectJourney} />
         <div className="project-heading workspace-header">
           <h1>{project.name}</h1>
         </div>
