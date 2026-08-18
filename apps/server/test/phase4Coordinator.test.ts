@@ -1201,6 +1201,92 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     expect(counts.rows[0]?.replacement_agent).toBe("agent-2");
   });
 
+  it("resumes the prior coding session when a retry keeps the same runner and agent", async () => {
+    const scheduled = await schedule();
+    const transactions = new PGliteTransactionRunner(pg);
+    const dispatch = new Phase4DispatchRepository(transactions);
+    await dispatch.claim("dispatcher-a", 30_000);
+    await dispatch.markDelivered(
+      scheduled.dispatch_job_id,
+      "dispatcher-a",
+      "2026-07-16T20:01:00.000Z",
+    );
+    await pg.query("UPDATE agent_runs SET runtime_session_id=$2 WHERE id=$1", [
+      scheduled.run_id,
+      "coding-session-1",
+    ]);
+    const events = new Phase4EventProcessor(transactions);
+    await events.apply({
+      protocol: 1,
+      event_seq: 1,
+      runner_id: "runner-1",
+      generation: 3,
+      correlation_id: "correlation-1",
+      causation_id: scheduled.command_id,
+      occurred_at: "2026-07-16T20:02:00.000Z",
+      payload: {
+        kind: "run_status",
+        run_id: scheduled.run_id,
+        status: "failed",
+        failure: {
+          stage: "runtime",
+          code: "runner_runtime_unsuccessful",
+          detail: "the turn limit stopped this attempt",
+        },
+      },
+    });
+    const task = await pg.query<{ aggregate_version: number }>(
+      "SELECT aggregate_version FROM tasks WHERE id='task-1'",
+    );
+    const recovery = new Phase4RecoveryActionService(
+      transactions,
+      new PhaseLaunchService(
+        transactions,
+        coordinator,
+        {
+          assembleForTask: async () => [
+            {
+              artifact_id: "retry-prompt",
+              content_hash: "c".repeat(64),
+              byte_size: 12,
+              storage_ref: "relay://artifacts/retry-prompt",
+            },
+          ],
+        },
+        new DispatchContextScopeRepository(transactions),
+        () => ({ runner_id: "runner-1", runner_generation: 3 }),
+      ),
+    );
+    const retried = await recovery.retry({
+      project_id: "project-1",
+      phase_id: "phase-1",
+      task_id: "task-1",
+      failed_run_id: scheduled.run_id,
+      expected_task_version: task.rows[0]?.aggregate_version ?? 0,
+      actor: { actor_type: "human", actor_id: "admin-1" },
+      authorized_by_session_id: "session-recovery",
+      idempotency_key: "retry-same-session-once",
+      correlation_id: "correlation-retry",
+      causation_id: scheduled.run_id,
+      issued_at: "2026-07-16T20:05:00.000Z",
+      adjustment: { budget_limit_usd: 15 },
+    });
+    const replacement = await pg.query<{ envelope: Record<string, unknown> }>(
+      `SELECT command.envelope
+         FROM dispatch_jobs job
+         JOIN commands command ON command.command_id=job.command_id
+        WHERE job.run_id=$1`,
+      [retried.run_id],
+    );
+    expect(replacement.rows[0]?.envelope).toMatchObject({
+      recovery: {
+        previous_run_id: scheduled.run_id,
+        resume_session_id: "coding-session-1",
+        session_portability: "same_runner",
+      },
+    });
+  });
+
   it("safely cancels a terminal failed phase and makes the project phase slot available", async () => {
     const scheduled = await schedule();
     const transactions = new PGliteTransactionRunner(pg);

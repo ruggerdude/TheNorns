@@ -807,6 +807,18 @@ export class SqlV2BudgetSweepRepository implements V2BudgetSweepRepository {
               project_id
        FROM budget_reservations
        WHERE status = 'active' AND expires_at <= $1
+         -- expires_at is the dispatch-delivery lease, not the execution
+         -- deadline. Once a runner has accepted the command, a planned coding
+         -- run can legitimately outlive that short lease. Releasing its money
+         -- while it is still running makes the next gateway request look like
+         -- budget exhaustion even when virtually none of the reservation was
+         -- spent.
+         AND NOT EXISTS (
+           SELECT 1 FROM agent_runs live_run
+            WHERE live_run.id=budget_reservations.run_id
+              AND live_run.state IN ('running','verifying')
+              AND live_run.superseded_at IS NULL
+         )
          AND NOT EXISTS (
            SELECT 1 FROM human_waits wait
             WHERE wait.budget_reservation_id=budget_reservations.id

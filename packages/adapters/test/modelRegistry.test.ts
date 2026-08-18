@@ -175,6 +175,20 @@ describe("selectable PM model metering", () => {
     });
   });
 
+  it("prices Sonnet cache reads and writes at the published cache multipliers", () => {
+    const sonnet = DEFAULT_MODEL_REGISTRY["claude-sonnet-5"];
+    expect(sonnet).toBeDefined();
+    if (!sonnet) throw new Error("Sonnet 5 registry entry is missing");
+    expect(snapshotModelPricing("anthropic", "claude-sonnet-5")).toMatchObject({
+      input_per_mtok: 2,
+      cache_read_per_mtok: 0.2,
+      cache_write_per_mtok: 2.5,
+      output_per_mtok: 10,
+      pricing_version: "anthropic-2026-07-intro-cache-corrected",
+    });
+    expect(estimateCostUsd(sonnet, 1_000_000, 100_000, 800_000, 100_000)).toBeCloseTo(1.61, 9);
+  });
+
   it("rejects provider/model mismatches and unsafe token caps", () => {
     expect(() => snapshotModelPricing("anthropic", "gpt-5.6-sol")).toThrow(
       "model anthropic/gpt-5.6-sol not in registry",

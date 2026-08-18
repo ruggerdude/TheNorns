@@ -305,6 +305,32 @@ describe("V2 immutable dispatch identity", () => {
     expect(V2DispatchCommand.parse(dispatch).execution_mode).toBeUndefined();
   });
 
+  it("carries a same-runner coding-session receipt on a terminal retry", () => {
+    const parsed = V2DispatchCommand.parse({
+      ...dispatch,
+      recovery: {
+        previous_run_id: "run-previous",
+        resume_session_id: "session-previous",
+        session_portability: "same_runner",
+      },
+    });
+    expect(parsed.recovery).toEqual({
+      previous_run_id: "run-previous",
+      resume_session_id: "session-previous",
+      session_portability: "same_runner",
+    });
+    expect(
+      V2DispatchCommand.safeParse({
+        ...dispatch,
+        recovery: {
+          previous_run_id: "run-previous",
+          resume_session_id: "session-previous",
+          session_portability: "cross_runner_verified",
+        },
+      }).success,
+    ).toBe(false);
+  });
+
   it("selects API or subscription credentials without rewriting legacy dispatches", () => {
     expect(V2DispatchCommand.parse({ ...dispatch, credential_mode: "api" }).credential_mode).toBe(
       "api",

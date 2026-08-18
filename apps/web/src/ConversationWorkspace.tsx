@@ -3740,7 +3740,7 @@ function suggestedDevelopmentLimit(current: number): number {
   return Math.ceil(Math.max(current * 2, current + 25, 25) / 25) * 25;
 }
 
-function DevelopmentBudgetRecovery({
+function DevelopmentRecovery({
   projectId,
   phaseId,
   task,
@@ -3761,6 +3761,10 @@ function DevelopmentBudgetRecovery({
   const currentLimit = task.assignment?.budget_limit_usd ?? task.cost.budget_usd ?? 0;
   const nextLimit = suggestedDevelopmentLimit(currentLimit);
   const spent = task.cost.spend_usd;
+  const budgetFailure = isAutomaticLimitFailure(run?.failure_detail);
+  const turnLimitFailure = /(?:maximum number of turns|error_max_turns)/i.test(
+    run?.failure_detail ?? "",
+  );
 
   useEffect(() => {
     let current = true;
@@ -3823,22 +3827,41 @@ function DevelopmentBudgetRecovery({
     <section className="conversation-development-recovery" aria-labelledby="recovery-title">
       <div>
         <span className="eyebrow">Development needs a decision</span>
-        <h4 id="recovery-title">The automatic execution limit stopped this attempt</h4>
-        <p>
-          The Project Manager assigned this task a {usd(currentLimit)} safety limit from the
-          approved plan. You did not set it separately.
-          {spent === null
-            ? " No metered spend was available for this attempt."
-            : ` The attempt actually used ${usd(spent)} before the gateway needed more headroom for its next request.`}
-        </p>
+        <h4 id="recovery-title">
+          {budgetFailure
+            ? "The automatic execution limit stopped this attempt"
+            : turnLimitFailure
+              ? "The agent reached its turn limit before it finished"
+              : "This development attempt stopped before it finished"}
+        </h4>
+        {budgetFailure ? (
+          <p>
+            The Project Manager assigned this task a {usd(currentLimit)} safety ceiling from the
+            approved plan. You did not set it separately, and this ceiling is not spend.
+            {spent === null
+              ? " No metered spend was available for this attempt."
+              : ` Corrected metered spend for the attempt is ${usd(spent)}.`}
+          </p>
+        ) : (
+          <p>
+            Continue with the same agent to preserve its coding session and avoid repeating the
+            repository analysis. You can also switch agents or stop development.
+          </p>
+        )}
       </div>
       <div className="conversation-development-recovery-actions">
         <Button
           variant="primary"
           disabled={busy !== null}
-          onClick={() => void recover("budget", { budget_limit_usd: nextLimit })}
+          onClick={() =>
+            void recover("budget", budgetFailure ? { budget_limit_usd: nextLimit } : undefined)
+          }
         >
-          {busy === "budget" ? "Retrying…" : `Increase limit to ${usd(nextLimit)} and retry`}
+          {busy === "budget"
+            ? "Continuing…"
+            : budgetFailure
+              ? `Increase limit to ${usd(nextLimit)} and retry`
+              : "Continue this agent"}
         </Button>
         <div className="conversation-development-agent-switch">
           <Select
@@ -4058,16 +4081,14 @@ function DevelopmentAgentDialogue({
               onUnauthorized={onUnauthorized}
             />
           ) : null}
-          {task?.run && phaseId && isAutomaticLimitFailure(task.run.failure_detail) ? (
-            <DevelopmentBudgetRecovery
+          {task?.run && phaseId && task.run.failure_detail ? (
+            <DevelopmentRecovery
               projectId={projectId}
               phaseId={phaseId}
               task={task}
               onRecovered={onRecovered}
               onUnauthorized={onUnauthorized}
             />
-          ) : task?.run?.failure_detail ? (
-            <Alert testId={`development-task-failure-${task.id}`}>{task.run.failure_detail}</Alert>
           ) : null}
         </div>
       ) : (

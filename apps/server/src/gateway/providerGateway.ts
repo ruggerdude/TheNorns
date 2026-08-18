@@ -1170,12 +1170,16 @@ export class ProviderGateway {
       return;
     }
     const cacheReadTokens = Math.min(inputTokens, usage.cache_read_input_tokens);
-    const ordinaryInputTokens = inputTokens - cacheReadTokens;
-    const cacheReadRate = pricing.cache_read_per_mtok ?? pricing.input_per_mtok;
+    const cacheWriteTokens = Math.min(
+      inputTokens - cacheReadTokens,
+      usage.cache_creation_input_tokens,
+    );
+    const ordinaryInputTokens = inputTokens - cacheReadTokens - cacheWriteTokens;
     const costUsd =
       Math.ceil(
         ordinaryInputTokens * pricing.input_per_mtok +
-          cacheReadTokens * cacheReadRate +
+          cacheReadTokens * pricing.cache_read_per_mtok +
+          cacheWriteTokens * pricing.cache_write_per_mtok +
           usage.output_tokens * pricing.output_per_mtok,
       ) / 1_000_000;
 

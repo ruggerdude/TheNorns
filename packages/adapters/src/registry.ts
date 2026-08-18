@@ -17,6 +17,8 @@ export interface ModelEntry {
   input_per_mtok: number;
   /** Published cache-hit input price; omitted legacy entries use the regular input rate. */
   cache_read_per_mtok?: number;
+  /** Published cache-creation input price; omitted entries use the regular input rate. */
+  cache_write_per_mtok?: number;
   output_per_mtok: number;
   pricing_version: string;
   /** true when pricing is a config guess rather than a published rate */
@@ -56,9 +58,10 @@ export const DEFAULT_MODEL_REGISTRY: Record<string, ModelEntry> = {
     supports_structured_output: true,
     supports_images: true,
     input_per_mtok: 2,
-    cache_read_per_mtok: 2,
+    cache_read_per_mtok: 0.2,
+    cache_write_per_mtok: 2.5,
     output_per_mtok: 10,
-    pricing_version: "anthropic-2026-07-intro",
+    pricing_version: "anthropic-2026-07-intro-cache-corrected",
     pricing_is_estimate: false,
   },
   "claude-haiku-4-5-20251001": {
@@ -290,6 +293,7 @@ export function modelAvailabilityFromDebateEnvironment(
 export interface ModelPricingSnapshot extends ModelSelection {
   input_per_mtok: number;
   cache_read_per_mtok: number;
+  cache_write_per_mtok: number;
   output_per_mtok: number;
   pricing_version: string;
   pricing_is_estimate: boolean;
@@ -346,12 +350,15 @@ export function snapshotModelPricing(
   assertPrice("input_per_mtok", entry.input_per_mtok);
   const cacheReadPrice = entry.cache_read_per_mtok ?? entry.input_per_mtok;
   assertPrice("cache_read_per_mtok", cacheReadPrice);
+  const cacheWritePrice = entry.cache_write_per_mtok ?? entry.input_per_mtok;
+  assertPrice("cache_write_per_mtok", cacheWritePrice);
   assertPrice("output_per_mtok", entry.output_per_mtok);
   return Object.freeze({
     provider,
     model,
     input_per_mtok: entry.input_per_mtok,
     cache_read_per_mtok: cacheReadPrice,
+    cache_write_per_mtok: cacheWritePrice,
     output_per_mtok: entry.output_per_mtok,
     pricing_version: entry.pricing_version,
     pricing_is_estimate: entry.pricing_is_estimate,
@@ -452,12 +459,15 @@ export function estimateCostUsd(
   inputTokens: number,
   outputTokens: number,
   cacheReadTokens = 0,
+  cacheWriteTokens = 0,
 ): number {
-  const uncachedInputTokens = inputTokens - cacheReadTokens;
+  const uncachedInputTokens = inputTokens - cacheReadTokens - cacheWriteTokens;
   const cacheReadPrice = entry.cache_read_per_mtok ?? entry.input_per_mtok;
+  const cacheWritePrice = entry.cache_write_per_mtok ?? entry.input_per_mtok;
   return (
     (uncachedInputTokens / 1_000_000) * entry.input_per_mtok +
     (cacheReadTokens / 1_000_000) * cacheReadPrice +
+    (cacheWriteTokens / 1_000_000) * cacheWritePrice +
     (outputTokens / 1_000_000) * entry.output_per_mtok
   );
 }
@@ -490,7 +500,13 @@ export function makeUsageEvent(
     output_tokens: outputTokens,
     cache_read_tokens: cache.readTokens ?? 0,
     cache_write_tokens: cache.writeTokens ?? 0,
-    estimated_cost_usd: estimateCostUsd(entry, inputTokens, outputTokens, cache.readTokens),
+    estimated_cost_usd: estimateCostUsd(
+      entry,
+      inputTokens,
+      outputTokens,
+      cache.readTokens,
+      cache.writeTokens,
+    ),
     actual_cost_usd: null, // reconciled post-hoc where the provider exposes it
     usage_source: source,
     pricing_version: entry.pricing_version,

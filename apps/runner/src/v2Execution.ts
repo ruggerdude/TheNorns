@@ -680,16 +680,9 @@ export interface RunnerRuntimeContext {
    */
   credentialMode?: RuntimeCredentialMode;
   /**
-   * EXECUTION E11 — the runtime session a previous job left behind, when the
-   * coordinator is resuming rather than starting fresh.
-   *
-   * The seam exists here, unpopulated, on purpose. `ClaudeCodeRuntime` and
-   * `CodexRuntime` have accepted `resumeSessionId` / `resumeThreadId` since
-   * they were written and nothing has ever set either, because there is no
-   * field on `V2DispatchCommand` that carries a prior session id and no store
-   * that remembers one. Adding that field is a contract change and is routed to
-   * the PM (see docs/phases/EXECUTION-E11-resumability.md); this parameter is
-   * the runner half, ready for it.
+   * The runtime session a previous attempt left behind. Recovery dispatches
+   * populate this only when runner, provider, runtime, and model are unchanged,
+   * so Claude/Codex can continue instead of repeating repository analysis.
    */
   resumeSessionId?: string;
 }
@@ -795,6 +788,8 @@ export class V2RunnerExecutor {
           : (() => {
               throw new Error("dispatch credential_mode is unsupported");
             })();
+    const resumeSessionId =
+      command.continuation?.resume_session_id ?? command.recovery?.resume_session_id;
     const runtime =
       typeof runtimeProvider === "function"
         ? runtimeProvider(command.model, {
@@ -804,12 +799,11 @@ export class V2RunnerExecutor {
             provider: command.provider,
             credentialMode,
             ...(command.reasoning_effort ? { reasoningEffort: command.reasoning_effort } : {}),
-            ...(command.continuation?.resume_session_id
-              ? { resumeSessionId: command.continuation.resume_session_id }
-              : {}),
+            ...(resumeSessionId ? { resumeSessionId } : {}),
           })
         : runtimeProvider;
     let scratch: string | undefined;
+    let runtimeStateDirectory: string | undefined;
     let worktree: PreparedWorktree | undefined;
     let stage: RunnerExecutionStage = "context_load";
 
@@ -836,6 +830,7 @@ export class V2RunnerExecutor {
     let sessionId: string | null = null;
     let session: RuntimeSession | null = null;
     let settled: V2RunnerExecutionResult["outcome"] = "failed";
+    let removeRuntimeState = false;
     // Starts true because no managed process exists before a runtime or
     // verification command is spawned. Every spawned boundary may only turn
     // this false; process-exit evidence consumes the final conjunction.
@@ -964,6 +959,7 @@ export class V2RunnerExecutor {
     /** Records the terminal outcome so a later control command can explain it. */
     const finish = (result: V2RunnerExecutionResult): V2RunnerExecutionResult => {
       settled = result.outcome;
+      removeRuntimeState = result.outcome === "succeeded";
       return result;
     };
     /** The cancelled result, shaped once so every early exit agrees. */
@@ -1177,7 +1173,11 @@ export class V2RunnerExecutor {
           "Do not commit these staged source files unless the task explicitly requires them as repository fixtures.",
         ].join("\n\n");
       }
-      const runtimeStateDirectory = resolve(scratch, "runtime-state");
+      runtimeStateDirectory = resolve(
+        scratchRoot,
+        "runtime-state",
+        createHash("sha256").update(command.task_id).digest("hex"),
+      );
       await mkdir(runtimeStateDirectory, { recursive: true, mode: 0o700 });
       await writeFile(resolve(scratch, "prompt.txt"), prompt, { mode: 0o600 });
       // Local workspace removal or filesystem replacement may happen while
@@ -1215,10 +1215,22 @@ export class V2RunnerExecutor {
       // If the adapter throws after spawning but before returning a proof, the
       // result must remain unconfirmed.
       processTreeReaped = false;
+      const runtimePrompt = command.recovery
+        ? [
+            "Continue the previous coding session for this same approved task.",
+            "The approved scope and task package are unchanged; do not repeat repository discovery or planning already completed in the prior session.",
+            "Inspect the current worktree, continue implementation from the prior session, run the required verification, and commit the result.",
+            command.human_wait_channel ? humanWaitPrompt() : "",
+          ]
+            .filter(Boolean)
+            .join("\n\n")
+        : command.human_wait_channel
+          ? `${prompt}\n\n${humanWaitPrompt()}\n\nWork efficiently: inspect only the files needed, begin making concrete changes early, then verify and commit. Do not spend repeated turns restating or replanning the approved task.`
+          : `${prompt}\n\nWork efficiently: inspect only the files needed, begin making concrete changes early, then verify and commit. Do not spend repeated turns restating or replanning the approved task.`;
       let runtimeResult = await runtime.run({
         runId: command.run_id,
         worktreePath: worktree.path,
-        prompt: command.human_wait_channel ? `${prompt}\n${humanWaitPrompt()}` : prompt,
+        prompt: runtimePrompt,
         additionalReadDirectories: approvedInputDirectory ? [approvedInputDirectory] : [],
         runtimeStateDirectory,
         humanWaitPath,
@@ -1882,6 +1894,9 @@ export class V2RunnerExecutor {
         await worktree?.cleanup().catch(() => undefined);
       }
       if (scratch) await rm(scratch, { recursive: true, force: true });
+      if (runtimeStateDirectory && removeRuntimeState) {
+        await rm(runtimeStateDirectory, { recursive: true, force: true }).catch(() => undefined);
+      }
     }
   }
 

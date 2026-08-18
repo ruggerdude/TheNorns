@@ -57,6 +57,46 @@ describe("Claude Code unattended execution policy", () => {
     });
     expect(CLAUDE_CODE_QUICK_MAX_TURNS).toBeGreaterThan(12);
     expect(CLAUDE_CODE_QUICK_MAX_TURNS).toBeLessThan(25);
+    expect(CLAUDE_CODE_PLANNED_MAX_TURNS).toBeGreaterThan(25);
+  });
+
+  it("emits concrete file and command activity without exposing the worktree root", async () => {
+    const logs: string[] = [];
+    const queryImpl = (() => ({
+      interrupt: async () => undefined,
+      async *[Symbol.asyncIterator]() {
+        yield {
+          type: "assistant",
+          message: {
+            content: [
+              {
+                type: "tool_use",
+                name: "Read",
+                input: { file_path: "/isolated/worktree/apps/web/src/App.tsx" },
+              },
+              {
+                type: "tool_use",
+                name: "Bash",
+                input: { command: "pnpm test --filter web" },
+              },
+            ],
+          },
+        };
+        yield { type: "result", subtype: "success", result: "done" };
+      },
+    })) as never;
+
+    await new ClaudeCodeRuntime({ queryImpl }).run({
+      runId: "run-visible-activity",
+      worktreePath: "/isolated/worktree",
+      prompt: "Do the work.",
+      onLog: (line) => logs.push(line),
+    });
+
+    expect(logs.map((line) => JSON.parse(line))).toEqual([
+      { type: "norns_activity", text: "Running tests · pnpm test --filter web" },
+    ]);
+    expect(logs.join(" ")).not.toContain("/isolated/worktree");
   });
 
   it("does not invent an SDK dollar ceiling for a zero-cost dispatch", async () => {

@@ -44,22 +44,6 @@ type RunActivity = {
   text: string;
 };
 
-function toolActivity(name: string): string {
-  if (name === "Read") return "Reading project files";
-  if (name === "Edit" || name === "Write") return "Editing project files";
-  if (name === "Glob" || name === "Grep") return "Searching the codebase";
-  if (name === "Bash") return "Running a repository command";
-  return `Using ${name}`;
-}
-
-function decodedJsonString(value: string): string {
-  try {
-    return JSON.parse(`"${value}"`) as string;
-  } catch {
-    return value;
-  }
-}
-
 function activityFromEntry(entry: RunLogEntryDto): RunActivity | null {
   const chunk = entry.chunk.trim();
   if (!chunk) return null;
@@ -67,24 +51,8 @@ function activityFromEntry(entry: RunLogEntryDto): RunActivity | null {
   try {
     value = JSON.parse(chunk);
   } catch {
-    const toolName = /"type":"tool_use"[^}]*"name":"([^"]+)"/.exec(chunk)?.[1];
-    if (toolName) {
-      return {
-        sequence: entry.sequence,
-        occurredAt: entry.occurred_at,
-        kind: "tool",
-        text: toolActivity(toolName),
-      };
-    }
-    const text = /"type":"text","text":"((?:\\.|[^"\\])*)"/.exec(chunk)?.[1];
-    if (text) {
-      return {
-        sequence: entry.sequence,
-        occurredAt: entry.occurred_at,
-        kind: "message",
-        text: decodedJsonString(text),
-      };
-    }
+    // Older runtimes emitted raw SDK JSON. Suppress it instead of recreating
+    // the noisy, generic reading/searching/reasoning feed.
     if (chunk.startsWith("{")) return null;
     return {
       sequence: entry.sequence,
@@ -95,63 +63,13 @@ function activityFromEntry(entry: RunLogEntryDto): RunActivity | null {
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
-  if (record.type === "system" && record.subtype === "thinking_tokens") {
-    const tokens = typeof record.estimated_tokens === "number" ? record.estimated_tokens : null;
+  if (record.type === "norns_activity" && typeof record.text === "string") {
     return {
       sequence: entry.sequence,
       occurredAt: entry.occurred_at,
-      kind: "reasoning",
-      text: tokens
-        ? `Reasoning through the implementation · about ${tokens.toLocaleString()} tokens`
-        : "Reasoning through the implementation",
+      kind: "tool",
+      text: record.text,
     };
-  }
-  if (record.type === "system" && record.subtype === "init") {
-    return {
-      sequence: entry.sequence,
-      occurredAt: entry.occurred_at,
-      kind: "session",
-      text: "Agent session started",
-    };
-  }
-  if (record.type === "assistant") {
-    const message = record.message;
-    const content =
-      message && typeof message === "object" && !Array.isArray(message)
-        ? (message as Record<string, unknown>).content
-        : null;
-    if (Array.isArray(content)) {
-      const tool = content.find(
-        (item) =>
-          item &&
-          typeof item === "object" &&
-          !Array.isArray(item) &&
-          (item as Record<string, unknown>).type === "tool_use",
-      ) as Record<string, unknown> | undefined;
-      if (tool && typeof tool.name === "string") {
-        return {
-          sequence: entry.sequence,
-          occurredAt: entry.occurred_at,
-          kind: "tool",
-          text: toolActivity(tool.name),
-        };
-      }
-      const text = content.find(
-        (item) =>
-          item &&
-          typeof item === "object" &&
-          !Array.isArray(item) &&
-          (item as Record<string, unknown>).type === "text",
-      ) as Record<string, unknown> | undefined;
-      if (text && typeof text.text === "string" && text.text.trim()) {
-        return {
-          sequence: entry.sequence,
-          occurredAt: entry.occurred_at,
-          kind: "message",
-          text: text.text.trim(),
-        };
-      }
-    }
   }
   if (record.type === "result") {
     return {
@@ -295,9 +213,9 @@ export function RunLog({
   return (
     <details className="run-log" data-testid={`task-run-log-${taskId}`} open={active}>
       <summary>
-        Agent activity
+        Development activity
         {totalEntries !== null
-          ? ` · ${activities.length} visible update${activities.length === 1 ? "" : "s"}`
+          ? ` · ${activities.length} useful update${activities.length === 1 ? "" : "s"}`
           : runId
             ? ""
             : " · not available"}
@@ -310,7 +228,9 @@ export function RunLog({
             The agent is connected. Waiting for its first visible update.
           </span>
         ) : activities.length === 0 ? (
-          <span className="muted">The agent is active. Waiting for its next visible update.</span>
+          <span className="muted">
+            Waiting for a file change, verification result, commit, or blocker.
+          </span>
         ) : (
           <ol className="run-activity-list" data-testid={`task-run-log-output-${taskId}`}>
             {activities.map((activity) => (

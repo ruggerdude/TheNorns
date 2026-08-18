@@ -585,11 +585,32 @@ export class Phase4Coordinator {
       ) {
         throw new Phase4CoordinatorConflictError("approved phase budget is insufficient");
       }
+      let recovery:
+        | {
+            previous_run_id: string;
+            resume_session_id: string;
+            session_portability: "same_runner";
+          }
+        | undefined;
+      let recoveryBaseRevision: string | null = null;
       if (isReplacement) {
-        const prior = await sql.query<{ id: string; state: string }>(
-          `SELECT id, state FROM agent_runs
-           WHERE id=$1 AND task_id=$2 AND is_designated=true
-             AND superseded_at IS NULL
+        const prior = await sql.query<{
+          id: string;
+          state: string;
+          runner_id: string;
+          runtime_session_id: string | null;
+          provider: string;
+          runtime: string;
+          model: string;
+          published_commit_sha: string | null;
+        }>(
+          `SELECT run.id, run.state, run.runner_id, run.runtime_session_id,
+                  run.published_commit_sha, profile.provider, profile.runtime, profile.model
+             FROM agent_runs run
+             JOIN agent_assignments assignment ON assignment.id=run.assignment_id
+             JOIN agent_profiles profile ON profile.id=assignment.agent_profile_id
+           WHERE run.id=$1 AND run.task_id=$2 AND run.is_designated=true
+             AND run.superseded_at IS NULL
            FOR UPDATE`,
           [input.supersedes_run_id, input.task_id],
         );
@@ -603,6 +624,24 @@ export class Phase4Coordinator {
           throw new Phase4CoordinatorConflictError(
             "replacement must supersede the current designated green review run or a terminal failed run prepared for retry",
           );
+        }
+        if (validTerminalRetry && priorRun.published_commit_sha) {
+          recoveryBaseRevision = priorRun.published_commit_sha;
+        }
+        if (
+          validTerminalRetry &&
+          priorRun.runtime_session_id &&
+          priorRun.runner_id === input.runner_id &&
+          priorRun.provider === row.provider &&
+          resolveDispatchRuntime(priorRun.runtime, priorRun.provider) ===
+            resolveDispatchRuntime(row.runtime, row.provider) &&
+          priorRun.model === row.model
+        ) {
+          recovery = {
+            previous_run_id: priorRun.id,
+            resume_session_id: priorRun.runtime_session_id,
+            session_portability: "same_runner",
+          };
         }
       }
       await sql.query(
@@ -621,7 +660,7 @@ export class Phase4Coordinator {
           attempt,
           input.runner_id,
           row.repository_binding_id,
-          row.expected_revision,
+          recoveryBaseRevision ?? row.expected_revision,
           !isReplacement,
           row.initiated_by_user_id,
         ],
@@ -755,7 +794,7 @@ export class Phase4Coordinator {
         ...(row.repository_binding_type === "local_runner" && row.runner_repository_id
           ? { runner_repository_id: row.runner_repository_id }
           : {}),
-        expected_revision: row.expected_revision,
+        expected_revision: recoveryBaseRevision ?? row.expected_revision,
         target_branch: input.target_branch,
         worktree_policy_ref: input.worktree_policy_ref,
         // EXECUTION E10 (E9-9) — dispatch a runtime the runner can construct.
@@ -782,6 +821,7 @@ export class Phase4Coordinator {
           version: V2_HUMAN_WAIT_CHANNEL_VERSION,
           instruction_hash: V2_HUMAN_WAIT_INSTRUCTION_HASH,
         },
+        ...(recovery ? { recovery } : {}),
         budget_reservation_id: reservationId,
         max_charge_usd: maxCharge,
         max_input_tokens: input.max_input_tokens,

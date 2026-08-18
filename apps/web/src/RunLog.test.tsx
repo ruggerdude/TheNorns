@@ -81,7 +81,7 @@ describe("RunLog polling", () => {
 
     expect(screen.queryByText(/old run output/)).not.toBeInTheDocument();
     expect(screen.getByText(/new run second line/)).toBeVisible();
-    expect(screen.getByText(/Agent activity · 2 visible updates/)).toBeVisible();
+    expect(screen.getByText(/Development activity · 2 useful updates/)).toBeVisible();
     expect(mock.calls.some((call) => call.url.endsWith("/run-log?after=100"))).toBe(true);
     expect(mock.calls.filter((call) => call.url.endsWith("/run-log"))).toHaveLength(2);
     expect(mock.calls[0]?.url).toContain(
@@ -120,12 +120,18 @@ describe("readable RunLog activity", () => {
           message: { content: [{ type: "tool_use", name: "Bash" }] },
         }),
       },
+      {
+        sequence: 5,
+        occurred_at: "2026-07-25T17:00:04.000Z",
+        chunk: JSON.stringify({
+          type: "norns_activity",
+          text: "Editing apps/web/src/RunLog.tsx",
+        }),
+      },
     ]);
 
     expect(activities.map((activity) => activity.text)).toEqual([
-      "Agent session started",
-      "Reasoning through the implementation · about 250 tokens",
-      "Running a repository command",
+      "Editing apps/web/src/RunLog.tsx",
     ]);
   });
 });

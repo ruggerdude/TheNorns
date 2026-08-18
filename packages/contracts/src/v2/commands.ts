@@ -578,6 +578,20 @@ export const V2DispatchCommand = z
       })
       .strict()
       .optional(),
+    /**
+     * A terminal retry may continue the same coding session when it stays on
+     * the same runner and agent. This is intentionally separate from a human
+     * wait continuation: retries create a new run/budget receipt, but should
+     * not make the agent rediscover the repository from scratch.
+     */
+    recovery: z
+      .object({
+        previous_run_id: V2EntityId,
+        resume_session_id: V2NonEmptyString,
+        session_portability: z.literal("same_runner"),
+      })
+      .strict()
+      .optional(),
     budget_reservation_id: V2EntityId,
     max_charge_usd: z.number().nonnegative(),
     max_input_tokens: z.number().int().nonnegative(),

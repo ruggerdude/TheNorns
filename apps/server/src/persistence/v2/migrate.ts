@@ -532,6 +532,12 @@ export const QC_TERMINAL_FOLLOWUP_CHAT_MIGRATION_URL = new URL(
   "../../../drizzle/0083_qc_terminal_followup_chat.sql",
   import.meta.url,
 );
+export const SONNET_CACHE_PRICING_CORRECTION_MIGRATION_NAME =
+  "0084_sonnet_cache_pricing_correction";
+export const SONNET_CACHE_PRICING_CORRECTION_MIGRATION_URL = new URL(
+  "../../../drizzle/0084_sonnet_cache_pricing_correction.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -895,6 +901,10 @@ export async function loadHeldExecutionKickoffMigrationSql(): Promise<string> {
 
 export async function loadQcTerminalFollowupChatMigrationSql(): Promise<string> {
   return readFile(QC_TERMINAL_FOLLOWUP_CHAT_MIGRATION_URL, "utf8");
+}
+
+export async function loadSonnetCachePricingCorrectionMigrationSql(): Promise<string> {
+  return readFile(SONNET_CACHE_PRICING_CORRECTION_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1400,6 +1410,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: QC_TERMINAL_FOLLOWUP_CHAT_MIGRATION_NAME,
       sql: await loadQcTerminalFollowupChatMigrationSql(),
+    },
+    {
+      name: SONNET_CACHE_PRICING_CORRECTION_MIGRATION_NAME,
+      sql: await loadSonnetCachePricingCorrectionMigrationSql(),
     },
   ];
 }

@@ -1,3 +1,4 @@
+import { basename, isAbsolute, relative } from "node:path";
 // Claude Code runtime via the official Claude Agent SDK.
 //
 // EXECUTION E9 — this runtime is credential-free when a gateway is supplied.
@@ -54,7 +55,7 @@ import type { CodingRuntime, RuntimeRunRequest, RuntimeRunResult, RuntimeUsage }
  * planned work retains a larger but still explicit ceiling.
  */
 export const CLAUDE_CODE_QUICK_MAX_TURNS = 18;
-export const CLAUDE_CODE_PLANNED_MAX_TURNS = 25;
+export const CLAUDE_CODE_PLANNED_MAX_TURNS = 60;
 
 /**
  * This runtime has no interactive permission channel: its prompt explicitly
@@ -73,6 +74,81 @@ export const CLAUDE_CODE_AUTONOMOUS_TOOLS = [
   "Grep",
   "Bash",
 ] as const;
+
+function visiblePath(value: unknown, worktreePath: string): string | null {
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  const path = value.trim();
+  if (!isAbsolute(path)) return path.slice(0, 180);
+  const within = relative(worktreePath, path);
+  if (within && !within.startsWith("..") && !isAbsolute(within)) return within.slice(0, 180);
+  return basename(path).slice(0, 180);
+}
+
+function safeCommand(value: unknown, worktreePath: string): string | null {
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  return (
+    value
+      .trim()
+      .split("\n", 1)[0]
+      ?.replaceAll(worktreePath, ".")
+      .replace(/((?:api[_-]?key|token|authorization)\s*[=:]\s*)\S+/gi, "$1[redacted]")
+      .slice(0, 180) ?? null
+  );
+}
+
+function activityForTool(name: string, input: unknown, worktreePath: string): string | null {
+  const fields =
+    input && typeof input === "object" && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : {};
+  const file = visiblePath(fields.file_path ?? fields.path, worktreePath);
+  if (name === "Edit" || name === "Write") {
+    return file ? `Editing ${file}` : "Editing project files";
+  }
+  if (name === "Bash") {
+    const command = safeCommand(fields.command, worktreePath);
+    if (!command) return null;
+    if (/\bgit\s+commit\b/i.test(command)) return "Creating the implementation commit";
+    if (/\bgit\s+push\b/i.test(command)) return "Publishing the implementation commit";
+    if (/\b(?:pnpm|npm|yarn|bun)\s+(?:install|add|ci)\b/i.test(command)) {
+      return `Installing dependencies · ${command}`;
+    }
+    if (
+      /\b(?:test|vitest|jest|pytest|cargo\s+test|go\s+test|dotnet\s+test|mvn\s+test)\b/i.test(
+        command,
+      )
+    ) {
+      return `Running tests · ${command}`;
+    }
+    if (/\b(?:build|lint|typecheck|tsc|check)\b/i.test(command)) {
+      return `Verifying the implementation · ${command}`;
+    }
+    return null;
+  }
+  // Reads, searches, and other internal bookkeeping made the old feed look
+  // busy without telling the user what changed.
+  return null;
+}
+
+function visibleActivity(message: unknown, worktreePath: string): string[] {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return [];
+  const record = message as Record<string, unknown>;
+  if (record.type !== "assistant") return [];
+  const envelope = record.message;
+  if (!envelope || typeof envelope !== "object" || Array.isArray(envelope)) return [];
+  const content = (envelope as Record<string, unknown>).content;
+  if (!Array.isArray(content)) return [];
+  const updates: string[] = [];
+  for (const item of content) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const block = item as Record<string, unknown>;
+    if (block.type === "tool_use" && typeof block.name === "string") {
+      const activity = activityForTool(block.name, block.input, worktreePath);
+      if (activity) updates.push(activity);
+    }
+  }
+  return updates;
+}
 
 function stopReasonFromError(detail: string): string | undefined {
   if (/error_max_turns|maximum (?:number of )?turns|max(?:imum)? turns/i.test(detail)) {
@@ -359,7 +435,11 @@ export class ClaudeCodeRuntime implements CodingRuntime {
         if (msg.type === "system" && msg.subtype === "permission_denied" && msg.tool_name) {
           observedStopReason = `permission_denied:${msg.tool_name}`;
         }
-        if (msg.type === "assistant" || msg.type === "system") {
+        if (msg.type === "assistant") {
+          for (const text of visibleActivity(message, request.worktreePath)) {
+            request.onLog?.(JSON.stringify({ type: "norns_activity", text }));
+          }
+        } else if (msg.type === "system") {
           request.onLog?.(JSON.stringify(message).slice(0, 500));
         }
         if (msg.type === "result") {

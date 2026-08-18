@@ -6,15 +6,23 @@ import {
   executeV2ApplicationCommand,
   upsertV2DecisionPoint,
 } from "../src/persistence/v2/application.js";
-import { resolveV2BudgetReservationTransaction } from "../src/persistence/v2/budget.js";
+import {
+  resolveV2BudgetReservationTransaction,
+  sweepV2OrphanReservations,
+} from "../src/persistence/v2/budget.js";
 import {
   type PGliteDatabaseLike,
   PGliteTransactionRunner,
 } from "../src/persistence/v2/database.js";
-import { type V2MigrationDatabase, runPhase1V2Migration } from "../src/persistence/v2/migrate.js";
+import {
+  type V2MigrationDatabase,
+  loadSonnetCachePricingCorrectionMigrationSql,
+  runCurrentV2Migrations,
+} from "../src/persistence/v2/migrate.js";
 import { reconcileV2Lifecycles } from "../src/persistence/v2/reconciliation.js";
 import {
   SqlV2ApplicationTransaction,
+  SqlV2BudgetSweepRepository,
   SqlV2DecisionPointTransaction,
   SqlV2LifecycleRepository,
   sqlV2BudgetTransactionFactory,
@@ -30,7 +38,7 @@ describe.sequential("V2 concrete SQL repositories", () => {
     pg = new PGlite();
     runner = new PGliteTransactionRunner(pg as unknown as PGliteDatabaseLike);
     await pg.exec("CREATE ROLE norns_app NOLOGIN");
-    await runPhase1V2Migration(pg as unknown as V2MigrationDatabase);
+    await runCurrentV2Migrations(pg as unknown as V2MigrationDatabase);
     await pg.exec(`
       INSERT INTO projects (
         id, name, status, assignment_policy_ref, verification_policy_ref, budget_policy_ref
@@ -221,6 +229,115 @@ describe.sequential("V2 concrete SQL repositories", () => {
         summary: "Command failed: phase_not_ready",
       },
     ]);
+  });
+
+  it("corrects historical Sonnet cache charges without rewriting the canonical ledger", async () => {
+    await pg.exec(`
+      INSERT INTO ai_usage_events (
+        id, request_id, sequence, event_type, status, occurred_at,
+        provider, model, endpoint, request_type, project_id, phase_id,
+        task_id, run_id, usage_source, confidence, input_tokens,
+        output_tokens, cache_read_tokens, cache_write_tokens, cost_usd,
+        cost_classification
+      ) VALUES
+        (
+          'cache-start', 'cache-request', 1, 'request_started', 'started',
+          '2026-07-16T11:59:58.000Z', 'anthropic', 'claude-sonnet-5',
+          '/v1/messages', 'execution', 'project-1', 'phase-1', 'task-1',
+          'run-1', 'unavailable', 1, NULL, NULL, NULL, NULL, NULL, 'unavailable'
+        ),
+        (
+          'cache-usage', 'cache-request', 2, 'usage_observed', 'in_progress',
+          '2026-07-16T11:59:59.000Z', 'anthropic', 'claude-sonnet-5',
+          '/v1/messages', 'execution', 'project-1', 'phase-1', 'task-1',
+          'run-1', 'provider_api', 1, 1000000, 100000, 800000, 100000,
+          3.000000000, 'actual'
+        ),
+        (
+          'cache-complete', 'cache-request', 3, 'request_completed', 'succeeded',
+          '2026-07-16T12:00:00.000Z', 'anthropic', 'claude-sonnet-5',
+          '/v1/messages', 'execution', 'project-1', 'phase-1', 'task-1',
+          'run-1', 'unavailable', 1, NULL, NULL, NULL, NULL, NULL, 'unavailable'
+        );
+      INSERT INTO usage_events (
+        id, project_id, phase_id, task_id, run_id, provider, model,
+        input_tokens, output_tokens, cost_usd, occurred_at
+      ) VALUES (
+        'legacy-cache-usage', 'project-1', 'phase-1', 'task-1', 'run-1',
+        'anthropic', 'claude-sonnet-5', 1000000, 100000, 3.000000,
+        '2026-07-16T11:59:59.000Z'
+      );
+    `);
+
+    const correction = await loadSonnetCachePricingCorrectionMigrationSql();
+    await pg.exec(correction);
+    await pg.exec(correction);
+
+    expect(
+      (
+        await pg.query<{ count: number; adjustment: string }>(
+          `SELECT count(*)::int AS count, min(cost_usd)::text AS adjustment
+             FROM ai_usage_events
+            WHERE id='cache-price-correction:cache-usage'`,
+        )
+      ).rows[0],
+    ).toEqual({ count: 1, adjustment: "-1.390000000" });
+    expect(
+      (
+        await pg.query<{ cost_usd: string }>(
+          "SELECT cost_usd::text FROM usage_events WHERE id='legacy-cache-usage'",
+        )
+      ).rows[0],
+    ).toEqual({ cost_usd: "1.610000" });
+    expect(
+      (
+        await pg.query<{ usage_cost_usd: string }>(
+          "SELECT usage_cost_usd::text FROM agent_runs WHERE id='run-1'",
+        )
+      ).rows[0],
+    ).toEqual({ usage_cost_usd: "1.610000" });
+  });
+
+  it("does not expire a live run's reservation when its delivery lease elapses", async () => {
+    await pg.exec(`
+      INSERT INTO agent_runs (
+        id, project_id, phase_id, task_id, assignment_id, attempt, state,
+        lifecycle_version, is_designated, repository_binding_id, expected_revision
+      ) VALUES (
+        'run-live-lease', 'project-1', 'phase-1', 'task-1', 'assignment-1', 2,
+        'running', 1, false, 'binding-1', '0123456789abcdef'
+      );
+      INSERT INTO budget_reservations (
+        id, project_id, phase_id, task_id, run_id, amount_usd,
+        status, version, expires_at
+      ) VALUES (
+        'reservation-live-lease', 'project-1', 'phase-1', 'task-1', 'run-live-lease',
+        20, 'active', 1, '2026-07-15T12:00:00.000Z'
+      );
+    `);
+
+    const result = await sweepV2OrphanReservations({
+      transactionRunner: runner,
+      transactionFactory: sqlV2BudgetTransactionFactory,
+      sweepRepositoryFactory: {
+        bind: (sql) => new SqlV2BudgetSweepRepository(sql),
+      },
+      now: () => new Date(NOW),
+    });
+
+    expect(result).toEqual({ repaired: [], raced: [] });
+    expect(
+      (
+        await pg.query<{ status: string; resolution_outcome: string | null }>(
+          "SELECT status, resolution_outcome FROM budget_reservations WHERE id='reservation-live-lease'",
+        )
+      ).rows[0],
+    ).toEqual({ status: "active", resolution_outcome: null });
+
+    await pg.exec(`
+      DELETE FROM budget_reservations WHERE id='reservation-live-lease';
+      DELETE FROM agent_runs WHERE id='run-live-lease';
+    `);
   });
 
   it("creates, reuses, and supersedes DecisionPoints with durable history", async () => {

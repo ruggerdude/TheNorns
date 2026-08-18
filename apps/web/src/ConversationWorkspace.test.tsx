@@ -5321,7 +5321,7 @@ describe("conversation workspace", () => {
       }),
     ).toBeVisible();
     expect(screen.getByText(/you did not set it separately/i)).toBeVisible();
-    expect(screen.getByText(/actually used \$0\.82/i)).toBeVisible();
+    expect(screen.getByText(/corrected metered spend for the attempt is \$0\.82/i)).toBeVisible();
     expect(screen.getAllByText(failure)).toHaveLength(1);
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Switch agent and retry" })).toBeEnabled(),
