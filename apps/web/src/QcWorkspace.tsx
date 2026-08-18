@@ -86,6 +86,10 @@ function currentRound(review: V2ConversationPlanReviewT): number {
   return Math.max(1, Math.min(review.rounds_completed + 1, review.max_rounds));
 }
 
+function isWaitingOnHuman(review: V2ConversationPlanReviewT): boolean {
+  return review.status === "awaiting_human" && review.live_progress == null;
+}
+
 export interface QcReviewJourney {
   active: "qc" | "pm" | "complete";
   round: number;
@@ -96,7 +100,7 @@ function pmOwnsReviewStep(review: V2ConversationPlanReviewT): boolean {
   const live = review.live_progress;
   const liveIsPm =
     live?.provider === review.pm_provider && live.model !== null && live.model === review.pm_model;
-  const waitingOnHuman = review.status === "awaiting_human";
+  const waitingOnHuman = isWaitingOnHuman(review);
   return (
     liveIsPm ||
     (waitingOnHuman && review.paused_checkpoint === "after_revision") ||
@@ -118,7 +122,7 @@ function activeQcAgent(review: V2ConversationPlanReviewT): {
   provider: string;
   model: string;
 } {
-  const waitingOnHuman = review.status === "awaiting_human";
+  const waitingOnHuman = isWaitingOnHuman(review);
   const pmOwnsStep = pmOwnsReviewStep(review);
   return {
     state: waitingOnHuman
@@ -1365,8 +1369,8 @@ export function QcWorkspace({
   const round = currentRound(review);
   const terminal = TERMINAL.has(review.status);
   const isPlanReview = terminal && (view === "plan_review" || view === undefined);
-  const awaitingFindingDecision =
-    review.status === "awaiting_human" && review.paused_checkpoint === "after_review";
+  const waitingOnHuman = isWaitingOnHuman(review);
+  const awaitingFindingDecision = waitingOnHuman && review.paused_checkpoint === "after_review";
   const visibleError = error && !/not awaiting human input/i.test(error) ? error : null;
   const accepted = (review.finding_decisions ?? []).filter(
     (item) => item.decision === "accept",
@@ -1375,11 +1379,11 @@ export function QcWorkspace({
     ? "Final plan decision"
     : `Round ${terminal ? review.rounds_completed : round} of ${review.max_rounds}`;
   const stageDetail =
-    review.status === "awaiting_human" && review.paused_checkpoint === "after_review"
+    waitingOnHuman && review.paused_checkpoint === "after_review"
       ? `Reviewer pass complete. ${currentFindings.length} finding${currentFindings.length === 1 ? " is" : "s are"} waiting for your decision before the PM can revise anything.`
-      : review.status === "awaiting_human" && review.paused_checkpoint === "after_revision"
+      : waitingOnHuman && review.paused_checkpoint === "after_revision"
         ? "Plan revision complete. Review the PM response before continuing."
-        : review.status === "awaiting_human"
+        : waitingOnHuman
           ? "This round needs your ruling before QC can continue."
           : review.status === "converged"
             ? "Quality review passed. Approve this plan to begin development."
@@ -1415,7 +1419,7 @@ export function QcWorkspace({
         </div>
       </header>
 
-      {!isPlanReview && !terminal && review.status !== "awaiting_human" ? (
+      {!isPlanReview && !terminal && !waitingOnHuman ? (
         <QcProgressPopout review={review} accepted={accepted} phaseNumbers={phaseNumbers} />
       ) : null}
 
@@ -1423,9 +1427,7 @@ export function QcWorkspace({
         <QcLiveDialogue review={review} history={history} phaseNumbers={phaseNumbers} />
       ) : null}
 
-      {!isPlanReview &&
-      review.status === "awaiting_human" &&
-      review.paused_checkpoint === "after_review" ? (
+      {!isPlanReview && waitingOnHuman && review.paused_checkpoint === "after_review" ? (
         <FindingTriage
           review={review}
           findings={currentFindings}
@@ -1439,9 +1441,7 @@ export function QcWorkspace({
         />
       ) : null}
 
-      {!isPlanReview &&
-      review.status === "awaiting_human" &&
-      review.paused_checkpoint === "after_revision" ? (
+      {!isPlanReview && waitingOnHuman && review.paused_checkpoint === "after_revision" ? (
         <section className="qc-new-decision">
           <div className="qc-new-decision-copy">
             <span>REVISION SAVED</span>
@@ -1472,9 +1472,7 @@ export function QcWorkspace({
         </section>
       ) : null}
 
-      {!isPlanReview &&
-      review.status === "awaiting_human" &&
-      review.paused_checkpoint === "adjudication" ? (
+      {!isPlanReview && waitingOnHuman && review.paused_checkpoint === "adjudication" ? (
         <AdjudicationDecision
           review={review}
           findings={findings}
@@ -1581,8 +1579,8 @@ export function QcWorkspace({
 
       {!isPlanReview &&
       !terminal &&
-      !(review.status === "awaiting_human" && review.paused_checkpoint === "after_review") &&
-      !(review.status === "awaiting_human" && review.paused_checkpoint === "after_revision") ? (
+      !(waitingOnHuman && review.paused_checkpoint === "after_review") &&
+      !(waitingOnHuman && review.paused_checkpoint === "after_revision") ? (
         <QcQuestionBox
           review={review}
           channel={pmOwnsReviewStep(review) ? "pm" : "reviewer"}

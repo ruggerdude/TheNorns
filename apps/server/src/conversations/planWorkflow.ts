@@ -219,6 +219,7 @@ interface ReviewRow {
   revision_format: V2QcRevisionFormatT;
   usage_request_group_id: string;
   status: V2ConversationPlanReviewT["status"];
+  planning_run_status: string;
   rounds_completed: number | string;
   max_rounds: number | string;
   round_exchanges: unknown;
@@ -334,6 +335,7 @@ const reviewColumns = `schema_version, id, project_id, work_item_id, conversatio
   qc_mode, qc_mode_source, qc_mode_changed_at_round, qc_mode_changed_by_user_id,
   allow_unadjudicated_rebuttals, human_steered_rounds,
   adjudications, forced_accept_module_ids, adjudication_idempotency_key,
+  (SELECT status FROM planning_runs WHERE id=planning_run_id) AS planning_run_status,
   (SELECT round FROM planning_runs WHERE id=planning_run_id) AS rounds_completed,
   (SELECT max_rounds FROM planning_runs WHERE id=planning_run_id) AS max_rounds,
   (SELECT live_progress FROM planning_runs WHERE id=planning_run_id) AS live_progress,
@@ -415,6 +417,30 @@ function toPlan(row: PlanRow): V2WorkPlanVersionT {
 
 function toReview(row: ReviewRow): V2ConversationPlanReviewT {
   const manifest = json<{ entries: unknown[] }>(row.context_manifest);
+  const decisions = uniqueFindingDecisions(row.finding_decisions);
+  const resumingFromGate = row.status === "awaiting_human" && row.planning_run_status === "queued";
+  const resumingWithPm = row.paused_checkpoint === "after_review";
+  const liveProgress =
+    row.live_progress !== null
+      ? V2PlanningLiveProgress.parse(json(row.live_progress))
+      : resumingFromGate
+        ? V2PlanningLiveProgress.parse({
+            stage: "preparing",
+            round: row.paused_at_round === null ? null : Number(row.paused_at_round),
+            attempt: 1,
+            provider: resumingWithPm ? row.pm_provider : row.reviewer_provider,
+            model: resumingWithPm ? row.pm_model : row.reviewer_model,
+            completed_items: 0,
+            total_items: 0,
+            output_characters: 0,
+            activity: resumingWithPm
+              ? "Sending your selected findings to the planning manager"
+              : "Sending the revised plan to the independent reviewer",
+            output_preview: null,
+            started_at: iso(row.updated_at),
+            checkpoint_at: iso(row.updated_at),
+          })
+        : null;
   return V2ConversationPlanReview.parse({
     schema_version: row.schema_version,
     id: row.id,
@@ -446,13 +472,12 @@ function toReview(row: ReviewRow): V2ConversationPlanReviewT {
     round_exchanges: json(row.round_exchanges),
     chat_messages: json(row.chat_messages),
     markdown_artifacts: json(row.markdown_artifacts),
-    live_progress:
-      row.live_progress === null ? null : V2PlanningLiveProgress.parse(json(row.live_progress)),
+    live_progress: liveProgress,
     plan_content_hash: row.plan_content_hash,
     result_plan_content_hash: row.result_plan_content_hash,
     context_manifest: { entries: manifest.entries, context_hash: row.context_hash },
     findings: json(row.findings),
-    finding_decisions: json(row.finding_decisions),
+    finding_decisions: decisions,
     dispositions: json(row.dispositions),
     revised_plan_version_id: row.revised_plan_version_id,
     paused_checkpoint: row.paused_checkpoint,
@@ -484,6 +509,19 @@ function toReview(row: ReviewRow): V2ConversationPlanReviewT {
  */
 function idempotentReplay(storedKey: string | null, requestedKey: string | undefined): boolean {
   return requestedKey !== undefined && storedKey === requestedKey;
+}
+
+/**
+ * Older resume requests could append the same gate decisions more than once
+ * while the underlying run was already queued. Keep the stored audit trail
+ * intact, but expose and consume only the latest decision for each finding so
+ * those historical rows remain readable under the one-decision contract.
+ */
+function uniqueFindingDecisions(value: unknown): FindingDecisionRecord[] {
+  const decisions = json<FindingDecisionRecord[]>(value);
+  const byFindingId = new Map<string, FindingDecisionRecord>();
+  for (const decision of decisions) byFindingId.set(decision.finding_id, decision);
+  return [...byFindingId.values()];
 }
 
 function confirmationFingerprint(action: V2ConversationActionT): string {
@@ -731,7 +769,7 @@ export class ConversationPlanWorkflowService {
         const priorFindingCount = exchanges
           .filter((exchange) => exchange.round < Number(row.paused_at_round))
           .reduce((total, exchange) => total + exchange.reviewer.findings.length, 0);
-        const acceptedFindingIndices = json<FindingDecisionRecord[]>(row.finding_decisions)
+        const acceptedFindingIndices = uniqueFindingDecisions(row.finding_decisions)
           .filter(
             (decision) =>
               decision.decision === "accept" && decision.finding_index >= priorFindingCount,
@@ -1185,6 +1223,23 @@ export class ConversationPlanWorkflowService {
         );
       }
       const now = this.now().toISOString();
+      // The review row deliberately retains its paused payload until the
+      // worker claims it. Claim the underlying parked run first, in this same
+      // transaction, so a fresh request key cannot append the gate decisions
+      // again during that queue/claim window.
+      const claimed = await tx.query<{ id: string }>(
+        `UPDATE planning_runs
+            SET status='queued', error=NULL, lease_token=NULL, leased_until=NULL, updated_at=$2
+          WHERE id=$1 AND mode='review_only' AND status='awaiting_human'
+          RETURNING id`,
+        [review.planning_run_id, now],
+      );
+      if (claimed.rows.length === 0) {
+        throw new ConversationPlanWorkflowError(
+          "invalid_plan_state",
+          `review "${reviewId}" is not awaiting human input`,
+        );
+      }
       if (review.paused_checkpoint === "after_review") {
         const supplied = input.findingDecisions ?? {};
         const exchanges = json<V2ConversationPlanReviewT["round_exchanges"]>(
@@ -1284,16 +1339,9 @@ export class ConversationPlanWorkflowService {
           [review.id, input.idempotencyKey, now],
         );
       }
-      // Only planning_runs moves back to queued here; the review row stays
-      // awaiting_human until the worker actually re-claims it and calls
-      // markReviewOnlyStarted (mirrors how a fresh run's review row only
-      // becomes 'running' once execution truly begins, not at enqueue time).
-      await tx.query(
-        `UPDATE planning_runs
-            SET status='queued', error=NULL, lease_token=NULL, leased_until=NULL, updated_at=$2
-          WHERE id=$1 AND mode='review_only'`,
-        [review.planning_run_id, now],
-      );
+      // The review row stays awaiting_human until the worker re-claims it and
+      // calls markReviewOnlyStarted. toReview projects the run's durable
+      // queued status as progress so clients do not present this gate again.
       const updated = await this.reloadReview(tx, reviewId);
       return { review: updated, resumed: true };
     });

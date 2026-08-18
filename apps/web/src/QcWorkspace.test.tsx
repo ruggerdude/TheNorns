@@ -280,6 +280,51 @@ describe("QcWorkspace", () => {
     expect(screen.queryByText(/No planning manager response/)).not.toBeInTheDocument();
   });
 
+  it("shows a durable PM handoff instead of offering the submitted findings again", () => {
+    renderWorkspace(
+      review({
+        finding_decisions: [
+          {
+            finding_id: "finding-1",
+            finding_index: 0,
+            decision: "accept",
+            decided_by_user_id: "user-1",
+            decided_at: now,
+          },
+          {
+            finding_id: "finding-2",
+            finding_index: 1,
+            decision: "accept",
+            decided_by_user_id: "user-1",
+            decided_at: now,
+          },
+        ],
+        live_progress: {
+          stage: "preparing",
+          round: 1,
+          attempt: 1,
+          provider: "anthropic",
+          model: "claude",
+          completed_items: 0,
+          total_items: 0,
+          output_characters: 0,
+          activity: "Sending your selected findings to the planning manager",
+          output_preview: null,
+          started_at: now,
+          checkpoint_at: now,
+        },
+      }),
+    );
+
+    expect(screen.queryByText("Which findings should the PM act on?")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Send all 2 to PM" })).not.toBeInTheDocument();
+    expect(screen.getByText("Working now")).toBeVisible();
+    expect(screen.getAllByText("Planning manager").length).toBeGreaterThan(0);
+    expect(
+      screen.getByText("Sending your selected findings to the planning manager"),
+    ).toBeVisible();
+  });
+
   it("renders structured reviewer JSON as readable finding cards", () => {
     renderWorkspace(
       review({

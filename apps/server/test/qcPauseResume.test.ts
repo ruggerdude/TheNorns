@@ -319,13 +319,14 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
       reviewer_provider: string;
       reviewer_model: string;
       findings: V2ConversationPlanReviewFindingT[];
+      finding_decisions: Array<{ finding_id: string; decision: "accept" | "reject" }>;
       dispositions: unknown;
     }>(
       `SELECT review.status, review.paused_checkpoint, review.paused_at_round,
               run.round AS rounds_completed, review.completed_at,
               review.revised_plan_version_id, review.result_plan_content_hash,
               review.plan_content_hash, review.reviewer_provider, review.reviewer_model,
-              review.findings, review.dispositions
+              review.findings, review.finding_decisions, review.dispositions
          FROM conversation_plan_reviews review
          JOIN planning_runs run ON run.id = review.planning_run_id
         WHERE review.id = $1`,
@@ -496,6 +497,18 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
     expect(dispatchCount).toBe(baseline + 1); // no second dispatch on replay
     expect(replay).toEqual(first);
 
+    await expect(
+      workflow.resumeReview(owner.id, sent.scope, sent.reviewId, {
+        exit: "continue",
+        idempotencyKey: "resume-key-from-another-browser",
+        findingDecisions,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_plan_state" });
+    expect(dispatchCount).toBe(baseline + 1);
+    expect((await reviewRow(sent.reviewId)).finding_decisions).toHaveLength(
+      Object.keys(findingDecisions).length,
+    );
+
     // The first resume runs the PM and reaches the configured round gate.
     await worker.runNow(sent.planningRunId);
     expect((await reviewRow(sent.reviewId)).paused_checkpoint).toBe("after_revision");
@@ -514,6 +527,37 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
         idempotencyKey: "resume-key-3",
       }),
     ).rejects.toMatchObject({ code: "invalid_plan_state" });
+  });
+
+  it("projects historical duplicate finding decisions once so the review remains readable", async () => {
+    const sent = await sendToQc("duplicate-decision-compatibility");
+    scriptGatedRoundPause("duplicate-decision-compatibility");
+    await worker.runNow(sent.planningRunId);
+    const parked = await reviewRow(sent.reviewId);
+    const findingDecisions = Object.fromEntries(
+      parked.findings.map((finding) => [finding.id, "accept" as const]),
+    );
+
+    await workflow.resumeReview(owner.id, sent.scope, sent.reviewId, {
+      exit: "continue",
+      idempotencyKey: "historical-duplicate-source",
+      findingDecisions,
+    });
+    await pg.query(
+      `UPDATE conversation_plan_reviews
+          SET finding_decisions=finding_decisions || finding_decisions
+        WHERE id=$1`,
+      [sent.reviewId],
+    );
+
+    const detail = await workflow.detail(
+      owner.id,
+      sent.scope.projectId,
+      sent.scope.workItemId,
+      sent.scope.conversationId,
+    );
+    const projected = detail.plan_reviews.find((item) => item.id === sent.reviewId);
+    expect(projected?.finding_decisions).toHaveLength(Object.keys(findingDecisions).length);
   });
 
   it("(f) cancel while parked succeeds and cancelReviewNow no-ops with no controller present", async () => {
