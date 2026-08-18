@@ -1016,6 +1016,10 @@ test("Workspace uses a compact top menu and one phase-chat sidebar", async ({ pa
   const phaseChats = page.getByRole("complementary", { name: "Phase chats" });
   await expect(phaseChats).toBeVisible();
   await expect(page.getByRole("complementary")).toHaveCount(1);
+  await expect(phaseChats.getByText("Project chats", { exact: true })).toHaveCount(0);
+  await expect(phaseChats.getByRole("heading", { name: "Chats" })).toBeVisible();
+  await expect(phaseChats.getByText("1. Define", { exact: true })).toHaveCount(0);
+  await expect(phaseChats.getByText("2. Project Manager", { exact: true })).toHaveCount(0);
   await expect(phaseChats.getByRole("button", { name: "Define", exact: true })).toHaveAttribute(
     "data-state",
     "complete",
@@ -1063,6 +1067,15 @@ test("Workspace uses a compact top menu and one phase-chat sidebar", async ({ pa
   expect(conversationChromeBox?.x ?? 0).toBeGreaterThanOrEqual(
     (phaseChatsBox?.x ?? 0) + (phaseChatsBox?.width ?? 0) - 1,
   );
+  const defineChatButton = phaseChats.getByRole("button", { name: "Define", exact: true });
+  expect(
+    (await defineChatButton.boundingBox())?.height ?? Number.POSITIVE_INFINITY,
+  ).toBeLessThanOrEqual(38);
+  expect(
+    await defineChatButton
+      .locator(".conversation-stage-label")
+      .evaluate((label) => getComputedStyle(label).fontWeight),
+  ).toBe("400");
 
   const sidebarScroll = await phaseChats.evaluate((sidebar) => {
     const filler = document.createElement("div");
@@ -1092,8 +1105,8 @@ test("Workspace uses a compact top menu and one phase-chat sidebar", async ({ pa
   await expect
     .poll(async () => (await phaseChats.boundingBox())?.width ?? Number.POSITIVE_INFINITY)
     .toBeLessThanOrEqual(64);
-  await expect(phaseChats.getByTitle("1. Define")).toBeVisible();
-  await expect(phaseChats.getByTitle("2. Project Manager")).toBeVisible();
+  await expect(phaseChats.getByTitle("Define")).toBeVisible();
+  await expect(phaseChats.getByTitle("Project Manager")).toBeVisible();
 
   await page.setViewportSize({ width: 1280, height: 720 });
   const compactTopMenuBox = await topMenu.boundingBox();
@@ -1169,12 +1182,12 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
       style="height: 820px"
     >
       <aside class="conversation-stage-sidebar" aria-label="Phase chats">
-        <header><div><span class="eyebrow">Project chats</span><h2>Chats</h2></div></header>
-        <button class="conversation-stage-new"><span>＋</span><strong>New work</strong></button>
+        <header><h2>Chats</h2></header>
+        <button class="conversation-stage-new"><span>＋</span><span class="conversation-stage-label">New work</span></button>
         <nav>
-          <button data-state="complete"><span>1</span><strong>1. Define</strong></button>
-          <button data-state="complete"><span>2</span><strong>2. Project Manager</strong></button>
-          <button data-state="active"><span>6</span><strong>6. Development</strong></button>
+          <button data-state="complete"><span>1</span><span class="conversation-stage-label">Define</span></button>
+          <button data-state="complete"><span>2</span><span class="conversation-stage-label">Project Manager</span></button>
+          <button data-state="active"><span>6</span><span class="conversation-stage-label">Development</span></button>
         </nav>
       </aside>
       <section class="conversation-development-phases" aria-label="Development phases">
@@ -1376,8 +1389,8 @@ test("Mobile workspace opens navigation as a drawer and keeps chat usable", asyn
   await expect(page.getByRole("complementary")).toHaveCount(1);
   const phaseChatsBox = await phaseChats.boundingBox();
   expect(phaseChatsBox?.width ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(390);
-  await expect(phaseChats.getByTitle("1. Define")).toBeVisible();
-  await expect(phaseChats.getByTitle("2. Project Manager")).toBeVisible();
+  await expect(phaseChats.getByTitle("Define")).toBeVisible();
+  await expect(phaseChats.getByTitle("Project Manager")).toBeVisible();
 
   await page.getByRole("button", { name: "Use conversation as plan" }).click();
   const planDialog = page.getByRole("dialog", { name: "Confirm QC Settings" });

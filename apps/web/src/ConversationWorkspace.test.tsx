@@ -4667,6 +4667,10 @@ describe("conversation workspace", () => {
     const phaseChats = await screen.findByRole("complementary", { name: "Phase chats" });
     expect(document.querySelectorAll("aside")).toHaveLength(1);
     expect(document.querySelector(".conversation-sidebar")).not.toBeInTheDocument();
+    expect(within(phaseChats).queryByText("Project chats")).not.toBeInTheDocument();
+    expect(within(phaseChats).getByRole("heading", { name: "Chats" })).toBeInTheDocument();
+    expect(within(phaseChats).queryByText("1. Define")).not.toBeInTheDocument();
+    expect(within(phaseChats).queryByText("2. Project Manager")).not.toBeInTheDocument();
     expect(within(phaseChats).getByRole("button", { name: "Define" })).toHaveAttribute(
       "data-state",
       "complete",
@@ -4682,7 +4686,7 @@ describe("conversation workspace", () => {
     await userEvent.click(within(phaseChats).getByRole("button", { name: "Collapse phase chats" }));
     expect(within(phaseChats).getByRole("button", { name: "Plan review" })).toHaveAttribute(
       "title",
-      "5. Plan Review",
+      "Plan Review",
     );
   });
 
@@ -7076,7 +7080,7 @@ describe("conversation workspace", () => {
     );
     expect(screen.getByRole("button", { name: "Quality control" })).toHaveAttribute(
       "title",
-      "4. Quality Control",
+      "Quality Control",
     );
   });
 

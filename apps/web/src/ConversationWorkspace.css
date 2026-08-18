@@ -4133,10 +4133,6 @@
   gap: 0.35rem;
 }
 
-.conversation-stage-sidebar header > div {
-  min-width: 0;
-}
-
 .conversation-stage-sidebar .conversation-stage-collapse {
   display: grid;
   width: 2rem;
@@ -4155,11 +4151,11 @@
 .conversation-stage-new {
   display: grid;
   width: 100%;
-  min-height: 2.35rem;
+  min-height: 2.15rem;
   grid-template-columns: 1.35rem minmax(0, 1fr);
   align-items: center;
   gap: 0.4rem;
-  padding: 0.45rem 0.55rem;
+  padding: 0.3rem 0.5rem;
   border: 1px solid color-mix(in srgb, var(--brand-900) 35%, var(--line));
   border-radius: var(--radius-sm);
   color: var(--brand-900);
@@ -4168,25 +4164,27 @@
   cursor: pointer;
 }
 
-.conversation-stage-new strong,
-.conversation-stage-sidebar nav button strong {
+.conversation-stage-label {
+  display: block;
   min-width: 0;
   overflow: hidden;
+  font-size: var(--text-sm);
+  font-weight: 400;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .conversation-stage-sidebar nav button {
-  min-height: 2.55rem;
-  grid-template-columns: 1.65rem minmax(0, 1fr);
+  min-height: 2.2rem;
+  grid-template-columns: 1.5rem minmax(0, 1fr);
   gap: 0.4rem;
-  padding: 0.45rem;
+  padding: 0.3rem 0.4rem;
 }
 
 .conversation-stage-sidebar nav button > span:first-child {
   display: grid;
-  width: 1.65rem;
-  height: 1.65rem;
+  width: 1.5rem;
+  height: 1.5rem;
   place-items: center;
   border: 1px solid var(--line);
   border-radius: 50%;
@@ -4221,9 +4219,9 @@
   box-shadow: inset 3px 0 0 currentColor;
 }
 
-.conversation-stage-sidebar.is-collapsed header > div,
-.conversation-stage-sidebar.is-collapsed .conversation-stage-new strong,
-.conversation-stage-sidebar.is-collapsed nav button strong {
+.conversation-stage-sidebar.is-collapsed h2,
+.conversation-stage-sidebar.is-collapsed .conversation-stage-new .conversation-stage-label,
+.conversation-stage-sidebar.is-collapsed nav button .conversation-stage-label {
   display: none;
 }
 
@@ -4364,12 +4362,12 @@
     overflow-x: auto;
   }
 
-  .conversation-stage-sidebar.is-collapsed nav button strong {
+  .conversation-stage-sidebar.is-collapsed nav button .conversation-stage-label {
     display: block;
   }
 
   .conversation-stage-sidebar.is-collapsed nav button {
-    grid-template-columns: 1.65rem minmax(0, 1fr);
+    grid-template-columns: 1.5rem minmax(0, 1fr);
   }
 }
 
@@ -5971,17 +5969,9 @@
 }
 
 .conversation-stage-sidebar nav button {
-  grid-template-columns: 1.35rem minmax(0, 1fr);
+  grid-template-columns: 1.5rem minmax(0, 1fr);
   gap: 0.35rem;
-  padding: 0.55rem 0.45rem;
-}
-
-.conversation-stage-sidebar nav button strong {
-  display: block;
-  overflow: hidden;
-  font-size: var(--text-sm);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  padding: 0.3rem 0.4rem;
 }
 
 .conversation-stage-sidebar nav button small {

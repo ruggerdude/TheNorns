@@ -3598,10 +3598,7 @@ function ConversationStageSidebar({
       aria-label="Phase chats"
     >
       <header>
-        <div>
-          <span className="eyebrow">Project chats</span>
-          <h2>Chats</h2>
-        </div>
+        <h2>Chats</h2>
         <button
           type="button"
           className="conversation-stage-collapse"
@@ -3621,7 +3618,7 @@ function ConversationStageSidebar({
           onClick={onNewWork}
         >
           <span aria-hidden="true">＋</span>
-          <strong>New work</strong>
+          <span className="conversation-stage-label">New work</span>
         </button>
       ) : null}
       <nav>
@@ -3648,11 +3645,11 @@ function ConversationStageSidebar({
                 data-state={state}
                 aria-current={view === chat.id ? "page" : undefined}
                 aria-label={accessibleTitle}
-                title={`${step}. ${chat.title}`}
+                title={chat.title}
                 onClick={() => openChat(chat.id)}
               >
                 <span aria-hidden="true">{step}</span>
-                <strong>{`${step}. ${chat.title}`}</strong>
+                <span className="conversation-stage-label">{chat.title}</span>
               </button>
             );
           })}
