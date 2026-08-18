@@ -180,8 +180,7 @@ export {
 } from "./contextAuth.js";
 export {
   CLAUDE_CODE_AUTONOMOUS_TOOLS,
-  CLAUDE_CODE_PLANNED_MAX_TURNS,
-  CLAUDE_CODE_QUICK_MAX_TURNS,
+  CLAUDE_CODE_TURN_NOTIFICATION_INTERVAL,
   ClaudeCodeRuntime,
 } from "./runtimes/claudeCode.js";
 // EXECUTION E9 — the provider-native gateway credential the agentic runtimes

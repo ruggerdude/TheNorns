@@ -137,13 +137,24 @@ describe("readable RunLog activity", () => {
           text: "I updated the run transcript and am verifying it now.",
         }),
       },
+      {
+        sequence: 7,
+        occurred_at: "2026-07-25T17:00:06.000Z",
+        chunk: JSON.stringify({
+          type: "norns_activity",
+          kind: "notification",
+          text: "50 agent turns completed — development is continuing. Use Stop whenever you want to end it.",
+        }),
+      },
     ]);
 
     expect(activities.map((activity) => activity.text)).toEqual([
       "Running a development command",
       "Editing apps/web/src/RunLog.tsx",
       "I updated the run transcript and am verifying it now.",
+      "50 agent turns completed — development is continuing. Use Stop whenever you want to end it.",
     ]);
+    expect(activities.at(-1)?.kind).toBe("notification");
   });
 
   it("recovers safe activity labels from truncated legacy Claude events", () => {

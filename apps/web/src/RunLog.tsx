@@ -40,7 +40,7 @@ const MAX_VISIBLE_ACTIVITIES = 60;
 type RunActivity = {
   sequence: number;
   occurredAt: string;
-  kind: "session" | "reasoning" | "tool" | "message" | "result";
+  kind: "session" | "reasoning" | "tool" | "message" | "notification" | "result";
   text: string;
 };
 
@@ -170,7 +170,12 @@ function activitiesFromEntry(entry: RunLogEntryDto): RunActivity[] {
   if (record.type === "norns_activity" && typeof record.text === "string") {
     return activities([
       {
-        kind: record.kind === "message" ? "message" : "tool",
+        kind:
+          record.kind === "message"
+            ? "message"
+            : record.kind === "notification"
+              ? "notification"
+              : "tool",
         text: record.text,
       },
     ]);
@@ -349,7 +354,11 @@ export function RunLog({
             Waiting for a file change, verification result, commit, or blocker.
           </span>
         ) : (
-          <ol className="run-activity-list" data-testid={`task-run-log-output-${taskId}`}>
+          <ol
+            className="run-activity-list"
+            data-testid={`task-run-log-output-${taskId}`}
+            aria-live="polite"
+          >
             {activities.map((activity, index) => (
               <li key={`${activity.sequence}:${index}`} data-kind={activity.kind}>
                 <span aria-hidden="true" />

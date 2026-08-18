@@ -5800,6 +5800,20 @@
   background: var(--success);
 }
 
+.conversation-agent-dialogue .run-activity-list li[data-kind="notification"] {
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.conversation-agent-dialogue .run-activity-list li[data-kind="notification"] > span {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.conversation-agent-dialogue .run-activity-list li[data-kind="notification"] p {
+  color: var(--brand-ink);
+  font-weight: 700;
+}
+
 .conversation-agent-dialogue .run-activity-list p {
   margin: 0;
   color: var(--ink);

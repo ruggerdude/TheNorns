@@ -1,13 +1,12 @@
 import {
   CLAUDE_CODE_AUTONOMOUS_TOOLS,
-  CLAUDE_CODE_PLANNED_MAX_TURNS,
-  CLAUDE_CODE_QUICK_MAX_TURNS,
+  CLAUDE_CODE_TURN_NOTIFICATION_INTERVAL,
   ClaudeCodeRuntime,
 } from "@norns/runner";
 import { describe, expect, it, vi } from "vitest";
 
 describe("Claude Code unattended execution policy", () => {
-  it("allows the scoped coding tools without prompting and enforces turn and budget ceilings", async () => {
+  it("allows scoped coding tools without prompting, preserves the budget, and omits a turn ceiling", async () => {
     let received:
       | {
           prompt: AsyncIterable<unknown>;
@@ -52,12 +51,9 @@ describe("Claude Code unattended execution policy", () => {
       permissionMode: "dontAsk",
       tools: [...CLAUDE_CODE_AUTONOMOUS_TOOLS],
       allowedTools: [...CLAUDE_CODE_AUTONOMOUS_TOOLS],
-      maxTurns: CLAUDE_CODE_QUICK_MAX_TURNS,
       maxBudgetUsd: 1.25,
     });
-    expect(CLAUDE_CODE_QUICK_MAX_TURNS).toBeGreaterThan(12);
-    expect(CLAUDE_CODE_QUICK_MAX_TURNS).toBeLessThan(25);
-    expect(CLAUDE_CODE_PLANNED_MAX_TURNS).toBeGreaterThan(25);
+    expect(received?.options).not.toHaveProperty("maxTurns");
   });
 
   it("emits concrete file and command activity without exposing the worktree root", async () => {
@@ -108,6 +104,47 @@ describe("Claude Code unattended execution policy", () => {
     expect(logs.join(" ")).not.toContain("/isolated/worktree");
   });
 
+  it("notifies every 50 turns and continues without a turn ceiling", async () => {
+    const logs: string[] = [];
+    let options: Record<string, unknown> | undefined;
+    const queryImpl = ((request: { options: Record<string, unknown> }) => {
+      options = request.options;
+      return {
+        interrupt: async () => undefined,
+        async *[Symbol.asyncIterator]() {
+          for (let turn = 1; turn <= 101; turn += 1) {
+            yield { type: "assistant", message: { content: [] } };
+          }
+          yield { type: "result", subtype: "success", result: "done" };
+        },
+      };
+    }) as never;
+
+    const result = await new ClaudeCodeRuntime({ queryImpl }).run({
+      runId: "run-turn-notifications",
+      worktreePath: "/isolated/worktree",
+      prompt: "Keep working until the task is complete.",
+      executionMode: "planned",
+      onLog: (line) => logs.push(line),
+    });
+
+    expect(result.outcome).toBe("completed");
+    expect(options).not.toHaveProperty("maxTurns");
+    expect(CLAUDE_CODE_TURN_NOTIFICATION_INTERVAL).toBe(50);
+    expect(logs.map((line) => JSON.parse(line))).toEqual([
+      {
+        type: "norns_activity",
+        kind: "notification",
+        text: "50 agent turns completed — development is continuing. Use Stop whenever you want to end it.",
+      },
+      {
+        type: "norns_activity",
+        kind: "notification",
+        text: "100 agent turns completed — development is continuing. Use Stop whenever you want to end it.",
+      },
+    ]);
+  });
+
   it("does not invent an SDK dollar ceiling for a zero-cost dispatch", async () => {
     let options: Record<string, unknown> | undefined;
     const queryImpl = ((request: { options: Record<string, unknown> }) => {
@@ -133,7 +170,7 @@ describe("Claude Code unattended execution policy", () => {
     });
 
     expect(options).not.toHaveProperty("maxBudgetUsd");
-    expect(options).toMatchObject({ maxTurns: CLAUDE_CODE_PLANNED_MAX_TURNS });
+    expect(options).not.toHaveProperty("maxTurns");
   });
 
   it("preserves the SDK session and exact permission-denial stop cause", async () => {

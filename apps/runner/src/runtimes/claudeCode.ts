@@ -48,14 +48,11 @@ import { type LocalRuntimeAuthCapability, probeClaudeSubscriptionAuth } from "..
 import type { CodingRuntime, RuntimeRunRequest, RuntimeRunResult, RuntimeUsage } from "./types.js";
 
 /**
- * A quick edit normally needs only a handful of inspect/edit/verify/commit
- * turns. Keeping a firm ceiling prevents a missing permission or a repeated
- * tool failure from replaying the full briefing indefinitely. Quick work gets
- * enough room to finish the verify-and-commit tail observed after turn 12;
- * planned work retains a larger but still explicit ceiling.
+ * Long-running development stays under the operator's Stop control. This
+ * interval is informational only: reaching it emits a visible chat notice and
+ * never ends or restarts the Claude session.
  */
-export const CLAUDE_CODE_QUICK_MAX_TURNS = 18;
-export const CLAUDE_CODE_PLANNED_MAX_TURNS = 60;
+export const CLAUDE_CODE_TURN_NOTIFICATION_INTERVAL = 50;
 
 /**
  * This runtime has no interactive permission channel: its prompt explicitly
@@ -367,10 +364,6 @@ export class ClaudeCodeRuntime implements CodingRuntime {
         options: {
           cwd: request.worktreePath,
           abortController: controller,
-          maxTurns:
-            request.executionMode === "quick"
-              ? CLAUDE_CODE_QUICK_MAX_TURNS
-              : CLAUDE_CODE_PLANNED_MAX_TURNS,
           ...(request.maxBudgetUsd !== undefined && request.maxBudgetUsd > 0
             ? { maxBudgetUsd: request.maxBudgetUsd }
             : {}),
@@ -431,6 +424,7 @@ export class ClaudeCodeRuntime implements CodingRuntime {
       let resultDetail = "";
       let stopReason: string | undefined;
       let failed = false;
+      let assistantTurns = 0;
       for await (const message of stream) {
         const msg = message as {
           type: string;
@@ -448,8 +442,18 @@ export class ClaudeCodeRuntime implements CodingRuntime {
           observedStopReason = `permission_denied:${msg.tool_name}`;
         }
         if (msg.type === "assistant") {
+          assistantTurns += 1;
           for (const entry of visibleTranscript(message, request.worktreePath)) {
             request.onLog?.(JSON.stringify({ type: "norns_activity", ...entry }));
+          }
+          if (assistantTurns % CLAUDE_CODE_TURN_NOTIFICATION_INTERVAL === 0) {
+            request.onLog?.(
+              JSON.stringify({
+                type: "norns_activity",
+                kind: "notification",
+                text: `${assistantTurns} agent turns completed — development is continuing. Use Stop whenever you want to end it.`,
+              }),
+            );
           }
         } else if (msg.type === "system") {
           request.onLog?.(JSON.stringify(message).slice(0, 500));
