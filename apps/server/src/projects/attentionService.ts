@@ -1346,6 +1346,9 @@ export class AttentionService {
         published_branch: string | null;
         pull_request_url: string | null;
         publication_note: string | null;
+        usage_input_tokens: number | null;
+        usage_output_tokens: number | null;
+        usage_cost_usd: string | number | null;
         command_results: unknown;
         evidence_count: number;
       }>(
@@ -1368,6 +1371,7 @@ export class AttentionService {
           -- finished task is one click from its review instead of one grep
           -- through a run log.
           run.published_branch, run.pull_request_url, run.publication_note,
+          run.usage_input_tokens, run.usage_output_tokens, run.usage_cost_usd,
           -- EXECUTION E10: WHICH command failed, from the designated run's most
           -- recent verification. A red badge over an opaque digest is not
           -- evidence; the failing command's own output is.
@@ -1498,6 +1502,9 @@ export class AttentionService {
                   published_branch: task.published_branch,
                   pull_request_url: task.pull_request_url,
                   publication_note: task.publication_note,
+                  input_tokens: Number(task.usage_input_tokens ?? 0),
+                  output_tokens: Number(task.usage_output_tokens ?? 0),
+                  cost_usd: task.usage_cost_usd === null ? null : Number(task.usage_cost_usd),
                 }
               : null,
           failed_verification_commands: failedVerificationCommands(task.command_results),

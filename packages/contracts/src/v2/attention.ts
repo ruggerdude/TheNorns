@@ -228,6 +228,14 @@ export const V2PhaseExecution = z
               pull_request_url: z.string().nullable().default(null),
               /** Why there is no pull request, when the run published without one. */
               publication_note: z.string().nullable().default(null),
+              // Actuals for this attempt: wall-clock compute time comes from
+              // started_at/finished_at above; these are the run's own token and
+              // cost totals, aggregated from run_command_usage_receipts. cost_usd
+              // is null until a pricing table is applied to runner-reported
+              // coding tokens (planning/QC proxy calls already carry cost).
+              input_tokens: z.number().int().nonnegative().default(0),
+              output_tokens: z.number().int().nonnegative().default(0),
+              cost_usd: z.number().nonnegative().nullable().default(null),
             })
             .strict()
             .nullable(),

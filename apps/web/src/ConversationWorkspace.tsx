@@ -3935,6 +3935,43 @@ function developmentRunStatusMessage(task: DevelopmentTask | null): string {
   }
 }
 
+/**
+ * Actuals for one attempt: wall-clock compute time and token/cost totals. A
+ * running attempt measures against now; a finished one against finished_at.
+ * Returns null when there is nothing real to show yet (no start, no tokens).
+ */
+function developmentRunActuals(
+  run: NonNullable<DevelopmentTask["run"]>,
+  nowMs: number,
+): string | null {
+  const parts: string[] = [];
+  if (run.started_at) {
+    const startedMs = Date.parse(run.started_at);
+    const endMs = run.finished_at ? Date.parse(run.finished_at) : nowMs;
+    if (Number.isFinite(startedMs) && endMs > startedMs) {
+      parts.push(formatComputeDuration(endMs - startedMs));
+    }
+  }
+  if (run.input_tokens > 0 || run.output_tokens > 0) {
+    parts.push(
+      `${run.input_tokens.toLocaleString()} in / ${run.output_tokens.toLocaleString()} out tokens`,
+    );
+  }
+  if (run.cost_usd !== null && run.cost_usd > 0) {
+    parts.push(`$${run.cost_usd.toFixed(run.cost_usd < 1 ? 4 : 2)}`);
+  }
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+function formatComputeDuration(ms: number): string {
+  const totalSeconds = Math.round(ms / 1_000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
 function isAutomaticLimitFailure(detail: string | null | undefined): boolean {
   return /(?:remaining budget|budget cannot cover|budget_exhausted|api error:\s*402)/i.test(
     detail ?? "",
@@ -4352,6 +4389,14 @@ function DevelopmentAgentDialogue({
                 <time>{task?.run ? `Attempt ${task.run.attempt}` : "Preparing"}</time>
               </header>
               <p>{developmentRunStatusMessage(task)}</p>
+              {task?.run
+                ? (() => {
+                    const actuals = developmentRunActuals(task.run, Date.now());
+                    return actuals ? (
+                      <small className="conversation-agent-run-actuals">{actuals}</small>
+                    ) : null;
+                  })()
+                : null}
             </li>
             {(task?.reviews ?? []).map((review) => (
               <li className="is-reviewer" key={review.id}>

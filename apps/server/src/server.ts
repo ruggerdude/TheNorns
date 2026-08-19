@@ -130,6 +130,7 @@ import type { Phase6CoordinationService } from "./coordinator/phase6Coordination
 import { describePhaseConcurrency } from "./coordinator/phaseConcurrency.js";
 import { PhaseLaunchError, PhaseLaunchService } from "./coordinator/phaseLaunchService.js";
 import { PhaseQueueDrainer } from "./coordinator/phaseQueueDrainer.js";
+import { PhaseReviewAutoCompleter } from "./coordinator/phaseReviewAutoCompleter.js";
 import {
   RunConflictResolutionRequest,
   RunIntegrationConflictError,
@@ -145,6 +146,7 @@ import {
  * of not going lower is that this poll touches several tables per active phase.
  */
 const PHASE_QUEUE_DRAIN_INTERVAL_MS = 5_000;
+const PHASE_REVIEW_AUTO_COMPLETE_INTERVAL_MS = 5_000;
 
 function attachmentContentDisposition(filename: string, inline: boolean): string {
   const safeFilename = Array.from(filename, (character) => {
@@ -1142,6 +1144,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // EXECUTION E12 — declared here, assigned far below where PhaseLaunchService
   // is constructed, so the onClose hook can clear it alongside its siblings.
   let phaseQueueDrainTimer: ReturnType<typeof setInterval> | undefined;
+  let phaseReviewAutoCompleteTimer: ReturnType<typeof setInterval> | undefined;
   let conversationTurns: ConversationTurnService | null = null;
   let conversationService: ConversationService | null = null;
   let conversationContextAssembler: ConversationContextAssembler | null = null;
@@ -1428,6 +1431,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     if (phase6VisualEvidenceTimer) clearInterval(phase6VisualEvidenceTimer);
     if (conversationPmUpdateTimer) clearInterval(conversationPmUpdateTimer);
     if (phaseQueueDrainTimer) clearInterval(phaseQueueDrainTimer);
+    if (phaseReviewAutoCompleteTimer) clearInterval(phaseReviewAutoCompleteTimer);
     if (usageBudgetEvaluationTimer) clearInterval(usageBudgetEvaluationTimer);
     if (conversationKickoffTimer) clearInterval(conversationKickoffTimer);
     if (planningWorkerTimer) clearInterval(planningWorkerTimer);
@@ -7952,6 +7956,49 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         });
     }, PHASE_QUEUE_DRAIN_INTERVAL_MS);
     phaseQueueDrainTimer.unref();
+
+    // ---- EXEC-REVIEW-1: advance a phase on green, no reviewer --------------
+    //
+    // Succeeded runs park their task at `in_review` awaiting an independent
+    // reviewer that was never built, so phases never advanced without an
+    // operator completing every task by hand. There is no reviewer between
+    // phases: this poll auto-completes each green task through the same
+    // `Phase4CompletionService` the operator used; the drainer above then
+    // dispatches the now-unblocked dependents. See phaseReviewAutoCompleter.ts.
+    const phaseReviewAutoCompleter = new PhaseReviewAutoCompleter(
+      executionTransactions,
+      options.phase4.completion,
+      {
+        now,
+        onError: (taskId, error) => {
+          app.log.error({ taskId, err: error }, "phase review auto-completion failed");
+        },
+      },
+    );
+    let autoCompleting = false;
+    phaseReviewAutoCompleteTimer = setInterval(() => {
+      if (autoCompleting) return;
+      autoCompleting = true;
+      void phaseReviewAutoCompleter
+        .sweep()
+        .then((outcomes) => {
+          for (const outcome of outcomes) {
+            app.log.info(
+              {
+                taskId: outcome.task_id,
+                phaseId: outcome.phase_id,
+                phaseClosed: outcome.phase_closed,
+              },
+              "phase review auto-completed a green task",
+            );
+          }
+        })
+        .catch((error) => app.log.error({ err: error }, "phase review auto-complete tick failed"))
+        .finally(() => {
+          autoCompleting = false;
+        });
+    }, PHASE_REVIEW_AUTO_COMPLETE_INTERVAL_MS);
+    phaseReviewAutoCompleteTimer.unref();
 
     // ---- EXECUTION E12: fan-out visibility ---------------------------------
     //

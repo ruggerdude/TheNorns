@@ -28,6 +28,7 @@ import {
   PhaseLaunchService,
 } from "../src/coordinator/phaseLaunchService.js";
 import { PhaseQueueDrainer } from "../src/coordinator/phaseQueueDrainer.js";
+import { PhaseReviewAutoCompleter } from "../src/coordinator/phaseReviewAutoCompleter.js";
 import {
   RunIntegrationConflictService,
   TaskConflictScopeRepository,
@@ -452,6 +453,38 @@ describe.sequential("EXECUTION E12 — concurrent tasks within one phase", () =>
     }
     const finalTasks = await pg.query<{ state: string }>("SELECT state FROM tasks");
     expect(finalTasks.rows.every((row) => row.state === "completed")).toBe(true);
+  }, 60_000);
+
+  // EXEC-REVIEW-1: a green task parked at in_review is auto-completed with no
+  // reviewer, which is what lets the next phase's dependents dispatch.
+  it("auto-completes a verified, published task with no independent reviewer", async () => {
+    await seed({ cap: 1, taskCount: 1 });
+    const result = await start();
+    const run = result.scheduled[0]?.run_id;
+    if (!run) throw new Error("expected one scheduled run");
+
+    await markRunning(run);
+    await verifyGreen(taskId(1));
+    await publish(run, "norns/task-1");
+    await runnerEvent({ kind: "run_status", run_id: run, status: "completed" });
+
+    // Parked awaiting a reviewer that does not exist.
+    const parked = await pg.query<{ state: string }>("SELECT state FROM tasks WHERE id = $1", [
+      taskId(1),
+    ]);
+    expect(parked.rows[0]?.state).toBe("in_review");
+
+    const outcomes = await new PhaseReviewAutoCompleter(transactions, completion).sweep();
+    expect(outcomes).toHaveLength(1);
+    expect(outcomes[0]).toMatchObject({ task_id: taskId(1), phase_closed: true });
+
+    const completed = await pg.query<{ state: string }>("SELECT state FROM tasks WHERE id = $1", [
+      taskId(1),
+    ]);
+    expect(completed.rows[0]?.state).toBe("completed");
+
+    // Idempotent: a second sweep finds nothing left to do.
+    expect(await new PhaseReviewAutoCompleter(transactions, completion).sweep()).toHaveLength(0);
   }, 60_000);
 
   // -------------------------------------------------------------------------

@@ -148,3 +148,5 @@
 2026-08-19T16:08Z | EXEC-SESSION-1 | Claude Code stale-session resume now falls back to a fresh session (mirrors Codex recovery); agent 0.4.7 packaged
 2026-08-19T16:27Z | EXEC-SESSION-1 | Session fallback moved to the thrown-error path (SDK throws, does not yield); verified live on attempt 12
 2026-08-19T17:40Z | EXEC-REVIEW-1 | Foundation completed via operator path; independent reviewer stage has no implementation (agent_reviews empty forever) — Core Engine dispatched automatically
+2026-08-19T18:20Z | EXEC-USAGE-1 | Per-run actuals on the Development run card: compute time (started/finished) + tokens, wired through contract/attentionService/ConversationWorkspace; cost hidden until runner-token pricing (EXEC-USAGE-2). tsc+biome clean, ConversationWorkspace+phase5Attention green
+2026-08-19T18:35Z | EXEC-REVIEW-1 | No reviewer between phases (policy): PhaseReviewAutoCompleter poll auto-completes in_review+green+published tasks via Phase4CompletionService; drainer then dispatches dependents. Keyed on published_commit_sha not handoff. E12 test green, tsc+biome clean
