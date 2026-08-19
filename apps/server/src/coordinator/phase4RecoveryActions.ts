@@ -278,10 +278,13 @@ export class Phase4RecoveryActionService {
               `the designated run is ${scope.run_state ?? "missing"}, not failed, expired, or cancelled`,
             );
           }
-          if (!["failed", "blocked"].includes(scope.task_state)) {
+          // `ready` is retryable so a half-completed retry (task prepared,
+          // launch refused — runner offline, capacity, context) can be
+          // re-kicked instead of dead-ending with no UI path forward.
+          if (!["failed", "blocked", "ready"].includes(scope.task_state)) {
             return failure(
               "task_not_retryable",
-              `the task is ${scope.task_state}, not failed or blocked`,
+              `the task is ${scope.task_state}, not failed, blocked, or ready`,
             );
           }
 
@@ -386,15 +389,17 @@ export class Phase4RecoveryActionService {
               reason: "closing the failed execution attempt before replacement",
             });
           }
-          await transitionV2TaskLifecycle(tx, {
-            ...actor,
-            project_id: retry.project_id,
-            phase_id: retry.phase_id,
-            task_id: retry.task_id,
-            expected_aggregate_version: task.aggregate_version,
-            to: "ready",
-            reason: `terminal retry prepared for ${retry.failed_run_id}`,
-          });
+          if (task.state !== "ready") {
+            await transitionV2TaskLifecycle(tx, {
+              ...actor,
+              project_id: retry.project_id,
+              phase_id: retry.phase_id,
+              task_id: retry.task_id,
+              expected_aggregate_version: task.aggregate_version,
+              to: "ready",
+              reason: `terminal retry prepared for ${retry.failed_run_id}`,
+            });
+          }
           return {
             outcome: "succeeded",
             http_status: 202,

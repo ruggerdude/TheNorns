@@ -3803,7 +3803,7 @@ function developmentRunStatusMessage(task: DevelopmentTask | null): string {
     case "expired":
       // Recovery only renders while the task itself is recoverable; a
       // terminally cancelled task must not promise actions that never appear.
-      return ["failed", "blocked"].includes(task.state)
+      return ["failed", "blocked", "ready"].includes(task.state)
         ? `This attempt ${task.run.state}. Choose a recovery action below.`
         : `This attempt ${task.run.state}. Development is stopped for this task.`;
     default:
@@ -3881,7 +3881,7 @@ function DevelopmentRecovery({
     setRecoveryError(null);
     const unique = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Date.now();
     try {
-      await recoverDevelopmentTask(projectId, phaseId, task.id, {
+      const result = await recoverDevelopmentTask(projectId, phaseId, task.id, {
         ...(action === "stop"
           ? {
               action: "cancel" as const,
@@ -3892,6 +3892,12 @@ function DevelopmentRecovery({
         expected_task_version: task.aggregate_version,
         idempotency_key: `development-${action}-${run.id}-${unique}`,
       });
+      // A retry that was accepted but did not start carries the reason in
+      // `detail` (runner offline, capacity, context). Swallowing it renders
+      // the click as "nothing happened".
+      if (result.action === "retry" && !result.started) {
+        setRecoveryError(result.detail);
+      }
       await onRecovered();
     } catch (caught) {
       if (caught instanceof UnauthorizedError) onUnauthorized();
@@ -4158,7 +4164,7 @@ function DevelopmentAgentDialogue({
           {task?.run &&
           phaseId &&
           ["failed", "cancelled", "expired"].includes(task.run.state) &&
-          ["failed", "blocked"].includes(task.state) ? (
+          ["failed", "blocked", "ready"].includes(task.state) ? (
             <DevelopmentRecovery
               projectId={projectId}
               phaseId={phaseId}

@@ -60,6 +60,9 @@ export interface PhaseQueueDrainOutcome {
   dispatched: string[];
   still_queued: number;
   running: number;
+  /** Per-task refusals from this pass. Discarding these is how a phase
+   *  "quietly stops forever" — the exact failure this file exists to remove. */
+  not_dispatched: { task_id: string; code: string; reason: string }[];
 }
 
 export interface PhaseQueueDrainerOptions {
@@ -150,6 +153,11 @@ export class PhaseQueueDrainer {
           dispatched: result.scheduled.map((entry) => entry.run_id ?? entry.task_id),
           still_queued: result.concurrency.queued,
           running: result.concurrency.running,
+          not_dispatched: [...result.blocked, ...result.deferred].map((entry) => ({
+            task_id: entry.task_id,
+            code: entry.blocked_code ?? "unknown",
+            reason: entry.blocked_reason ?? "no reason reported",
+          })),
         });
       } catch (error) {
         // A `PhaseLaunchError` here means the phase stopped being launchable

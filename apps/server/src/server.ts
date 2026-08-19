@@ -7905,6 +7905,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       },
     });
     let draining = false;
+    // One line per CHANGE in a phase's refusal set, not one per 5s tick —
+    // a phase that stays blocked for an hour logs once, with the reason.
+    const lastDrainRefusals = new Map<string, string>();
     phaseQueueDrainTimer = setInterval(() => {
       // Non-overlapping: a slow drain must never stack up parallel drains,
       // which would race each other for the same free slot. Losing a tick is
@@ -7913,6 +7916,29 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       draining = true;
       void phaseQueueDrainer
         .drain()
+        .then((outcomes) => {
+          for (const outcome of outcomes) {
+            const signature = outcome.not_dispatched
+              .map((entry) => `${entry.task_id}:${entry.code}`)
+              .sort()
+              .join(",");
+            const previous = lastDrainRefusals.get(outcome.phase_id) ?? "";
+            if (signature === previous) continue;
+            if (signature) {
+              lastDrainRefusals.set(outcome.phase_id, signature);
+              app.log.warn(
+                { phaseId: outcome.phase_id, refusals: outcome.not_dispatched },
+                "phase queue drain: tasks not dispatched",
+              );
+            } else {
+              lastDrainRefusals.delete(outcome.phase_id);
+              app.log.info(
+                { phaseId: outcome.phase_id, dispatched: outcome.dispatched },
+                "phase queue drain: previously refused phase is dispatching again",
+              );
+            }
+          }
+        })
         .catch((error) => app.log.error({ err: error }, "phase queue drain tick failed"))
         .finally(() => {
           draining = false;

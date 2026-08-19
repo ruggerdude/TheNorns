@@ -139,3 +139,4 @@
 2026-08-02T22:40Z | QC-ELAPSED | Render live_progress on the running QC step (elapsed since durable started_at, model, retry count) so a slow review no longer reads as frozen; web-only, 5 QcWorkspace tests green
 2026-08-19T04:23Z | EXEC-CANCEL-1 | Server finalizes cancelled never-started runs on runner acknowledgement; live StrumSheetV01 deadlock unstuck via agent evidence journal
 2026-08-19T04:44Z | EXEC-CANCEL-1 | Cancelled runs are now recoverable: task cascade on runner evidence, retry gate accepts cancelled, web panel gates on state; live task unblocked
+2026-08-19T05:09Z | EXEC-CANCEL-1 | Drainer refusals now logged; retry re-kicks ready tasks; retry detail surfaced in UI
