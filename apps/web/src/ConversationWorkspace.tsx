@@ -3719,6 +3719,94 @@ type DevelopmentPhaseItem = {
   task: DevelopmentTask | null;
 };
 
+type DevelopmentPauseState = "available" | "pause_pending" | "paused" | "resume_pending";
+
+function shortDevelopmentPhaseTitle(title: string): string {
+  return title.split(":", 1)[0]?.trim() || title;
+}
+
+function developmentPauseState(
+  actions: Iterable<V2ConversationActionT>,
+  taskId: string | null,
+): DevelopmentPauseState {
+  const relevant = [...actions]
+    .filter((action) => {
+      if (!["pause_work", "resume_work"].includes(action.action_type)) return false;
+      const actionTaskId =
+        typeof action.payload.parameters.task_id === "string"
+          ? action.payload.parameters.task_id
+          : null;
+      return actionTaskId === taskId && !["failed", "rejected"].includes(action.status);
+    })
+    .sort(
+      (left, right) =>
+        Date.parse(left.created_at) - Date.parse(right.created_at) ||
+        left.id.localeCompare(right.id),
+    );
+  const latest = relevant.at(-1);
+  if (!latest) return "available";
+  if (latest.action_type === "pause_work") {
+    return latest.status === "applied" ? "paused" : "pause_pending";
+  }
+  return latest.status === "applied" ? "available" : "resume_pending";
+}
+
+function developmentEtaAt(execution: V2PhaseExecutionT | null): string | null {
+  if (!execution) return null;
+  const etaAt = (execution.phase as V2PhaseExecutionT["phase"] & { eta_at?: unknown }).eta_at;
+  return typeof etaAt === "string" && Number.isFinite(Date.parse(etaAt)) ? etaAt : null;
+}
+
+function developmentTimeRemaining(remainingMs: number | null): string {
+  if (remainingMs === null || !Number.isFinite(remainingMs)) return "estimating";
+  if (remainingMs <= 0) return "due now";
+  const minutes = Math.max(1, Math.round(remainingMs / 60_000));
+  if (minutes < 60) return `~${minutes} min`;
+  const hours = minutes / 60;
+  if (hours < 24) return `~${Math.max(1, Math.round(hours))} hr`;
+  const days = Math.max(1, Math.round(hours / 24));
+  return `~${days} day${days === 1 ? "" : "s"}`;
+}
+
+function developmentPhaseRemainingMs(
+  phase: DevelopmentPhaseItem,
+  phases: DevelopmentPhaseItem[],
+  overallEtaAt: string | null,
+  nowMs: number,
+): number | null {
+  if (phase.state === "complete") return 0;
+  if (!overallEtaAt) return null;
+  const overallRemainingMs = Math.max(0, Date.parse(overallEtaAt) - nowMs);
+  const weight = (candidate: DevelopmentPhaseItem): number => {
+    switch (candidate.task?.complexity) {
+      case "S":
+        return 1;
+      case "L":
+        return 3;
+      case "XL":
+        return 5;
+      default:
+        return 2;
+    }
+  };
+  const incomplete = phases.filter((candidate) => candidate.state !== "complete");
+  const totalWeight = incomplete.reduce((total, candidate) => total + weight(candidate), 0);
+  if (totalWeight <= 0) return null;
+  return overallRemainingMs * (weight(phase) / totalWeight);
+}
+
+function developmentPhaseEtaLabel(
+  phase: DevelopmentPhaseItem,
+  phases: DevelopmentPhaseItem[],
+  overallEtaAt: string | null,
+  nowMs: number,
+): string {
+  if (phase.state === "complete") return "done";
+  if (phase.state === "waiting") return "paused";
+  if (phase.state === "blocked") return "blocked";
+  return developmentTimeRemaining(developmentPhaseRemainingMs(phase, phases, overallEtaAt, nowMs));
+}
+
 function developmentPhaseState(task: DevelopmentTask | undefined): DevelopmentPhaseState {
   if (!task) return "queued";
   if (task.state === "completed" || task.run?.state === "succeeded") return "complete";
@@ -4024,12 +4112,22 @@ function developmentPhasePercent(phase: DevelopmentPhaseItem): number {
 
 function DevelopmentPhaseStrip({
   phases,
+  execution,
   selectedId,
+  pauseState,
+  pauseBusy,
   onSelect,
+  onPause,
+  onResume,
 }: {
   phases: DevelopmentPhaseItem[];
+  execution: V2PhaseExecutionT | null;
   selectedId: string | null;
+  pauseState: DevelopmentPauseState;
+  pauseBusy: boolean;
   onSelect: (phaseId: string) => void;
+  onPause: () => void;
+  onResume: () => void;
 }): React.ReactElement {
   const completed = phases.filter((phase) => phase.state === "complete").length;
   // The execution projection exposes durable milestones rather than a
@@ -4042,20 +4140,44 @@ function DevelopmentPhaseStrip({
           phases.reduce((total, phase) => total + developmentPhasePercent(phase), 0) /
             phases.length,
         );
+  const etaAt = developmentEtaAt(execution);
+  const nowMs = Date.now();
+  const overallRemaining = etaAt ? Math.max(0, Date.parse(etaAt) - nowMs) : null;
+  const pauseLabel =
+    pauseState === "paused"
+      ? "Resume phases"
+      : pauseState === "pause_pending"
+        ? "Pause queued"
+        : pauseState === "resume_pending"
+          ? "Resuming…"
+          : "Pause after phase";
   return (
     <section className="conversation-development-phases" aria-label="Development phases">
       <header>
-        <div>
-          <span className="eyebrow">Development</span>
-          <h2>Phases</h2>
-        </div>
         <div className="conversation-development-phase-progress">
-          <span>
-            {completed} of {phases.length} complete
+          <strong>Overall {progress}%</strong>
+          <span aria-label="Overall estimated time remaining">
+            ·{" "}
+            {pauseState === "paused"
+              ? "paused"
+              : `${developmentTimeRemaining(overallRemaining)} left`}
           </span>
-          <strong>{progress}%</strong>
           <progress aria-label="Development progress" max={100} value={progress} />
         </div>
+        <Button
+          className="btn-small conversation-development-overall-pause"
+          disabled={
+            pauseBusy ||
+            pauseState === "pause_pending" ||
+            pauseState === "resume_pending" ||
+            phases.length === 0 ||
+            completed === phases.length
+          }
+          onClick={pauseState === "paused" ? onResume : onPause}
+        >
+          <span aria-hidden="true">{pauseState === "paused" ? "▶" : "Ⅱ"}</span>
+          {pauseBusy ? (pauseState === "paused" ? "Resuming…" : "Pausing…") : pauseLabel}
+        </Button>
       </header>
       {phases.length > 0 ? (
         <div className="conversation-development-phase-list">
@@ -4071,8 +4193,11 @@ function DevelopmentPhaseStrip({
                     {phase.state === "complete" ? "✓" : index + 1}
                   </span>
                   <span>
-                    <strong>{phase.title}</strong>
-                    <small>{developmentStateLabel(phase.state)}</small>
+                    <strong title={phase.title}>{shortDevelopmentPhaseTitle(phase.title)}</strong>
+                    <small>
+                      {developmentPhasePercent(phase)}% ·{" "}
+                      {developmentPhaseEtaLabel(phase, phases, etaAt, nowMs)}
+                    </small>
                   </span>
                 </button>
               </li>
@@ -4092,6 +4217,11 @@ function DevelopmentAgentDialogue({
   phase,
   loading,
   error,
+  pauseState,
+  pauseBusy,
+  pauseError,
+  onPause,
+  onResume,
   onRecovered,
   onUnauthorized,
 }: {
@@ -4100,6 +4230,11 @@ function DevelopmentAgentDialogue({
   phase: DevelopmentPhaseItem | null;
   loading: boolean;
   error: string | null;
+  pauseState: DevelopmentPauseState;
+  pauseBusy: boolean;
+  pauseError: string | null;
+  onPause: () => void;
+  onResume: () => void;
   onRecovered: () => Promise<void>;
   onUnauthorized: () => void;
 }): React.ReactElement {
@@ -4116,6 +4251,16 @@ function DevelopmentAgentDialogue({
         : phase?.state === "waiting"
           ? "warn"
           : "info";
+  const canPausePhase = phase !== null && ["active", "verifying"].includes(phase.state);
+  const showPauseControl = canPausePhase || pauseState !== "available";
+  const pauseLabel =
+    pauseState === "paused"
+      ? "Resume phase"
+      : pauseState === "pause_pending"
+        ? "Phase pause queued"
+        : pauseState === "resume_pending"
+          ? "Resuming phase…"
+          : "Pause phase";
 
   return (
     <section className="conversation-agent-dialogue" aria-labelledby="agent-dialogue-title">
@@ -4125,9 +4270,30 @@ function DevelopmentAgentDialogue({
           <h3 id="agent-dialogue-title">Agent dialogue</h3>
           <p>Watch implementation and review activity as it is recorded.</p>
         </div>
-        {phase ? <Badge tone={badgeTone}>{developmentStateLabel(phase.state)}</Badge> : null}
+        {phase ? (
+          <div className="conversation-development-phase-actions">
+            <Badge tone={badgeTone}>{developmentStateLabel(phase.state)}</Badge>
+            {showPauseControl ? (
+              <Button
+                className="btn-small"
+                disabled={
+                  pauseBusy || pauseState === "pause_pending" || pauseState === "resume_pending"
+                }
+                onClick={pauseState === "paused" ? onResume : onPause}
+              >
+                <span aria-hidden="true">{pauseState === "paused" ? "▶" : "Ⅱ"}</span>
+                {pauseBusy
+                  ? pauseState === "paused"
+                    ? "Resuming phase…"
+                    : "Pausing phase…"
+                  : pauseLabel}
+              </Button>
+            ) : null}
+          </div>
+        ) : null}
       </header>
       {error ? <Alert testId="conversation-development-phases-error">{error}</Alert> : null}
+      {pauseError ? <Alert>{pauseError}</Alert> : null}
       {loading && !phase ? (
         <output className="conversation-agent-dialogue-empty" aria-live="polite">
           <Spinner label="Connecting to the development agents…" />
@@ -4310,7 +4476,7 @@ function ConversationThread({
   const [developmentStartBusy, setDevelopmentStartBusy] = useState(false);
   const [developmentAutoStartPending, setDevelopmentAutoStartPending] = useState(false);
   const [developmentStartError, setDevelopmentStartError] = useState<string | null>(null);
-  const [developmentPauseBusy, setDevelopmentPauseBusy] = useState(false);
+  const [developmentPauseBusy, setDevelopmentPauseBusy] = useState<string | null>(null);
   const [developmentPauseError, setDevelopmentPauseError] = useState<string | null>(null);
   const [executionRetryBusy, setExecutionRetryBusy] = useState(false);
   const [executionRetryError, setExecutionRetryError] = useState<string | null>(null);
@@ -5475,68 +5641,86 @@ function ConversationThread({
     ],
   );
 
-  const pauseDevelopment = useCallback(async (): Promise<void> => {
-    const run = executionProjection?.run;
-    if (!run || developmentPauseBusy) return;
-    const subjectId = `${detail.conversation.id}:${run.run_id}`;
-    const parameters = { reason: "Paused by the user from the Development chat." };
-    const request: V2CreateExecutionActionProposalInputT = {
-      idempotency_key: durableRequestKey(
-        "development-pause",
-        subjectId,
-        executionActionKeys.current,
-      ),
-      message: parameters.reason,
-      action_type: "pause_work",
-      payload: { parameters },
-    };
-    setDevelopmentPauseBusy(true);
-    setDevelopmentPauseError(null);
-    try {
-      const proposed = await proposeExecutionConversationAction(
-        detail.work_item.project_id,
-        detail.work_item.id,
-        detail.conversation.id,
-        request,
-      );
-      setActionOverrides((current) => new Map(current).set(proposed.action.id, proposed.action));
-      const result = await confirmConversationAction(
-        detail.work_item.project_id,
-        detail.work_item.id,
-        detail.conversation.id,
-        proposed.action.id,
-        confirmationKeyFor(proposed.action, confirmationKeys.current),
-      );
-      setActionOverrides((current) => new Map(current).set(result.action.id, result.action));
-      setEffectOverrides((current) => new Map(current).set(result.action.id, result.effect));
-      clearDurableRequestKey("development-pause", subjectId, executionActionKeys.current);
-      confirmationKeys.current.delete(proposed.action.id);
+  const setDevelopmentPaused = useCallback(
+    async (actionType: "pause_work" | "resume_work", taskId: string | null): Promise<void> => {
+      if (developmentPauseBusy) return;
+      const scope = taskId ?? "between-phases";
+      const subjectId = `${detail.conversation.id}:${scope}`;
+      const pausing = actionType === "pause_work";
+      const parameters = {
+        reason: pausing
+          ? taskId
+            ? "Paused within this phase by the user from the Development chat."
+            : "Pause between phases requested by the user from the Development chat."
+          : taskId
+            ? "Resume this phase from its saved checkpoint."
+            : "Resume development after the saved phase checkpoint.",
+        ...(taskId ? { task_id: taskId } : {}),
+      };
+      const request: V2CreateExecutionActionProposalInputT = {
+        idempotency_key: durableRequestKey(
+          pausing ? "development-pause" : "development-resume",
+          subjectId,
+          executionActionKeys.current,
+        ),
+        message: parameters.reason,
+        action_type: actionType,
+        payload: { parameters },
+      };
+      setDevelopmentPauseBusy(`${actionType}:${scope}`);
+      setDevelopmentPauseError(null);
       try {
-        window.sessionStorage.removeItem(confirmationStorageKey(proposed.action.id));
-      } catch {
-        // The confirmed server action remains authoritative.
+        const proposed = await proposeExecutionConversationAction(
+          detail.work_item.project_id,
+          detail.work_item.id,
+          detail.conversation.id,
+          request,
+        );
+        setActionOverrides((current) => new Map(current).set(proposed.action.id, proposed.action));
+        const result = await confirmConversationAction(
+          detail.work_item.project_id,
+          detail.work_item.id,
+          detail.conversation.id,
+          proposed.action.id,
+          confirmationKeyFor(proposed.action, confirmationKeys.current),
+        );
+        setActionOverrides((current) => new Map(current).set(result.action.id, result.action));
+        setEffectOverrides((current) => new Map(current).set(result.action.id, result.effect));
+        clearDurableRequestKey(
+          pausing ? "development-pause" : "development-resume",
+          subjectId,
+          executionActionKeys.current,
+        );
+        confirmationKeys.current.delete(proposed.action.id);
+        try {
+          window.sessionStorage.removeItem(confirmationStorageKey(proposed.action.id));
+        } catch {
+          // The confirmed server action remains authoritative.
+        }
+        await onRefreshSoft();
+      } catch (caught) {
+        if (caught instanceof UnauthorizedError) {
+          onUnauthorized();
+          return;
+        }
+        setDevelopmentPauseError(
+          caught instanceof Error
+            ? caught.message
+            : `Development could not be ${pausing ? "paused" : "resumed"}.`,
+        );
+      } finally {
+        setDevelopmentPauseBusy(null);
       }
-      await onRefreshSoft();
-    } catch (caught) {
-      if (caught instanceof UnauthorizedError) {
-        onUnauthorized();
-        return;
-      }
-      setDevelopmentPauseError(
-        caught instanceof Error ? caught.message : "Development could not be paused.",
-      );
-    } finally {
-      setDevelopmentPauseBusy(false);
-    }
-  }, [
-    detail.conversation.id,
-    detail.work_item.id,
-    detail.work_item.project_id,
-    developmentPauseBusy,
-    executionProjection?.run,
-    onRefreshSoft,
-    onUnauthorized,
-  ]);
+    },
+    [
+      detail.conversation.id,
+      detail.work_item.id,
+      detail.work_item.project_id,
+      developmentPauseBusy,
+      onRefreshSoft,
+      onUnauthorized,
+    ],
+  );
 
   const startDevelopment = useCallback(async (): Promise<void> => {
     if (developmentStartInFlight.current) return;
@@ -5733,7 +5917,12 @@ function ConversationThread({
 
   const actionContext = useMemo<ConversationActionContextValue>(() => {
     const actions = new Map(resources.actions);
-    for (const [id, action] of actionOverrides) actions.set(id, action);
+    for (const [id, action] of actionOverrides) {
+      const authoritative = actions.get(id);
+      if (!authoritative || Date.parse(action.updated_at) >= Date.parse(authoritative.updated_at)) {
+        actions.set(id, action);
+      }
+    }
     const messageActionIds = new Set(
       detail.messages.flatMap((message) =>
         message.parts.flatMap((part) => (part.type === "action" ? [part.action_id] : [])),
@@ -5822,6 +6011,16 @@ function ConversationThread({
   const activePlanReview = detail.plan_reviews.find(
     (review) => review.status === "queued" || review.status === "running",
   );
+  const pauseActionsPending = [...actionContext.actions.values()].some(
+    (action) =>
+      ["pause_work", "resume_work"].includes(action.action_type) &&
+      !["applied", "failed", "rejected"].includes(action.status),
+  );
+  useEffect(() => {
+    if (!isExecution || !pauseActionsPending) return;
+    const timer = window.setInterval(() => void onRefreshSoft(), 2_500);
+    return () => window.clearInterval(timer);
+  }, [isExecution, onRefreshSoft, pauseActionsPending]);
   const hasApprovedPlan = detail.plan_versions.some((version) => version.status === "approved");
   const proposalBlockedReason = activePlanReview
     ? `Plan proposal updates are unavailable while QC is ${activePlanReview.status}.`
@@ -5998,6 +6197,15 @@ function ConversationThread({
     developmentPhases.find((phase) => phase.id === selectedDevelopmentPhaseId) ??
     developmentPhases[0] ??
     null;
+  const overallDevelopmentPauseState = developmentPauseState(actionContext.actions.values(), null);
+  const selectedDevelopmentPauseState = developmentPauseState(
+    actionContext.actions.values(),
+    selectedDevelopmentPhase?.task?.id ?? null,
+  );
+  const overallPauseBusy = developmentPauseBusy?.endsWith(":between-phases") ?? false;
+  const selectedPauseBusy = selectedDevelopmentPhase?.task
+    ? (developmentPauseBusy?.endsWith(`:${selectedDevelopmentPhase.task.id}`) ?? false)
+    : false;
   const artifactOptions = Array.from(
     new Set([
       ...(detail.handoff?.package.artifact_ids ?? []),
@@ -6188,8 +6396,13 @@ function ConversationThread({
                     {isExecution ? (
                       <DevelopmentPhaseStrip
                         phases={developmentPhases}
+                        execution={phaseExecution}
                         selectedId={selectedDevelopmentPhase?.id ?? null}
+                        pauseState={overallDevelopmentPauseState}
+                        pauseBusy={overallPauseBusy}
                         onSelect={setSelectedDevelopmentPhaseId}
+                        onPause={() => void setDevelopmentPaused("pause_work", null)}
+                        onResume={() => void setDevelopmentPaused("resume_work", null)}
                       />
                     ) : null}
                     {isExecution && detail.work_item.status === "awaiting_approval" ? (
@@ -6231,6 +6444,17 @@ function ConversationThread({
                           phaseExecutionLoading || detail.work_item.status === "awaiting_approval"
                         }
                         error={phaseExecutionError}
+                        pauseState={selectedDevelopmentPauseState}
+                        pauseBusy={selectedPauseBusy}
+                        pauseError={developmentPauseError}
+                        onPause={() => {
+                          const taskId = selectedDevelopmentPhase?.task?.id;
+                          if (taskId) void setDevelopmentPaused("pause_work", taskId);
+                        }}
+                        onResume={() => {
+                          const taskId = selectedDevelopmentPhase?.task?.id;
+                          if (taskId) void setDevelopmentPaused("resume_work", taskId);
+                        }}
                         onRecovered={async () => {
                           const phaseId = detail.work_item.phase_id;
                           if (phaseId) {
@@ -6251,15 +6475,6 @@ function ConversationThread({
                           key={executionProjection.run.run_id}
                           projectId={detail.work_item.project_id}
                           run={executionProjection.run}
-                          pauseBusy={developmentPauseBusy}
-                          pauseError={developmentPauseError}
-                          onPause={
-                            ["created", "dispatched", "running", "verifying"].includes(
-                              executionProjection.run.state,
-                            )
-                              ? () => void pauseDevelopment()
-                              : undefined
-                          }
                           onCancellation={applyRunCancellation}
                           onUnauthorized={onUnauthorized}
                         />

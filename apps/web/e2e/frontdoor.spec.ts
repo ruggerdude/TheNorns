@@ -1219,24 +1219,19 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
         <div class="conversation-thread-viewport">
       <section class="conversation-development-phases" aria-label="Development phases">
         <header>
-          <div><h2>Phases</h2></div>
           <div class="conversation-development-phase-progress">
-            <span>0 of 4 complete</span><strong>13%</strong>
+            <strong>Overall 13%</strong><span>· ~42 min left</span>
             <progress aria-label="Development progress" max="100" value="13"></progress>
           </div>
+          <button class="btn btn-small conversation-development-overall-pause"><span>Ⅱ</span>Pause after phase</button>
         </header>
         <div class="conversation-development-phase-list">
           <ol>
-            ${[
-              "Foundation: scaffold, auth, and database",
-              "Core engine: GP parsing, track picker, one-page cheat sheet",
-              "AI providers and settings",
-              "End-to-end verification against reference sheet",
-            ]
+            ${["Foundation", "Core engine", "AI providers and settings", "End-to-end verification"]
               .map(
                 (title, index) => `
                   <li data-state="${index === 0 ? "blocked" : "queued"}">
-                    <button><span class="conversation-development-phase-index">${index + 1}</span><span><strong>${title}</strong><small>${index === 0 ? "Blocked" : "Queued"}</small></span></button>
+                    <button><span class="conversation-development-phase-index">${index + 1}</span><span><strong>${title}</strong><small>${index === 0 ? "25% · blocked" : "0% · ~14 min"}</small></span></button>
                   </li>`,
               )
               .join("")}
@@ -1290,6 +1285,8 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
     { width: 1920, height: 900 },
     { width: 1280, height: 720 },
     { width: 820, height: 900 },
+    { width: 640, height: 900 },
+    { width: 390, height: 844 },
   ]) {
     await page.setViewportSize(viewport);
     const rail = page.getByRole("complementary", { name: "Phase chats" });
@@ -1299,12 +1296,14 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
     const runControls = page.getByRole("region", { name: "Run controls" });
     const transcript = page.locator(".conversation-thread-viewport");
     const composerFooter = page.locator(".conversation-composer-footer");
-    const phaseButtonBoxes = await phases.locator("li button").evaluateAll((buttons) =>
-      buttons.map((button) => {
-        const box = button.getBoundingClientRect();
-        return { top: box.top, bottom: box.bottom };
-      }),
-    );
+    const phaseControlBoxes = await phases
+      .locator("header > *, li button")
+      .evaluateAll((controls) =>
+        controls.map((control) => {
+          const box = control.getBoundingClientRect();
+          return { top: box.top, bottom: box.bottom };
+        }),
+      );
     const [railBox, phasesBox, dialogueBox, recoveryBox, controlsBox, transcriptBox, footerBox] =
       await Promise.all([
         rail.boundingBox(),
@@ -1325,9 +1324,9 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
     expect(footerBox).not.toBeNull();
     expect(phasesBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(60);
     expect(Math.abs((phasesBox?.y ?? 0) - (transcriptBox?.y ?? 0))).toBeLessThanOrEqual(1);
-    for (const buttonBox of phaseButtonBoxes) {
-      expect(buttonBox.top).toBeGreaterThanOrEqual(phasesBox?.y ?? Number.POSITIVE_INFINITY);
-      expect(buttonBox.bottom).toBeLessThanOrEqual((phasesBox?.y ?? 0) + (phasesBox?.height ?? 0));
+    for (const controlBox of phaseControlBoxes) {
+      expect(controlBox.top).toBeGreaterThanOrEqual(phasesBox?.y ?? Number.POSITIVE_INFINITY);
+      expect(controlBox.bottom).toBeLessThanOrEqual((phasesBox?.y ?? 0) + (phasesBox?.height ?? 0));
     }
     if (viewport.width > 900) {
       expect(await rail.evaluate((element) => getComputedStyle(element).position)).toBe("fixed");
@@ -1350,6 +1349,10 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
     expect(dialogueBox?.y ?? 0).toBeGreaterThanOrEqual(
       (phasesBox?.y ?? 0) + (phasesBox?.height ?? 0) - 1,
     );
+    expect(
+      (dialogueBox?.y ?? Number.POSITIVE_INFINITY) -
+        ((phasesBox?.y ?? 0) + (phasesBox?.height ?? 0)),
+    ).toBeLessThanOrEqual(8);
     expect(recoveryBox?.x ?? 0).toBeGreaterThanOrEqual(dialogueBox?.x ?? 0);
     expect((recoveryBox?.x ?? 0) + (recoveryBox?.width ?? 0)).toBeLessThanOrEqual(viewport.width);
     expect(controlsBox?.y ?? 0).toBeGreaterThanOrEqual(

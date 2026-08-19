@@ -6211,6 +6211,7 @@
    live workspace on it. The row stays pinned while the agent dialogue moves
    underneath, and individual phase names scroll horizontally when needed. */
 .conversation-work-tab-development-chat .conversation-thread-viewport {
+  gap: 0;
   padding-top: 0;
 }
 
@@ -6236,7 +6237,7 @@
   display: flex;
   min-width: max-content;
   align-items: center;
-  gap: 0.6rem;
+  gap: 0.45rem;
 }
 
 .conversation-development-phases > header > div:first-child {
@@ -6269,10 +6270,17 @@
 }
 
 .conversation-development-phase-progress progress {
-  width: 4.5rem;
+  width: 3.5rem;
   height: 0.3rem;
   flex: none;
   accent-color: var(--accent);
+}
+
+.conversation-development-overall-pause {
+  min-height: 1.9rem;
+  gap: 0.3rem;
+  padding: 0.25rem 0.45rem;
+  white-space: nowrap;
 }
 
 .conversation-development-phase-list {
@@ -6313,7 +6321,9 @@
 }
 
 .conversation-development-phases li button > span:last-child {
-  display: block;
+  display: grid;
+  min-width: 0;
+  gap: 0;
 }
 
 .conversation-development-phases li strong {
@@ -6322,7 +6332,25 @@
 }
 
 .conversation-development-phases li small {
-  display: none;
+  display: block;
+  color: var(--ink-muted);
+  font-size: 0.67rem;
+  line-height: 1;
+}
+
+.conversation-development-phase-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.conversation-development-phase-actions .btn-small {
+  min-height: 2rem;
+  gap: 0.3rem;
+}
+
+.conversation-work-tab-development-chat .conversation-agent-dialogue {
+  margin: 0.35rem 0.65rem 0;
 }
 
 @media (max-width: 640px) {
@@ -6331,8 +6359,15 @@
     padding-right: 3.25rem;
   }
 
-  .conversation-development-phase-progress > span,
   .conversation-development-phase-progress progress {
     display: none;
+  }
+
+  .conversation-development-overall-pause {
+    font-size: 0;
+  }
+
+  .conversation-development-overall-pause > span {
+    font-size: var(--text-sm);
   }
 }

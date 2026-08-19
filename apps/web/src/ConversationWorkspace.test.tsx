@@ -5074,11 +5074,15 @@ describe("conversation workspace", () => {
   it("shows dispatched phases without claiming coding is already running", async () => {
     const execution = executionConversation();
     const approvedVersion = planVersion({ status: "approved" });
+    const approvedModule = approvedVersion.plan.plan.modules[0];
+    if (approvedModule) approvedModule.title = "Foundation: scaffold, auth, and database";
     const handoff = handoffFor(approvedVersion, execution.id);
     const taskId = "task:phase%3Aphase-1:task-core-api";
+    const pauseBodies: Array<Record<string, unknown>> = [];
+    const pauseActions = new Map<string, V2ConversationActionT>();
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = urlOf(input);
         if (url.endsWith("/work-items")) {
           return Response.json({
@@ -5125,6 +5129,59 @@ describe("conversation workspace", () => {
             },
           });
         }
+        if (url.endsWith(`/conversations/${execution.id}/actions`) && init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as {
+            action_type: "pause_work" | "resume_work";
+            payload: { parameters: Record<string, unknown> };
+          };
+          pauseBodies.push(body.payload.parameters);
+          const id = `action-${body.action_type}-${pauseBodies.length}`;
+          const action = planAction({
+            id,
+            conversation_id: execution.id,
+            source_message_id: `message-${id}`,
+            action_type: body.action_type,
+            interaction_class: body.action_type === "pause_work" ? "pause" : "resume",
+            payload: body.payload,
+            status: "proposed",
+          });
+          pauseActions.set(id, action);
+          return Response.json({
+            message: message({
+              id: `message-${id}`,
+              role: "user",
+              conversation_id: execution.id,
+              sequence: 10 + pauseBodies.length,
+              parts: [{ type: "action", action_id: id }],
+            }),
+            action,
+          });
+        }
+        if (url.includes(`/conversations/${execution.id}/actions/`) && url.endsWith("/confirm")) {
+          const id = decodeURIComponent(url.split("/actions/")[1]?.split("/confirm")[0] ?? "");
+          const proposed = pauseActions.get(id);
+          if (!proposed) throw new Error(`Unknown action: ${id}`);
+          const applied = planAction({
+            ...proposed,
+            status: "applied",
+            confirmed_by_user_id: "user-1",
+            confirmation_idempotency_key: `confirm-${id}`,
+            confirmation_request_fingerprint: "c".repeat(64),
+            confirmed_at: now,
+            recorded_at: now,
+          });
+          pauseActions.set(id, applied);
+          return Response.json({
+            action: applied,
+            effect: {
+              kind: "delivery_queued",
+              delivery_mode: proposed.payload.parameters.task_id ? "live" : "checkpoint",
+              delivery_event: null,
+              target_run_id: null,
+              target_command_id: null,
+            },
+          });
+        }
         if (url.endsWith("/phases/phase-1/execution")) {
           return Response.json({
             schema_version: 2,
@@ -5135,6 +5192,7 @@ describe("conversation workspace", () => {
               status: "active",
               completed_tasks: 0,
               total_tasks: 1,
+              eta_at: new Date(Date.now() + 30 * 60_000).toISOString(),
             },
             tasks: [
               {
@@ -5183,6 +5241,7 @@ describe("conversation workspace", () => {
         throw new Error(`Unexpected request: ${url}`);
       }),
     );
+    const user = userEvent.setup();
     render(
       <ConversationWorkspace
         projectId={projectId}
@@ -5199,9 +5258,10 @@ describe("conversation workspace", () => {
     expect(await screen.findByRole("heading", { name: "Agent dialogue" })).toBeVisible();
     expect(screen.queryByTestId("conversation-development-running")).not.toBeInTheDocument();
     const phases = screen.getByRole("region", { name: "Development phases" });
-    expect(phases).toHaveTextContent("Core API");
-    expect(phases).toHaveTextContent("In progress");
+    expect(phases).toHaveTextContent("Foundation");
+    expect(phases).not.toHaveTextContent("scaffold, auth, and database");
     expect(phases).toHaveTextContent("10%");
+    expect(phases).toHaveTextContent(/~30 min left/);
     expect(screen.getByRole("progressbar", { name: "Development progress" })).toHaveAttribute(
       "value",
       "10",
@@ -5218,8 +5278,25 @@ describe("conversation workspace", () => {
       screen.queryByRole("button", { name: /save execution target/i }),
     ).not.toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: "Stop reason" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Pause after phase" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Pause phase" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Pause phase" }));
+    await waitFor(() => expect(pauseBodies[0]).toMatchObject({ task_id: taskId }));
+    await user.click(await screen.findByRole("button", { name: "Resume phase" }));
+    await waitFor(() => expect(pauseBodies[1]).toMatchObject({ task_id: taskId }));
+    await user.click(screen.getByRole("button", { name: "Pause after phase" }));
+    await waitFor(() => expect(pauseBodies).toHaveLength(3));
+    expect(pauseBodies[2]).not.toHaveProperty("task_id");
+    await user.click(await screen.findByRole("button", { name: "Resume phases" }));
+    await waitFor(() => expect(pauseBodies).toHaveLength(4));
+    expect(pauseBodies[3]).not.toHaveProperty("task_id");
+    expect(pauseBodies.map((body) => body.reason)).toEqual([
+      "Paused within this phase by the user from the Development chat.",
+      "Resume this phase from its saved checkpoint.",
+      "Pause between phases requested by the user from the Development chat.",
+      "Resume development after the saved phase checkpoint.",
+    ]);
   });
 
   it("explains an automatic budget refusal once and retries the same task with a higher limit", async () => {
@@ -5573,10 +5650,10 @@ describe("conversation workspace", () => {
     expect(within(phases).getByText(web.title)).toBeInTheDocument();
     expect(
       phaseButtons.find((button) => button.textContent?.includes(core.title)),
-    ).toHaveTextContent("In progress");
+    ).toHaveTextContent("50% · estimating");
     expect(
       phaseButtons.find((button) => button.textContent?.includes(web.title)),
-    ).toHaveTextContent("Queued");
+    ).toHaveTextContent("0% · estimating");
     expect(
       phaseButtons.filter(
         (button) =>
@@ -5935,7 +6012,7 @@ describe("conversation workspace", () => {
     expect(developmentStarted).toBe(true);
     expect(screen.queryByTestId("conversation-development-running")).not.toBeInTheDocument();
     expect(await screen.findByRole("heading", { name: "Agent dialogue" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "Pause" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Pause after phase" })).toBeVisible();
     expect(screen.getByRole("button", { name: "Stop" })).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Chat options" }));
     expect(screen.getByRole("combobox", { name: "Conversation model" })).toHaveValue("gpt-5.6-sol");
