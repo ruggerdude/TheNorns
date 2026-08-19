@@ -3750,12 +3750,16 @@ function developmentComplexityWeight(phase: DevelopmentPhaseItem): number {
   }
 }
 
+const COLD_START_MINUTES_PER_COMPLEXITY_POINT = 5;
+
 /**
  * Provide an early ETA from real elapsed run time while the throughput-based
- * server ETA is still waiting for two completed tasks. The visible execution
- * milestones supply the completion fraction; completed run durations replace
- * that estimate as soon as they exist. Each task remains bounded by the
- * launcher's one-hour run limit so a stale run cannot produce an endless ETA.
+ * server ETA is still waiting for two completed tasks. A five-minute planning
+ * baseline per complexity point prevents the cold-start state from remaining
+ * stuck on "estimating"; visible milestones and completed run durations replace
+ * that baseline as soon as real execution data exists. Each task remains
+ * bounded by the launcher's one-hour run limit so a stale run cannot produce an
+ * endless ETA.
  */
 function developmentEstimatedEtaAt(phases: DevelopmentPhaseItem[], nowMs: number): string | null {
   const normalizedSamples = phases.flatMap((phase) => {
@@ -3775,13 +3779,14 @@ function developmentEstimatedEtaAt(phases: DevelopmentPhaseItem[], nowMs: number
     const elapsedMs = Math.max(1_000, nowMs - startedMs);
     return [elapsedMs / (percent / 100) / weight];
   });
-  if (normalizedSamples.length === 0) return null;
   normalizedSamples.sort((left, right) => left - right);
   const midpoint = Math.floor(normalizedSamples.length / 2);
   const normalizedDurationMs =
-    normalizedSamples.length % 2 === 0
-      ? ((normalizedSamples[midpoint - 1] ?? 0) + (normalizedSamples[midpoint] ?? 0)) / 2
-      : (normalizedSamples[midpoint] ?? 0);
+    normalizedSamples.length === 0
+      ? COLD_START_MINUTES_PER_COMPLEXITY_POINT * 60_000
+      : normalizedSamples.length % 2 === 0
+        ? ((normalizedSamples[midpoint - 1] ?? 0) + (normalizedSamples[midpoint] ?? 0)) / 2
+        : (normalizedSamples[midpoint] ?? 0);
   if (!Number.isFinite(normalizedDurationMs) || normalizedDurationMs <= 0) return null;
 
   const remainingMs = phases
@@ -3791,11 +3796,8 @@ function developmentEstimatedEtaAt(phases: DevelopmentPhaseItem[], nowMs: number
         60 * 60_000,
         Math.max(2 * 60_000, normalizedDurationMs * developmentComplexityWeight(phase)),
       );
-      const startedMs = phase.task?.run?.started_at
-        ? Date.parse(phase.task.run.started_at)
-        : Number.NaN;
-      const elapsedMs = Number.isFinite(startedMs) ? Math.max(0, nowMs - startedMs) : 0;
-      return total + Math.max(60_000, estimatedDurationMs - elapsedMs);
+      const completionFraction = developmentPhasePercent(phase) / 100;
+      return total + Math.max(60_000, estimatedDurationMs * (1 - completionFraction));
     }, 0);
   return remainingMs > 0 ? new Date(nowMs + remainingMs).toISOString() : null;
 }
@@ -3820,18 +3822,8 @@ function developmentPhaseRemainingMs(
   if (phase.state === "complete") return 0;
   if (!overallEtaAt) return null;
   const overallRemainingMs = Math.max(0, Date.parse(overallEtaAt) - nowMs);
-  const weight = (candidate: DevelopmentPhaseItem): number => {
-    switch (candidate.task?.complexity) {
-      case "S":
-        return 1;
-      case "L":
-        return 3;
-      case "XL":
-        return 5;
-      default:
-        return 2;
-    }
-  };
+  const weight = (candidate: DevelopmentPhaseItem): number =>
+    developmentComplexityWeight(candidate) * (1 - developmentPhasePercent(candidate) / 100);
   const incomplete = phases.filter((candidate) => candidate.state !== "complete");
   const totalWeight = incomplete.reduce((total, candidate) => total + weight(candidate), 0);
   if (totalWeight <= 0) return null;

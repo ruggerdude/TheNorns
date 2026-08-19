@@ -5627,10 +5627,10 @@ describe("conversation workspace", () => {
     expect(within(phases).queryByText(web.title)).not.toBeInTheDocument();
     expect(
       phaseButtons.find((button) => button.textContent?.includes(core.title)),
-    ).toHaveTextContent("50% · estimating");
+    ).toHaveTextContent("50% · ~5 min");
     expect(
       phaseButtons.find((button) => button.textContent?.includes("End-to-end verification")),
-    ).toHaveTextContent("0% · estimating");
+    ).toHaveTextContent("0% · ~10 min");
     expect(
       phaseButtons.filter(
         (button) =>
