@@ -533,12 +533,12 @@ test("Claude Code falls back to a fresh session when the resumed session no long
         async interrupt() {},
         async *[Symbol.asyncIterator]() {
           if (options.resume !== undefined) {
-            yield {
-              type: "result",
-              subtype: "error_during_execution",
-              result: "No conversation found with session ID: session-gone",
-            };
-            return;
+            // The real SDK THROWS for this condition (verified in
+            // @anthropic-ai/claude-agent-sdk 0.3.207 sdk.mjs), it does not
+            // yield an error result message.
+            throw new Error(
+              "Claude Code returned an error result: No conversation found with session ID: session-gone",
+            );
           }
           yield {
             type: "result",

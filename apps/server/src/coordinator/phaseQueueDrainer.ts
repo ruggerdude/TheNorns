@@ -110,6 +110,8 @@ export class PhaseQueueDrainer {
             AND EXISTS (
               SELECT 1 FROM tasks t
               JOIN agent_assignments a ON a.id = t.designated_assignment_id
+              LEFT JOIN conversation_development_pause_points task_position
+                ON task_position.task_id = t.id
               WHERE t.project_id = phase.project_id AND t.phase_id = phase.id
                 AND t.state IN ('pending','ready')
                 AND t.designated_assignment_id IS NOT NULL
@@ -117,6 +119,15 @@ export class PhaseQueueDrainer {
                   SELECT 1 FROM task_dependencies d
                   JOIN tasks pred ON pred.id = d.predecessor_task_id
                    WHERE d.successor_task_id = t.id AND pred.state <> 'completed'
+                )
+                AND (
+                  task_position.phase_position IS NULL
+                  OR NOT EXISTS (
+                    SELECT 1 FROM conversation_development_pause_points pause_point
+                     WHERE pause_point.phase_id = t.phase_id
+                       AND pause_point.pause_after_completion = true
+                       AND pause_point.phase_position < task_position.phase_position
+                  )
                 )
             )
           ORDER BY phase.project_id, phase.id`,

@@ -465,6 +465,32 @@ export function startConversationDevelopment(
   );
 }
 
+export function configureConversationDevelopmentPausePoints(
+  projectId: string,
+  workItemId: string,
+  conversationId: string,
+  taskIds: string[],
+  pauseAfterCompletion: boolean,
+): Promise<{
+  phase_id: string;
+  pause_points: {
+    task_id: string;
+    phase_position: number;
+    pause_after_completion: boolean;
+  }[];
+}> {
+  return requestJson(
+    `${messageEndpoint(projectId, workItemId, conversationId)}/development-pause-points`,
+    {
+      method: "PUT",
+      body: JSON.stringify({
+        task_ids: taskIds,
+        pause_after_completion: pauseAfterCompletion,
+      }),
+    },
+  );
+}
+
 export function cancelConversationPlanReview(
   projectId: string,
   workItemId: string,

@@ -543,6 +543,11 @@ export const QC_SALVAGED_PLAN_MIGRATION_URL = new URL(
   "../../../drizzle/0085_qc_salvaged_plan.sql",
   import.meta.url,
 );
+export const DEVELOPMENT_PAUSE_POINTS_MIGRATION_NAME = "0086_development_pause_points";
+export const DEVELOPMENT_PAUSE_POINTS_MIGRATION_URL = new URL(
+  "../../../drizzle/0086_development_pause_points.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -914,6 +919,10 @@ export async function loadSonnetCachePricingCorrectionMigrationSql(): Promise<st
 
 export async function loadQcSalvagedPlanMigrationSql(): Promise<string> {
   return readFile(QC_SALVAGED_PLAN_MIGRATION_URL, "utf8");
+}
+
+export async function loadDevelopmentPausePointsMigrationSql(): Promise<string> {
+  return readFile(DEVELOPMENT_PAUSE_POINTS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1427,6 +1436,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: QC_SALVAGED_PLAN_MIGRATION_NAME,
       sql: await loadQcSalvagedPlanMigrationSql(),
+    },
+    {
+      name: DEVELOPMENT_PAUSE_POINTS_MIGRATION_NAME,
+      sql: await loadDevelopmentPausePointsMigrationSql(),
     },
   ];
 }

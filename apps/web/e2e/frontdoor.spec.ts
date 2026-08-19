@@ -1223,7 +1223,7 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
             <strong>Overall 13%</strong><span>· ~42 min left</span>
             <progress aria-label="Development progress" max="100" value="13"></progress>
           </div>
-          <button class="btn btn-small conversation-development-overall-pause"><span>Ⅱ</span>Pause after phase</button>
+          <button class="conversation-development-pause-toggle conversation-development-overall-pause" aria-label="Pause after every phase" aria-pressed="false"><span>Ⅱ</span></button>
         </header>
         <div class="conversation-development-phase-list">
           <ol>
@@ -1231,7 +1231,8 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
               .map(
                 (title, index) => `
                   <li data-state="${index === 0 ? "blocked" : "queued"}">
-                    <button><span class="conversation-development-phase-index">${index + 1}</span><span><strong>${title}</strong><small>${index === 0 ? "25% · blocked" : "0% · ~14 min"}</small></span></button>
+                    <button class="conversation-development-phase-select"><span class="conversation-development-phase-index">${index + 1}</span><span><strong>${title}</strong><small>${index === 0 ? "25% · blocked" : "0% · ~14 min"}</small></span></button>
+                    <button class="conversation-development-pause-toggle conversation-development-phase-pause" aria-label="Pause after ${title}" aria-pressed="${index === 1}"><span>Ⅱ</span></button>
                   </li>`,
               )
               .join("")}
@@ -1280,6 +1281,11 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
     const sidebar = document.querySelector(".conversation-stage-sidebar");
     return sidebar !== null && getComputedStyle(sidebar).position === "fixed";
   });
+  await expect(page.getByRole("button", { name: "Pause after every phase" })).toHaveText("Ⅱ");
+  await expect(page.getByRole("button", { name: "Pause after Core engine" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
 
   for (const viewport of [
     { width: 1920, height: 900 },

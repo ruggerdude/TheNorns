@@ -556,6 +556,21 @@ export class ClaudeCodeRuntime implements CodingRuntime {
         };
       }
       const detail = error instanceof Error ? error.message : String(error);
+      // The SDK THROWS this error rather than yielding a result message, so
+      // the in-stream fallback never sees it. Same recovery here: the resumed
+      // session is per project directory and every attempt has a fresh
+      // worktree, so a stale id must fall back to a fresh session, not fail.
+      if (
+        this.options.resumeSessionId !== undefined &&
+        /no conversation found with session id/i.test(detail) &&
+        !request.signal?.aborted
+      ) {
+        request.onLog?.(
+          "The saved Claude Code session is no longer available on this computer. Starting a fresh session with the full approved task context.",
+        );
+        const { resumeSessionId: _stale, ...fresh } = this.options;
+        return new ClaudeCodeRuntime(fresh).run(request);
+      }
       const stopReason = observedStopReason ?? stopReasonFromError(detail);
       return {
         outcome: "failed",

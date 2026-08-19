@@ -6277,10 +6277,36 @@
 }
 
 .conversation-development-overall-pause {
-  min-height: 1.9rem;
-  gap: 0.3rem;
-  padding: 0.25rem 0.45rem;
-  white-space: nowrap;
+  width: 1.9rem;
+  height: 1.9rem;
+  flex: none;
+}
+
+.conversation-development-pause-toggle {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--ink-muted);
+  background: var(--surface);
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 900;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.conversation-development-pause-toggle:hover:not(:disabled),
+.conversation-development-pause-toggle[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  color: white;
+  background: var(--accent);
+}
+
+.conversation-development-pause-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
 }
 
 .conversation-development-phase-list {
@@ -6302,17 +6328,18 @@
 }
 
 .conversation-development-phases li {
+  position: relative;
   min-width: 8rem;
   flex: 1 1 10rem;
 }
 
-.conversation-development-phases li button {
+.conversation-development-phases li .conversation-development-phase-select {
   display: grid;
   width: 100%;
   min-height: 2.25rem;
   grid-template-columns: 1.35rem minmax(0, 1fr);
   gap: 0.35rem;
-  padding: 0.25rem 0.4rem;
+  padding: 0.25rem 2rem 0.25rem 0.4rem;
 }
 
 .conversation-development-phases li .conversation-development-phase-index {
@@ -6320,10 +6347,36 @@
   height: 1.35rem;
 }
 
-.conversation-development-phases li button > span:last-child {
+.conversation-development-phases li .conversation-development-phase-select > span:last-child {
   display: grid;
   min-width: 0;
   gap: 0;
+}
+
+.conversation-development-phases li .conversation-development-phase-pause {
+  position: absolute;
+  top: 50%;
+  right: 0.3rem;
+  display: grid;
+  width: 1.45rem;
+  min-width: 1.45rem;
+  height: 1.45rem;
+  min-height: 1.45rem;
+  transform: translateY(-50%);
+  grid-template-columns: none;
+  place-items: center;
+  gap: 0;
+  padding: 0;
+  border-color: color-mix(in srgb, var(--phase-color) 40%, var(--line));
+  color: var(--phase-color);
+  background: var(--surface);
+}
+
+.conversation-development-phases li .conversation-development-phase-pause:hover:not(:disabled),
+.conversation-development-phases li .conversation-development-phase-pause[aria-pressed="true"] {
+  border-color: var(--phase-color);
+  color: white;
+  background: var(--phase-color);
 }
 
 .conversation-development-phases li strong {
@@ -6361,13 +6414,5 @@
 
   .conversation-development-phase-progress progress {
     display: none;
-  }
-
-  .conversation-development-overall-pause {
-    font-size: 0;
-  }
-
-  .conversation-development-overall-pause > span {
-    font-size: var(--text-sm);
   }
 }

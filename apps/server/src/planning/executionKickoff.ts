@@ -199,15 +199,24 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
         conversation_id: string;
         module_id: string;
         approved_plan_version_id: string;
+        phase_position: number;
         package: unknown;
         canonical_package: string;
         content_hash: string;
       }>(
-        `SELECT id, work_item_id, conversation_id, module_id, approved_plan_version_id, package,
-                canonical_package, content_hash
-           FROM conversation_task_packages
-          WHERE project_id=$1 AND handoff_id=$2
-          ORDER BY module_id, id`,
+        `SELECT task_package.id, task_package.work_item_id, task_package.conversation_id,
+                task_package.module_id, task_package.approved_plan_version_id,
+                sequence.ordinality::int AS phase_position, task_package.package,
+                task_package.canonical_package, task_package.content_hash
+           FROM conversation_task_packages task_package
+           JOIN conversation_handoffs handoff
+             ON handoff.id=task_package.handoff_id
+            AND handoff.project_id=task_package.project_id
+           JOIN LATERAL jsonb_array_elements_text(handoff.package->'task_sequence')
+             WITH ORDINALITY AS sequence(module_id, ordinality)
+             ON sequence.module_id=task_package.module_id
+          WHERE task_package.project_id=$1 AND task_package.handoff_id=$2
+          ORDER BY sequence.ordinality, task_package.id`,
         [projectId, handoffId],
       );
       if (packages.rows.length === 0) {
@@ -284,6 +293,31 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
           bound.context_document_id !== contextDocumentId
         ) {
           throw new Error(`task package ${taskPackage.id} has a conflicting task binding`);
+        }
+        await tx.query(
+          `INSERT INTO conversation_development_pause_points (
+             task_id,project_id,work_item_id,conversation_id,handoff_id,phase_id,phase_position
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+           ON CONFLICT (task_id) DO NOTHING`,
+          [
+            taskId,
+            projectId,
+            taskPackage.work_item_id,
+            taskPackage.conversation_id,
+            handoffId,
+            phaseId,
+            taskPackage.phase_position,
+          ],
+        );
+        const pausePoint = (
+          await tx.query<{ phase_position: number }>(
+            `SELECT phase_position FROM conversation_development_pause_points
+              WHERE task_id=$1 AND project_id=$2 AND phase_id=$3`,
+            [taskId, projectId, phaseId],
+          )
+        ).rows[0];
+        if (!pausePoint || Number(pausePoint.phase_position) !== taskPackage.phase_position) {
+          throw new Error(`task package ${taskPackage.id} has a conflicting phase position`);
         }
         const lockedTask = await tx.query<{ id: string }>(
           `SELECT id FROM tasks

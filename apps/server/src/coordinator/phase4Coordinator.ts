@@ -185,6 +185,7 @@ interface ConversationTaskPackageBindingRow {
   work_item_id: string;
   work_item_status: string;
   pause_pending: boolean;
+  pause_point_blocked: boolean;
   package_id: string | null;
   content_hash: string | null;
   context_document_id: string | null;
@@ -291,6 +292,17 @@ export class Phase4Coordinator {
                          OR pause.payload->'parameters'->>'task_id'=$3
                        )
                   ) AS pause_pending,
+                  EXISTS (
+                    SELECT 1
+                      FROM conversation_development_pause_points pause_point
+                     WHERE pause_point.phase_id=phase.id
+                       AND pause_point.pause_after_completion=true
+                       AND pause_point.phase_position < (
+                         SELECT current_point.phase_position
+                           FROM conversation_development_pause_points current_point
+                          WHERE current_point.task_id=$3
+                       )
+                  ) AS pause_point_blocked,
                   package_binding.package_id, package_binding.content_hash,
                   package_binding.context_document_id, document.byte_size,
                   task_package.package
@@ -314,9 +326,13 @@ export class Phase4Coordinator {
           [input.project_id, input.phase_id, input.task_id],
         )
       ).rows[0];
-      if (packageScope?.work_item_status === "blocked" || packageScope?.pause_pending) {
+      if (
+        packageScope?.work_item_status === "blocked" ||
+        packageScope?.pause_pending ||
+        packageScope?.pause_point_blocked
+      ) {
         throw new Phase4CoordinatorConflictError(
-          "conversation work is paused and cannot dispatch until an explicit resume is applied",
+          "conversation work is paused and cannot dispatch until its selected pause point is cleared",
         );
       }
       if (packageScope && !packageScope.package_id) {

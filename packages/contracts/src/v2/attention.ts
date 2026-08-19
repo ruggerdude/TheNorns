@@ -179,6 +179,8 @@ export const V2PhaseExecution = z
           aggregate_version: z.number().int().positive().default(1),
           title: V2NonEmptyString,
           state: V2NonEmptyString,
+          phase_position: z.number().int().positive().nullable().default(null),
+          pause_after_completion: z.boolean().default(false),
           complexity: V2NonEmptyString,
           risk: V2NonEmptyString,
           dependencies: z.array(V2EntityId),

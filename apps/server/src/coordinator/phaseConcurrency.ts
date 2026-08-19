@@ -86,6 +86,8 @@ export const SCHEDULABLE_TASKS_SQL = `
            LIMIT 1) AS designated_terminal_run_id
     FROM tasks t
     JOIN agent_assignments a ON a.id = t.designated_assignment_id
+    LEFT JOIN conversation_development_pause_points task_position
+      ON task_position.task_id = t.id
    WHERE t.project_id = $1 AND t.phase_id = $2
      AND t.state IN ('pending', 'ready')
      AND t.designated_assignment_id IS NOT NULL
@@ -94,7 +96,16 @@ export const SCHEDULABLE_TASKS_SQL = `
        JOIN tasks pred ON pred.id = d.predecessor_task_id
         WHERE d.successor_task_id = t.id AND pred.state <> 'completed'
      )
-   ORDER BY t.created_at ASC, t.id ASC`;
+     AND (
+       task_position.phase_position IS NULL
+       OR NOT EXISTS (
+         SELECT 1 FROM conversation_development_pause_points pause_point
+          WHERE pause_point.phase_id = t.phase_id
+            AND pause_point.pause_after_completion = true
+            AND pause_point.phase_position < task_position.phase_position
+       )
+     )
+   ORDER BY task_position.phase_position ASC NULLS LAST, t.created_at ASC, t.id ASC`;
 
 export async function describePhaseConcurrency(
   sql: V2SqlExecutor,

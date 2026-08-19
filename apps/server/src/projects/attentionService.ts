@@ -1320,6 +1320,8 @@ export class AttentionService {
         aggregate_version: number;
         title: string;
         state: string;
+        phase_position: number | null;
+        pause_after_completion: boolean;
         complexity: string;
         risk: string;
         dependencies: string[];
@@ -1345,7 +1347,10 @@ export class AttentionService {
         command_results: unknown;
         evidence_count: number;
       }>(
-        `SELECT t.id, t.aggregate_version, t.title, t.state, t.complexity, t.risk,
+        `SELECT t.id, t.aggregate_version, t.title, t.state,
+          pause_point.phase_position,
+          COALESCE(pause_point.pause_after_completion, false) AS pause_after_completion,
+          t.complexity, t.risk,
           COALESCE((SELECT jsonb_agg(d.predecessor_task_id ORDER BY d.predecessor_task_id)
                     FROM task_dependencies d WHERE d.successor_task_id=t.id),'[]'::jsonb) AS dependencies,
           profile.id AS implementation_profile_id, profile.provider, profile.model,
@@ -1373,6 +1378,7 @@ export class AttentionService {
          LEFT JOIN agent_profiles profile ON profile.id=assignment.agent_profile_id
          LEFT JOIN agent_profiles reviewer ON reviewer.id=assignment.reviewer_agent_profile_id
          LEFT JOIN agent_runs run ON run.id=t.designated_run_id
+         LEFT JOIN conversation_development_pause_points pause_point ON pause_point.task_id=t.id
          WHERE t.project_id=$1 AND t.phase_id=$2 ORDER BY t.created_at, t.id`,
         [projectId, phaseId],
       );
@@ -1442,6 +1448,8 @@ export class AttentionService {
           aggregate_version: task.aggregate_version,
           title: task.title,
           state: task.state,
+          phase_position: task.phase_position === null ? null : Number(task.phase_position),
+          pause_after_completion: task.pause_after_completion,
           complexity: task.complexity,
           risk: task.risk,
           dependencies: task.dependencies,

@@ -38,6 +38,13 @@ const ConfirmBody = z
   })
   .strict();
 
+const DevelopmentPausePointsBody = z
+  .object({
+    task_ids: z.array(z.string().min(1)).min(1).max(100),
+    pause_after_completion: z.boolean(),
+  })
+  .strict();
+
 const CancelReviewBody = z
   .object({
     reason: z.string().trim().min(1).max(500),
@@ -302,6 +309,27 @@ export function registerConversationPlanRoutes(
         V2CreateExecutionActionProposalInput.parse(request.body),
       );
       return reply.code(201).send(response);
+    } catch (error) {
+      routeError(reply, error);
+    }
+  });
+
+  app.put(`${base}/development-pause-points`, async (request, reply) => {
+    const user = await options.requireUser(request, reply);
+    if (!user) return;
+    if (!options.steering) return reply.code(503).send({ error: "steering_unavailable" });
+    const { projectId, workItemId, conversationId } = request.params as {
+      projectId: string;
+      workItemId: string;
+      conversationId: string;
+    };
+    try {
+      const response = await options.steering.configureDevelopmentPausePoints(
+        user.id,
+        { projectId, workItemId, conversationId },
+        DevelopmentPausePointsBody.parse(request.body),
+      );
+      return reply.send(response);
     } catch (error) {
       routeError(reply, error);
     }

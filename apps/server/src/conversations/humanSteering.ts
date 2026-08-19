@@ -118,6 +118,139 @@ export class ConversationHumanSteeringService {
     this.maxContextBytes = options.maxContextBytes ?? MAX_TOTAL_CONTEXT_BYTES;
   }
 
+  async configureDevelopmentPausePoints(
+    userId: string,
+    scope: Scope,
+    input: { task_ids: string[]; pause_after_completion: boolean },
+  ): Promise<{
+    phase_id: string;
+    pause_points: { task_id: string; phase_position: number; pause_after_completion: boolean }[];
+  }> {
+    const taskIds = [...new Set(input.task_ids)];
+    if (taskIds.length === 0) {
+      throw new ConversationPersistenceError(
+        "action_not_found",
+        "at least one development phase is required",
+      );
+    }
+    return this.transactions.transaction(async (tx) => {
+      await this.assertAccess(tx, scope.projectId, userId);
+      const conversation = (
+        await tx.query<{ phase_id: string }>(
+          `SELECT intent.phase_id
+             FROM work_conversations conversation
+             JOIN conversation_kickoff_intents intent
+               ON intent.execution_conversation_id=conversation.id
+              AND intent.project_id=conversation.project_id
+              AND intent.work_item_id=conversation.work_item_id
+            WHERE conversation.project_id=$1 AND conversation.work_item_id=$2
+              AND conversation.id=$3 AND conversation.kind='execution_pm'
+              AND intent.phase_id IS NOT NULL
+            ORDER BY intent.created_at DESC,intent.id DESC
+            LIMIT 1`,
+          [scope.projectId, scope.workItemId, scope.conversationId],
+        )
+      ).rows[0];
+      if (!conversation) {
+        throw new ConversationPersistenceError(
+          "action_not_found",
+          "development execution scope is unavailable",
+        );
+      }
+      const targets = await tx.query<{
+        task_id: string;
+        state: string;
+        pause_after_completion: boolean;
+      }>(
+        `SELECT pause_point.task_id,task.state,pause_point.pause_after_completion
+           FROM conversation_development_pause_points pause_point
+           JOIN tasks task ON task.id=pause_point.task_id
+          WHERE pause_point.project_id=$1 AND pause_point.work_item_id=$2
+            AND pause_point.conversation_id=$3 AND pause_point.phase_id=$4
+            AND pause_point.task_id=ANY($5::text[])
+          FOR UPDATE OF pause_point`,
+        [scope.projectId, scope.workItemId, scope.conversationId, conversation.phase_id, taskIds],
+      );
+      if (targets.rows.length !== taskIds.length) {
+        throw new ConversationPersistenceError(
+          "action_not_found",
+          "a selected pause point is outside this development conversation",
+        );
+      }
+      if (
+        input.pause_after_completion &&
+        targets.rows.some(
+          (target) => target.state === "completed" && !target.pause_after_completion,
+        )
+      ) {
+        throw new ConversationPersistenceError(
+          "action_not_found",
+          "a pause point cannot be added after that phase has completed",
+        );
+      }
+      await tx.query(
+        `UPDATE conversation_development_pause_points
+            SET pause_after_completion=$5,updated_by_user_id=$6,updated_at=now()
+          WHERE project_id=$1 AND work_item_id=$2 AND conversation_id=$3
+            AND phase_id=$4 AND task_id=ANY($7::text[])`,
+        [
+          scope.projectId,
+          scope.workItemId,
+          scope.conversationId,
+          conversation.phase_id,
+          input.pause_after_completion,
+          userId,
+          taskIds,
+        ],
+      );
+      const changedAt = new Date().toISOString();
+      await tx.query(
+        `INSERT INTO audit_events (
+           audit_id,audit_type,project_id,phase_id,actor_type,actor_id,outcome,severity,
+           correlation_id,occurred_at,targets,summary,details
+         ) VALUES ($1,'development_pause_points_changed',$2,$3,'human',$4,'succeeded','info',
+                   $5,$6,$7::jsonb,$8,$9::jsonb)`,
+        [
+          this.makeId("audit"),
+          scope.projectId,
+          conversation.phase_id,
+          userId,
+          this.makeId("correlation"),
+          changedAt,
+          JSON.stringify(taskIds.map((taskId) => ({ entity_type: "task", entity_id: taskId }))),
+          input.pause_after_completion
+            ? "Selected development pause points"
+            : "Cleared development pause points",
+          JSON.stringify({
+            work_item_id: scope.workItemId,
+            conversation_id: scope.conversationId,
+            task_ids: taskIds,
+            pause_after_completion: input.pause_after_completion,
+          }),
+        ],
+      );
+      const pausePoints = await tx.query<{
+        task_id: string;
+        phase_position: number;
+        pause_after_completion: boolean;
+      }>(
+        `SELECT task_id,phase_position,pause_after_completion
+           FROM conversation_development_pause_points
+          WHERE project_id=$1 AND work_item_id=$2 AND conversation_id=$3 AND phase_id=$4
+          ORDER BY phase_position`,
+        [scope.projectId, scope.workItemId, scope.conversationId, conversation.phase_id],
+      );
+      return {
+        phase_id: conversation.phase_id,
+        pause_points: pausePoints.rows.map((point) => ({
+          task_id: point.task_id,
+          phase_position: Number(point.phase_position),
+          pause_after_completion: point.pause_after_completion,
+        })),
+      };
+    });
+  }
+
   async proposeAction(
     userId: string,
     scope: Scope,

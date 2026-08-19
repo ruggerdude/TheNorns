@@ -5624,6 +5624,40 @@ export const conversationTaskPackageBindings = pgTable(
   (table) => [uniqueIndex("conversation_task_package_bindings_task_unique").on(table.taskId)],
 );
 
+export const conversationDevelopmentPausePoints = pgTable(
+  "conversation_development_pause_points",
+  {
+    taskId: text("task_id")
+      .primaryKey()
+      .references(() => conversationTaskPackageBindings.taskId, { onDelete: "cascade" }),
+    projectId: text("project_id").notNull(),
+    workItemId: text("work_item_id").notNull(),
+    conversationId: text("conversation_id").notNull(),
+    handoffId: text("handoff_id").notNull(),
+    phaseId: text("phase_id").notNull(),
+    phasePosition: integer("phase_position").notNull(),
+    pauseAfterCompletion: boolean("pause_after_completion").notNull().default(false),
+    updatedByUserId: text("updated_by_user_id").references(() => users.id, {
+      onDelete: "restrict",
+    }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("conversation_development_pause_points_phase_position_unique").on(
+      table.phaseId,
+      table.phasePosition,
+    ),
+    index("conversation_development_pause_points_enabled_idx")
+      .on(table.phaseId, table.phasePosition)
+      .where(sql`${table.pauseAfterCompletion}`),
+    check(
+      "conversation_development_pause_points_phase_position_check",
+      sql`${table.phasePosition} > 0`,
+    ),
+  ],
+);
+
 export const conversationTaskPackageRuns = pgTable("conversation_task_package_runs", {
   runId: text("run_id").primaryKey(),
   packageId: text("package_id").notNull(),
@@ -7353,6 +7387,7 @@ export const conversationDomainSchema = {
   conversationKickoffIntents,
   conversationTaskPackages,
   conversationTaskPackageBindings,
+  conversationDevelopmentPausePoints,
   conversationTaskPackageRuns,
   conversationPlanningExcerptReceipts,
   conversationCompactionReceipts,
