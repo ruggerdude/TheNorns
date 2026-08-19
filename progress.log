@@ -147,3 +147,4 @@
 2026-08-19T15:30Z | QCFR-1 | QC failure now salvages the last completed round's plan instead of dead-ending
 2026-08-19T16:08Z | EXEC-SESSION-1 | Claude Code stale-session resume now falls back to a fresh session (mirrors Codex recovery); agent 0.4.7 packaged
 2026-08-19T16:27Z | EXEC-SESSION-1 | Session fallback moved to the thrown-error path (SDK throws, does not yield); verified live on attempt 12
+2026-08-19T17:40Z | EXEC-REVIEW-1 | Foundation completed via operator path; independent reviewer stage has no implementation (agent_reviews empty forever) — Core Engine dispatched automatically
