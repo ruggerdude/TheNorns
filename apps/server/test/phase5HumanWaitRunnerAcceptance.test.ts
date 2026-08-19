@@ -343,7 +343,10 @@ describe("Phase 5 runner human-wait acceptance", () => {
     expect(events.some((event) => event.kind === "human_wait_requested")).toBe(false);
   });
 
-  it("rejects dirty and untracked work instead of releasing an unresumable checkpoint", async () => {
+  // EXEC-WAIT-1 — a run that pauses to ask a human routinely has uncommitted
+  // work (it stopped to ask, not to commit). Checkpoint it and open the wait
+  // rather than failing the run and discarding the work.
+  it("checkpoints dirty and untracked work, then publishes and opens the wait", async () => {
     const harness = await runnerHarness(cleanup, "dirty");
     const publications: Array<{ worktree: string; commit: string }> = [];
     const events: EventPayloadT[] = [];
@@ -356,21 +359,23 @@ describe("Phase 5 runner human-wait acceptance", () => {
       pushedPublisher(publications),
     ).execute(command(harness.base, "dirty"), (event) => events.push(event));
 
-    expect(result.outcome).toBe("failed");
-    expect(result.reason).toContain("uncommitted path");
-    expect(publications).toHaveLength(0);
+    expect(result.outcome).toBe("waiting_for_human");
+    expect(publications).toHaveLength(1);
     expect(events).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({ kind: "human_wait_requested" }),
         expect.objectContaining({
-          kind: "run_status",
-          status: "failed",
-          failure: expect.objectContaining({ code: "human_wait_checkpoint_unpublished" }),
+          kind: "run_log",
+          chunk: expect.stringContaining("checkpointed"),
         }),
       ]),
     );
+    expect(events.some((event) => event.kind === "run_status" && event.status === "failed")).toBe(
+      false,
+    );
   });
 
-  it("rejects a tracked modified file instead of publishing a partial checkpoint", async () => {
+  it("checkpoints a tracked modified file, then publishes and opens the wait", async () => {
     const harness = await runnerHarness(cleanup, "tracked-dirty");
     const publications: Array<{ worktree: string; commit: string }> = [];
     const events: EventPayloadT[] = [];
@@ -383,17 +388,13 @@ describe("Phase 5 runner human-wait acceptance", () => {
       pushedPublisher(publications),
     ).execute(command(harness.base, "tracked-dirty"), (event) => events.push(event));
 
-    expect(result.outcome).toBe("failed");
-    expect(result.reason).toContain("uncommitted path");
-    expect(publications).toHaveLength(0);
+    expect(result.outcome).toBe("waiting_for_human");
+    expect(publications).toHaveLength(1);
     expect(events).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          kind: "run_status",
-          status: "failed",
-          failure: expect.objectContaining({ code: "human_wait_checkpoint_unpublished" }),
-        }),
-      ]),
+      expect.arrayContaining([expect.objectContaining({ kind: "human_wait_requested" })]),
+    );
+    expect(events.some((event) => event.kind === "run_status" && event.status === "failed")).toBe(
+      false,
     );
   });
 

@@ -1430,21 +1430,22 @@ export class V2RunnerExecutor {
         if (controller.signal.aborted) {
           return await cancelledWithWorktree(runtimeResult.usage);
         }
+        // EXEC-WAIT-1 — a run that asks for human input mid-task routinely has
+        // uncommitted work: the model paused to ask, not to commit. Checkpoint
+        // it exactly as the verification path does, so the wait rests on a
+        // resumable pushed commit instead of failing the run and discarding the
+        // work. The published checkpoint below is what makes an ephemeral
+        // worktree resumable — the reason the old code refused rather than lose
+        // it, now satisfied by committing instead of refusing.
+        let commit = await worktree.head();
         if (dirty.length > 0) {
-          const reason = `human input was requested with ${dirty.length} uncommitted path(s); the runner refused to release an ephemeral worktree that could not be resumed exactly`;
-          emitFailure("publication", "human_wait_checkpoint_unpublished", reason);
-          return finish({
-            outcome: "failed",
-            commit_sha: await worktree.head(),
-            verification_passed: false,
-            usage: runtimeResult.usage,
-            empty: false,
-            publication: null,
-            session_id: sessionId,
-            reason,
+          commit = await this.checkpointUncommittedChanges(worktree.path, command.task_id);
+          emit({
+            kind: "run_log",
+            run_id: command.run_id,
+            chunk: `human input was requested with ${dirty.length} uncommitted path(s); the runner checkpointed them at commit ${commit} so the wait resumes exactly`,
           });
         }
-        const commit = await worktree.head();
         if (controller.signal.aborted) {
           return await cancelledWithWorktree(runtimeResult.usage);
         }
