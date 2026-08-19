@@ -1296,7 +1296,9 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
   expect(overallTitleBox).not.toBeNull();
   expect(overallEtaBox).not.toBeNull();
   expect(overallPauseBox).not.toBeNull();
-  expect(overallEtaBox?.y ?? 0).toBeGreaterThan(overallTitleBox?.y ?? Number.POSITIVE_INFINITY);
+  expect(overallEtaBox?.y ?? 0).toBeGreaterThanOrEqual(
+    (overallTitleBox?.y ?? Number.POSITIVE_INFINITY) + (overallTitleBox?.height ?? 0) - 1,
+  );
   expect(overallPauseBox?.x ?? 0).toBeGreaterThan(overallEtaBox?.x ?? Number.POSITIVE_INFINITY);
 
   for (const viewport of [

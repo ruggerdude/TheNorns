@@ -6250,7 +6250,7 @@
 }
 
 .conversation-development-phases > header > div:first-child {
-  display: block;
+  display: grid;
 }
 
 .conversation-development-phases > header h2 {
@@ -6266,6 +6266,7 @@
 .conversation-development-phase-progress {
   display: grid;
   min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0;
   color: color-mix(in srgb, white 78%, var(--brand-900));
   font-size: var(--text-xs);
