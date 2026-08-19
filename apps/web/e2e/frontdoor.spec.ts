@@ -1177,10 +1177,10 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
   await page.setContent(`
     <link rel="stylesheet" href="http://localhost:5173/src/styles.css" />
     <link rel="stylesheet" href="http://localhost:5173/src/ConversationWorkspace.css" />
-    <main
-      class="conversation-has-phase-chats conversation-work-tab-development-chat"
-      style="height: 820px"
-    >
+    <main class="conversation-thread" style="height: 100vh">
+      <section
+        class="workspace-tab-panel conversation-has-phase-chats conversation-work-tab-development-chat"
+      >
       <aside class="conversation-stage-sidebar" aria-label="Phase chats">
         <header><h2>Chats</h2></header>
         <button class="conversation-stage-new"><span>＋</span><span class="conversation-stage-label">New work</span></button>
@@ -1190,6 +1190,8 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
           <button data-state="active"><span>6</span><span class="conversation-stage-label">Development</span></button>
         </nav>
       </aside>
+      <div class="conversation-thread-root">
+        <div class="conversation-thread-viewport">
       <section class="conversation-development-phases" aria-label="Development phases">
         <header><div><h2>Phases</h2></div></header>
         <div class="conversation-development-phase-list">
@@ -1224,6 +1226,28 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
           </div>
         </div>
       </section>
+          <div class="conversation-development-stop">
+            <section class="project-run-stop" aria-label="Run controls">
+              <header><h3>Run controls</h3></header>
+              <div class="project-run-cancellation-status">
+                <h3>Cancellation requested</h3>
+                <p>The server recorded the stop and asked the runner to stop.</p>
+              </div>
+            </section>
+          </div>
+        </div>
+        <div class="conversation-composer-footer">
+          <form class="conversation-composer" aria-label="Development chat composer">
+            <textarea class="conversation-composer-input" rows="2"></textarea>
+            <div class="conversation-composer-actions">
+              <button class="conversation-icon-button">+</button>
+              <span class="conversation-keyboard-help">Enter to send</span>
+              <button class="conversation-send-button">Send</button>
+            </div>
+          </form>
+        </div>
+      </div>
+      </section>
     </main>
   `);
   await page.waitForFunction(() => {
@@ -1241,17 +1265,27 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
     const phases = page.getByRole("region", { name: "Development phases" });
     const dialogue = page.getByRole("region", { name: "Agent dialogue" });
     const recovery = page.locator(".conversation-development-recovery");
-    const [railBox, phasesBox, dialogueBox, recoveryBox] = await Promise.all([
-      rail.boundingBox(),
-      phases.boundingBox(),
-      dialogue.boundingBox(),
-      recovery.boundingBox(),
-    ]);
+    const runControls = page.getByRole("region", { name: "Run controls" });
+    const transcript = page.locator(".conversation-thread-viewport");
+    const composerFooter = page.locator(".conversation-composer-footer");
+    const [railBox, phasesBox, dialogueBox, recoveryBox, controlsBox, transcriptBox, footerBox] =
+      await Promise.all([
+        rail.boundingBox(),
+        phases.boundingBox(),
+        dialogue.boundingBox(),
+        recovery.boundingBox(),
+        runControls.boundingBox(),
+        transcript.boundingBox(),
+        composerFooter.boundingBox(),
+      ]);
 
     expect(railBox).not.toBeNull();
     expect(phasesBox).not.toBeNull();
     expect(dialogueBox).not.toBeNull();
     expect(recoveryBox).not.toBeNull();
+    expect(controlsBox).not.toBeNull();
+    expect(transcriptBox).not.toBeNull();
+    expect(footerBox).not.toBeNull();
     if (viewport.width > 900) {
       expect(await rail.evaluate((element) => getComputedStyle(element).position)).toBe("fixed");
       expect(phasesBox?.x ?? 0).toBeGreaterThanOrEqual(
@@ -1262,7 +1296,10 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
       );
     } else {
       expect(await rail.evaluate((element) => getComputedStyle(element).position)).toBe("relative");
-      expect(phasesBox?.x ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(1);
+      expect(phasesBox?.x ?? 0).toBeGreaterThanOrEqual(transcriptBox?.x ?? 0);
+      expect((phasesBox?.x ?? 0) + (phasesBox?.width ?? 0)).toBeLessThanOrEqual(
+        (transcriptBox?.x ?? 0) + (transcriptBox?.width ?? 0),
+      );
       expect(phasesBox?.y ?? 0).toBeGreaterThanOrEqual(
         (railBox?.y ?? 0) + (railBox?.height ?? 0) - 1,
       );
@@ -1272,6 +1309,15 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
     );
     expect(recoveryBox?.x ?? 0).toBeGreaterThanOrEqual(dialogueBox?.x ?? 0);
     expect((recoveryBox?.x ?? 0) + (recoveryBox?.width ?? 0)).toBeLessThanOrEqual(viewport.width);
+    expect(controlsBox?.y ?? 0).toBeGreaterThanOrEqual(
+      (dialogueBox?.y ?? 0) + (dialogueBox?.height ?? 0) - 1,
+    );
+    expect(
+      Math.abs((footerBox?.y ?? 0) - ((transcriptBox?.y ?? 0) + (transcriptBox?.height ?? 0))),
+    ).toBeLessThanOrEqual(1);
+    expect(
+      Math.abs((footerBox?.y ?? 0) + (footerBox?.height ?? 0) - viewport.height),
+    ).toBeLessThanOrEqual(1);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
       viewport.width,
     );

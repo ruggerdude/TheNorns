@@ -2238,7 +2238,16 @@ describe("conversation workspace", () => {
     generated = true;
     resolveProposal(Response.json({ message: proposalMessage, action: saveAction }));
 
-    expect(await screen.findByRole("heading", { name: "Implementation plan" })).toBeInTheDocument();
+    const planHeading = await screen.findByRole("heading", { name: "Implementation plan" });
+    expect(planHeading).toBeInTheDocument();
+    const planComposer = screen.getByRole("textbox", { name: "Message the project PM" });
+    const planComposerFooter = planComposer.closest<HTMLElement>(".conversation-composer-footer");
+    const planViewport = planComposerFooter?.previousElementSibling as HTMLElement | null;
+    expect(planViewport).toHaveClass("conversation-thread-viewport");
+    expect(planViewport).toContainElement(
+      planHeading.closest<HTMLElement>(".conversation-plan-workspace"),
+    );
+    expect(planComposerFooter?.parentElement).toBe(planViewport?.parentElement);
     expect(screen.queryByText("Proposed Plan Contract")).not.toBeInTheDocument();
     expect(await screen.findByText("Plan Contract · Version 1")).toBeInTheDocument();
     expect(proposalBodies).toHaveLength(1);
@@ -6133,9 +6142,16 @@ describe("conversation workspace", () => {
     expect(executionConversationButton).not.toHaveTextContent(/tokens|requests|usage|\$/i);
 
     await user.click(executionConversationButton);
-    expect(
-      await screen.findByRole("textbox", { name: "Message the development chat" }),
-    ).toBeEnabled();
+    const developmentComposer = await screen.findByRole("textbox", {
+      name: "Message the development chat",
+    });
+    expect(developmentComposer).toBeEnabled();
+    const developmentComposerFooter = developmentComposer.closest<HTMLElement>(
+      ".conversation-composer-footer",
+    );
+    const developmentViewport = developmentComposerFooter?.previousElementSibling;
+    expect(developmentViewport).toHaveClass("conversation-thread-viewport");
+    expect(developmentComposerFooter?.parentElement).toBe(developmentViewport?.parentElement);
     expect(selected).toHaveBeenCalledWith(execution.id);
   });
 

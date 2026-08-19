@@ -6129,183 +6129,189 @@ function ConversationThread({
                   onOpenConversation={onOpenConversation}
                   onNewWork={onNewWork}
                 />
-                {isPlanning && planningStageView === "define" ? (
-                  <DefinedProjectBrief title={detail.work_item.title} messages={detail.messages} />
-                ) : null}
-                {isPlanning && latestPlan && planningStageView === "plan" ? (
-                  <PlanningPlanWorkspace version={latestPlan} reviews={visiblePlanReviews} />
-                ) : null}
-                {isExecution ? (
-                  <DevelopmentPhaseStrip
-                    phases={developmentPhases}
-                    selectedId={selectedDevelopmentPhase?.id ?? null}
-                    onSelect={setSelectedDevelopmentPhaseId}
-                  />
-                ) : null}
-                {isExecution && detail.work_item.status === "awaiting_approval" ? (
-                  <section
-                    className="conversation-development-start is-compact"
-                    aria-label="Development launch"
-                  >
-                    <div>
-                      <h2>
-                        {developmentStartError
-                          ? "Development needs attention"
-                          : developmentLaunchPending
-                            ? "Preparing development"
-                            : "Ready to start development"}
-                      </h2>
-                      <p>
-                        {developmentStartError
-                          ? developmentStartError
-                          : developmentLaunchPending
-                            ? "Connecting the approved phase agents. This status updates automatically."
-                            : "The approved phases and agents are ready."}
-                      </p>
-                    </div>
-                    {developmentLaunchPending ? (
-                      <Spinner label="Starting development…" />
-                    ) : (
-                      <Button variant="primary" onClick={() => void startDevelopment()}>
-                        {developmentStartError ? "Check status" : "Start development"}
-                      </Button>
-                    )}
-                  </section>
-                ) : null}
-                {isExecution ? (
-                  <DevelopmentAgentDialogue
-                    projectId={detail.work_item.project_id}
-                    phaseId={detail.work_item.phase_id}
-                    phase={selectedDevelopmentPhase}
-                    loading={
-                      phaseExecutionLoading || detail.work_item.status === "awaiting_approval"
-                    }
-                    error={phaseExecutionError}
-                    onRecovered={async () => {
-                      const phaseId = detail.work_item.phase_id;
-                      if (phaseId) {
-                        const next = await getConversationPhaseExecution(
-                          detail.work_item.project_id,
-                          phaseId,
-                        );
-                        setPhaseExecution(next);
-                      }
-                      await onRefreshSoft();
-                    }}
-                    onUnauthorized={onUnauthorized}
-                  />
-                ) : null}
-                {isExecution && executionProjection?.run ? (
-                  <div className="conversation-development-stop">
-                    <ProjectRunStopControl
-                      key={executionProjection.run.run_id}
-                      projectId={detail.work_item.project_id}
-                      run={executionProjection.run}
-                      pauseBusy={developmentPauseBusy}
-                      pauseError={developmentPauseError}
-                      onPause={
-                        ["created", "dispatched", "running", "verifying"].includes(
-                          executionProjection.run.state,
-                        )
-                          ? () => void pauseDevelopment()
-                          : undefined
-                      }
-                      onCancellation={applyRunCancellation}
-                      onUnauthorized={onUnauthorized}
-                    />
-                  </div>
-                ) : null}
-                {proposalBusy ? <PlanGenerationProgress progress={proposalProgress} /> : null}
-                {proposalError ? (
-                  <div className="conversation-thread-alert">
-                    <Alert testId="conversation-plan-proposal-error">{proposalError}</Alert>
-                  </div>
-                ) : null}
-                {detail.active_attempt ? (
-                  <output className="conversation-active-run">
-                    <span>
-                      A PM response is {detail.active_attempt.status.replaceAll("_", " ")}.
-                    </span>
-                    <Button className="btn-small" onClick={onRefresh}>
-                      Refresh status
-                    </Button>
-                  </output>
-                ) : null}
-                {!detail.active_attempt && detail.retryable_attempt ? (
-                  <output className="conversation-active-run conversation-retryable-run">
-                    <span>
-                      The last PM response{" "}
-                      {detail.retryable_attempt.status === "failed"
-                        ? "failed before it completed"
-                        : "was interrupted"}
-                      .
-                    </span>
-                    <RetryTerminalResponseButton
-                      onError={(message) => setStreamError(message || null)}
-                    />
-                  </output>
-                ) : null}
-                {streamError ? (
-                  <div className="conversation-thread-alert">
-                    <Alert testId="conversation-stream-error">{streamError}</Alert>
-                  </div>
-                ) : null}
-                {modelError ? (
-                  <div className="conversation-thread-alert">
-                    <Alert testId="conversation-model-error">{modelError}</Alert>
-                  </div>
-                ) : null}
-                {latestAttempt || latestUsage ? (
-                  <div className="conversation-live-telemetry" aria-live="polite">
-                    {latestAttempt ? (
-                      <output className="conversation-turn-meta">
-                        PM request: {latestAttempt.status.replaceAll("_", " ")}
-                      </output>
-                    ) : null}
-                    {latestUsage ? (
-                      <output className="conversation-turn-meta" data-testid="conversation-usage">
-                        {latestUsage.input_tokens.toLocaleString()} in ·{" "}
-                        {latestUsage.output_tokens.toLocaleString()} out · $
-                        {latestUsage.cost_usd.toFixed(4)}
-                      </output>
-                    ) : null}
-                  </div>
-                ) : null}
-                {!isExecution && (detail.handoff || detail.latest_summary) ? (
-                  <details className="conversation-context-drawer">
-                    <summary>Project-manager context</summary>
-                    <section
-                      className="conversation-context-receipt"
-                      aria-label="Conversation context and usage"
-                    >
-                      {detail.handoff ? (
-                        <HandoffCard
-                          handoff={detail.handoff}
-                          currentConversationId={detail.conversation.id}
-                          onOpenConversation={onOpenConversation}
-                        />
-                      ) : null}
-                      <div className="conversation-context-indicators">
-                        {detail.latest_summary ? (
-                          <ConversationSummaryIndicator summary={detail.latest_summary} />
-                        ) : null}
-                      </div>
-                      <PlanningExcerptControl
-                        key={`${detail.conversation.id}:${detail.handoff?.id ?? "no-handoff"}`}
-                        detail={detail}
-                        onOpenConversation={onOpenConversation}
-                        onRefresh={onRefresh}
-                        onUnauthorized={onUnauthorized}
-                      />
-                    </section>
-                  </details>
-                ) : null}
                 <ThreadPrimitive.Root className="conversation-thread-root">
                   <ThreadPrimitive.Viewport
                     className="conversation-thread-viewport"
                     turnAnchor="bottom"
                     scrollToBottomOnThreadSwitch
                   >
+                    {isPlanning && planningStageView === "define" ? (
+                      <DefinedProjectBrief
+                        title={detail.work_item.title}
+                        messages={detail.messages}
+                      />
+                    ) : null}
+                    {isPlanning && latestPlan && planningStageView === "plan" ? (
+                      <PlanningPlanWorkspace version={latestPlan} reviews={visiblePlanReviews} />
+                    ) : null}
+                    {isExecution ? (
+                      <DevelopmentPhaseStrip
+                        phases={developmentPhases}
+                        selectedId={selectedDevelopmentPhase?.id ?? null}
+                        onSelect={setSelectedDevelopmentPhaseId}
+                      />
+                    ) : null}
+                    {isExecution && detail.work_item.status === "awaiting_approval" ? (
+                      <section
+                        className="conversation-development-start is-compact"
+                        aria-label="Development launch"
+                      >
+                        <div>
+                          <h2>
+                            {developmentStartError
+                              ? "Development needs attention"
+                              : developmentLaunchPending
+                                ? "Preparing development"
+                                : "Ready to start development"}
+                          </h2>
+                          <p>
+                            {developmentStartError
+                              ? developmentStartError
+                              : developmentLaunchPending
+                                ? "Connecting the approved phase agents. This status updates automatically."
+                                : "The approved phases and agents are ready."}
+                          </p>
+                        </div>
+                        {developmentLaunchPending ? (
+                          <Spinner label="Starting development…" />
+                        ) : (
+                          <Button variant="primary" onClick={() => void startDevelopment()}>
+                            {developmentStartError ? "Check status" : "Start development"}
+                          </Button>
+                        )}
+                      </section>
+                    ) : null}
+                    {isExecution ? (
+                      <DevelopmentAgentDialogue
+                        projectId={detail.work_item.project_id}
+                        phaseId={detail.work_item.phase_id}
+                        phase={selectedDevelopmentPhase}
+                        loading={
+                          phaseExecutionLoading || detail.work_item.status === "awaiting_approval"
+                        }
+                        error={phaseExecutionError}
+                        onRecovered={async () => {
+                          const phaseId = detail.work_item.phase_id;
+                          if (phaseId) {
+                            const next = await getConversationPhaseExecution(
+                              detail.work_item.project_id,
+                              phaseId,
+                            );
+                            setPhaseExecution(next);
+                          }
+                          await onRefreshSoft();
+                        }}
+                        onUnauthorized={onUnauthorized}
+                      />
+                    ) : null}
+                    {isExecution && executionProjection?.run ? (
+                      <div className="conversation-development-stop">
+                        <ProjectRunStopControl
+                          key={executionProjection.run.run_id}
+                          projectId={detail.work_item.project_id}
+                          run={executionProjection.run}
+                          pauseBusy={developmentPauseBusy}
+                          pauseError={developmentPauseError}
+                          onPause={
+                            ["created", "dispatched", "running", "verifying"].includes(
+                              executionProjection.run.state,
+                            )
+                              ? () => void pauseDevelopment()
+                              : undefined
+                          }
+                          onCancellation={applyRunCancellation}
+                          onUnauthorized={onUnauthorized}
+                        />
+                      </div>
+                    ) : null}
+                    {proposalBusy ? <PlanGenerationProgress progress={proposalProgress} /> : null}
+                    {proposalError ? (
+                      <div className="conversation-thread-alert">
+                        <Alert testId="conversation-plan-proposal-error">{proposalError}</Alert>
+                      </div>
+                    ) : null}
+                    {detail.active_attempt ? (
+                      <output className="conversation-active-run">
+                        <span>
+                          A PM response is {detail.active_attempt.status.replaceAll("_", " ")}.
+                        </span>
+                        <Button className="btn-small" onClick={onRefresh}>
+                          Refresh status
+                        </Button>
+                      </output>
+                    ) : null}
+                    {!detail.active_attempt && detail.retryable_attempt ? (
+                      <output className="conversation-active-run conversation-retryable-run">
+                        <span>
+                          The last PM response{" "}
+                          {detail.retryable_attempt.status === "failed"
+                            ? "failed before it completed"
+                            : "was interrupted"}
+                          .
+                        </span>
+                        <RetryTerminalResponseButton
+                          onError={(message) => setStreamError(message || null)}
+                        />
+                      </output>
+                    ) : null}
+                    {streamError ? (
+                      <div className="conversation-thread-alert">
+                        <Alert testId="conversation-stream-error">{streamError}</Alert>
+                      </div>
+                    ) : null}
+                    {modelError ? (
+                      <div className="conversation-thread-alert">
+                        <Alert testId="conversation-model-error">{modelError}</Alert>
+                      </div>
+                    ) : null}
+                    {latestAttempt || latestUsage ? (
+                      <div className="conversation-live-telemetry" aria-live="polite">
+                        {latestAttempt ? (
+                          <output className="conversation-turn-meta">
+                            PM request: {latestAttempt.status.replaceAll("_", " ")}
+                          </output>
+                        ) : null}
+                        {latestUsage ? (
+                          <output
+                            className="conversation-turn-meta"
+                            data-testid="conversation-usage"
+                          >
+                            {latestUsage.input_tokens.toLocaleString()} in ·{" "}
+                            {latestUsage.output_tokens.toLocaleString()} out · $
+                            {latestUsage.cost_usd.toFixed(4)}
+                          </output>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {!isExecution && (detail.handoff || detail.latest_summary) ? (
+                      <details className="conversation-context-drawer">
+                        <summary>Project-manager context</summary>
+                        <section
+                          className="conversation-context-receipt"
+                          aria-label="Conversation context and usage"
+                        >
+                          {detail.handoff ? (
+                            <HandoffCard
+                              handoff={detail.handoff}
+                              currentConversationId={detail.conversation.id}
+                              onOpenConversation={onOpenConversation}
+                            />
+                          ) : null}
+                          <div className="conversation-context-indicators">
+                            {detail.latest_summary ? (
+                              <ConversationSummaryIndicator summary={detail.latest_summary} />
+                            ) : null}
+                          </div>
+                          <PlanningExcerptControl
+                            key={`${detail.conversation.id}:${detail.handoff?.id ?? "no-handoff"}`}
+                            detail={detail}
+                            onOpenConversation={onOpenConversation}
+                            onRefresh={onRefresh}
+                            onUnauthorized={onUnauthorized}
+                          />
+                        </section>
+                      </details>
+                    ) : null}
                     {!isPlanning ||
                     planningStageView === "pm" ||
                     (planningStageView === "plan" && !latestPlan) ? (
@@ -6334,55 +6340,55 @@ function ConversationThread({
                         </ThreadPrimitive.Messages>
                       </>
                     ) : null}
-                    <ThreadPrimitive.ViewportFooter className="conversation-composer-footer">
-                      <ThreadPrimitive.ScrollToBottom
-                        className="conversation-scroll-button"
-                        aria-label="Scroll to latest message"
-                      >
-                        ↓ Latest
-                      </ThreadPrimitive.ScrollToBottom>
-                      {isReadOnly ? (
-                        <output className="conversation-read-only">
-                          <strong>
-                            This {conversationKindLabel(detail.conversation.kind).toLowerCase()}{" "}
-                            conversation is {detail.conversation.status.replaceAll("_", " ")}.
-                          </strong>
-                          <span>
-                            {isPlanning
-                              ? "Its visible history remains readable. Continue work in the linked Development chat."
-                              : "Its visible history remains readable, but it no longer accepts messages."}
-                          </span>
-                        </output>
-                      ) : (
-                        <ConversationComposer
-                          projectId={detail.work_item.project_id}
-                          conversationId={detail.conversation.id}
-                          isExecution={isExecution}
-                          isPlanning={isPlanning}
-                          pmProvider={conversationProvider}
-                          planIntentEnabled={planIntentEnabled}
-                          planIntentBusy={
-                            proposalBusy || busyActionId !== null || planChangeBusyId !== null
-                          }
-                          planVersion={isPlanning ? (latestPlan ?? null) : null}
-                          onUseAsPlan={(message, handoff) => {
-                            if (pendingSaveAction) {
-                              void confirmAction(pendingSaveAction);
-                              return;
-                            }
-                            void generatePlanProposal(message, true, handoff);
-                          }}
-                          onRequestPlanChanges={async (version, direction) => {
-                            const action = await proposePlanChanges(version, direction);
-                            if (!action) return false;
-                            await confirmAction(action);
-                            return true;
-                          }}
-                          prefillText={null}
-                        />
-                      )}
-                    </ThreadPrimitive.ViewportFooter>
+                    <ThreadPrimitive.ScrollToBottom
+                      className="conversation-scroll-button"
+                      aria-label="Scroll to latest message"
+                    >
+                      ↓ Latest
+                    </ThreadPrimitive.ScrollToBottom>
                   </ThreadPrimitive.Viewport>
+                  <div className="conversation-composer-footer">
+                    {isReadOnly ? (
+                      <output className="conversation-read-only">
+                        <strong>
+                          This {conversationKindLabel(detail.conversation.kind).toLowerCase()}{" "}
+                          conversation is {detail.conversation.status.replaceAll("_", " ")}.
+                        </strong>
+                        <span>
+                          {isPlanning
+                            ? "Its visible history remains readable. Continue work in the linked Development chat."
+                            : "Its visible history remains readable, but it no longer accepts messages."}
+                        </span>
+                      </output>
+                    ) : (
+                      <ConversationComposer
+                        projectId={detail.work_item.project_id}
+                        conversationId={detail.conversation.id}
+                        isExecution={isExecution}
+                        isPlanning={isPlanning}
+                        pmProvider={conversationProvider}
+                        planIntentEnabled={planIntentEnabled}
+                        planIntentBusy={
+                          proposalBusy || busyActionId !== null || planChangeBusyId !== null
+                        }
+                        planVersion={isPlanning ? (latestPlan ?? null) : null}
+                        onUseAsPlan={(message, handoff) => {
+                          if (pendingSaveAction) {
+                            void confirmAction(pendingSaveAction);
+                            return;
+                          }
+                          void generatePlanProposal(message, true, handoff);
+                        }}
+                        onRequestPlanChanges={async (version, direction) => {
+                          const action = await proposePlanChanges(version, direction);
+                          if (!action) return false;
+                          await confirmAction(action);
+                          return true;
+                        }}
+                        prefillText={null}
+                      />
+                    )}
+                  </div>
                 </ThreadPrimitive.Root>
               </div>
             ) : null}

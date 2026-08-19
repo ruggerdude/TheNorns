@@ -1204,8 +1204,10 @@
 }
 
 .conversation-thread-root {
+  display: flex;
   min-height: 0;
   flex: 1;
+  flex-direction: column;
 }
 
 .conversation-thread-viewport {
@@ -3343,17 +3345,19 @@
 }
 
 .conversation-composer-footer {
-  position: sticky;
-  bottom: 0;
+  position: relative;
   display: grid;
+  flex: 0 0 auto;
   gap: 0.45rem;
-  margin-top: auto;
-  padding-top: 1rem;
-  background: linear-gradient(transparent, var(--surface) 22%);
+  margin: 0;
+  padding: 0.75rem clamp(0.75rem, 2vw, 2rem) max(0px, env(safe-area-inset-bottom));
+  background: var(--surface);
 }
 
 .conversation-scroll-button {
-  justify-self: center;
+  position: sticky;
+  bottom: 0.5rem;
+  align-self: center;
   padding: 0.3rem 0.62rem;
   border: 1px solid var(--line);
   border-radius: 999px;
@@ -3961,7 +3965,7 @@
 
 .conversation-plan-main-view .conversation-thread-root {
   min-height: 0;
-  flex: 0 0 auto;
+  flex: 1;
   background: transparent;
 }
 
@@ -3973,14 +3977,6 @@
 .conversation-plan-main-view .conversation-message,
 .conversation-plan-main-view .conversation-welcome {
   display: none;
-}
-
-.conversation-plan-main-view .conversation-composer-footer {
-  position: relative;
-  inset: auto;
-  margin-top: 0;
-  padding: 0.75rem clamp(1rem, 2vw, 1.75rem) 1.5rem;
-  background: transparent;
 }
 
 .conversation-archived-pm ol {
@@ -5896,10 +5892,10 @@
 }
 
 .conversation-development-stop,
-.conversation-work-tab-development-chat > .conversation-development-start,
-.conversation-work-tab-development-chat > .conversation-context-receipt,
+.conversation-work-tab-development-chat .conversation-development-start,
+.conversation-work-tab-development-chat .conversation-context-receipt,
 .conversation-work-tab-development-chat > .conversation-thread-root,
-.conversation-work-tab-development-chat > .execution-conversation-controls {
+.conversation-work-tab-development-chat .execution-conversation-controls {
   min-width: 0;
 }
 
@@ -5907,7 +5903,7 @@
   padding-inline: 1rem;
 }
 
-.conversation-work-tab-development-chat > .execution-conversation-controls {
+.conversation-work-tab-development-chat .execution-conversation-controls {
   margin-top: 0;
   border-top: 1px solid var(--line);
   background: var(--surface);
@@ -6135,6 +6131,18 @@
 .conversation-has-phase-chats > .conversation-thread-root {
   min-height: 0;
   flex: 1;
+}
+
+/* Stage content and messages share one scrollport; the composer is its
+   non-scrolling sibling below. This makes the composer the true bottom row
+   instead of a second viewport that can peek beneath controls or cover text. */
+.conversation-thread > .conversation-has-phase-chats {
+  overflow: hidden;
+}
+
+.conversation-has-phase-chats > .conversation-thread-root .conversation-thread-viewport {
+  min-height: 0;
+  max-height: none;
 }
 
 /* The conversation title bar duplicated information already present in each
