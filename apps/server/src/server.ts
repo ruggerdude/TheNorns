@@ -147,6 +147,39 @@ import {
  */
 const PHASE_QUEUE_DRAIN_INTERVAL_MS = 5_000;
 const PHASE_REVIEW_AUTO_COMPLETE_INTERVAL_MS = 5_000;
+const CONTEXT_FETCH_TRANSACTION_ATTEMPTS = 3;
+
+function isPostgresDeadlock(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: unknown }).code === "40P01"
+  );
+}
+
+/**
+ * Context retrieval is a read-only, idempotent transaction, but it shares the
+ * device/run authorization rows with dispatch and event ingestion. PostgreSQL
+ * can select this transaction as the victim when those paths overlap. By the
+ * time 40P01 reaches us PostgreSQL has already broken the cycle and rolled the
+ * transaction back, so retrying the whole authorization read is safe.
+ */
+async function retryContextFetchTransaction<T>(
+  operation: () => Promise<T>,
+  onDeadlock: (attempt: number, error: unknown) => void,
+): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!isPostgresDeadlock(error) || attempt >= CONTEXT_FETCH_TRANSACTION_ATTEMPTS) {
+        throw error;
+      }
+      onDeadlock(attempt, error);
+    }
+  }
+}
 
 function attachmentContentDisposition(filename: string, inline: boolean): string {
   const safeFilename = Array.from(filename, (character) => {
@@ -7738,29 +7771,43 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           return reply.code(503).send({ error: "device_authorization_unavailable" });
         }
         try {
-          const content = await authorization.transactions.transaction(async (sql) => {
-            await authorization.service.lockTransportIdentity(sql, {
-              subject: "device",
-              runner_id: deviceIdentity.device_id,
-              generation: deviceIdentity.generation,
-              credential_id: deviceIdentity.credential_id,
-            });
-            const runId = await dispatchContextScope?.authorizedRunIdInTransaction(
-              sql,
-              deviceIdentity.device_id,
-              deviceIdentity.generation,
-              documentId,
-            );
-            if (!runId) return null;
-            await authorization.service.assertRun(sql, {
-              subject: "device",
-              runner_id: deviceIdentity.device_id,
-              generation: deviceIdentity.generation,
-              credential_id: deviceIdentity.credential_id,
-              run_id: runId,
-            });
-            return taskContextStore.contentInTransaction(sql, documentId);
-          });
+          const content = await retryContextFetchTransaction(
+            () =>
+              authorization.transactions.transaction(async (sql) => {
+                await authorization.service.lockTransportIdentity(sql, {
+                  subject: "device",
+                  runner_id: deviceIdentity.device_id,
+                  generation: deviceIdentity.generation,
+                  credential_id: deviceIdentity.credential_id,
+                });
+                const runId = await dispatchContextScope?.authorizedRunIdInTransaction(
+                  sql,
+                  deviceIdentity.device_id,
+                  deviceIdentity.generation,
+                  documentId,
+                );
+                if (!runId) return null;
+                await authorization.service.assertRun(sql, {
+                  subject: "device",
+                  runner_id: deviceIdentity.device_id,
+                  generation: deviceIdentity.generation,
+                  credential_id: deviceIdentity.credential_id,
+                  run_id: runId,
+                });
+                return taskContextStore.contentInTransaction(sql, documentId);
+              }),
+            (attempt, error) => {
+              app.log.warn(
+                {
+                  err: error,
+                  attempt,
+                  document_id: documentId,
+                  subject_id: deviceIdentity.device_id,
+                },
+                "retrying task context fetch after PostgreSQL deadlock",
+              );
+            },
+          );
           if (!content) {
             stores.audit(
               `device:${deviceIdentity.device_id}`,
@@ -7791,29 +7838,44 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         return reply.code(401).send({ error: "unauthorized" });
       }
       const legacyIdentity = auth.identity;
+      const legacyAuthorization = options.deviceActionAuthorization;
       let legacyAuthorized = false;
       let legacyDocument: TaskContextDocumentContent | null | undefined;
       try {
-        const authorizationResult = options.deviceActionAuthorization
-          ? await options.deviceActionAuthorization.transactions.transaction(async (sql) => {
-              const runId = await dispatchContextScope?.authorizedRunIdInTransaction(
-                sql,
-                legacyIdentity.runner_id,
-                legacyIdentity.generation,
-                documentId,
-              );
-              if (!runId) return { authorized: false, document: null };
-              await options.deviceActionAuthorization?.service.assertRun(sql, {
-                subject: "legacy_runner",
-                runner_id: legacyIdentity.runner_id,
-                generation: legacyIdentity.generation,
-                run_id: runId,
-              });
-              return {
-                authorized: true,
-                document: await taskContextStore.contentInTransaction(sql, documentId),
-              };
-            })
+        const authorizationResult = legacyAuthorization
+          ? await retryContextFetchTransaction(
+              () =>
+                legacyAuthorization.transactions.transaction(async (sql) => {
+                  const runId = await dispatchContextScope?.authorizedRunIdInTransaction(
+                    sql,
+                    legacyIdentity.runner_id,
+                    legacyIdentity.generation,
+                    documentId,
+                  );
+                  if (!runId) return { authorized: false, document: null };
+                  await legacyAuthorization.service.assertRun(sql, {
+                    subject: "legacy_runner",
+                    runner_id: legacyIdentity.runner_id,
+                    generation: legacyIdentity.generation,
+                    run_id: runId,
+                  });
+                  return {
+                    authorized: true,
+                    document: await taskContextStore.contentInTransaction(sql, documentId),
+                  };
+                }),
+              (attempt, error) => {
+                app.log.warn(
+                  {
+                    err: error,
+                    attempt,
+                    document_id: documentId,
+                    subject_id: legacyIdentity.runner_id,
+                  },
+                  "retrying task context fetch after PostgreSQL deadlock",
+                );
+              },
+            )
           : await (async () => {
               const authorized = await dispatchContextScope?.isAuthorized(
                 legacyIdentity.runner_id,

@@ -31,7 +31,11 @@ import {
   TaskContextAssemblyError,
   TaskContextStore,
 } from "../src/execution/index.js";
-import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
+import {
+  PGliteTransactionRunner,
+  type V2SqlExecutor,
+  type V2TransactionRunner,
+} from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 import { ProjectStore } from "../src/projects/store.js";
 import { type NornsServer, buildServer } from "../src/server.js";
@@ -807,6 +811,62 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
       expect(prompt).toContain("# Norns task briefing");
       expect(prompt).toContain("## TASK — this is what you must deliver");
       expect(prompt).toContain("pnpm run build");
+    });
+
+    it("retries when PostgreSQL selects the read-only context transaction as a deadlock victim", async () => {
+      const refs = (await server.taskContext?.assembleForTask(TASK)) ?? [];
+      expect(refs.length).toBeGreaterThan(0);
+      const deviceFetcher = await deviceScopedFetcher(refs);
+
+      let transactionAttempts = 0;
+      const deadlockingTransactions: V2TransactionRunner = {
+        async transaction<T>(work: (tx: V2SqlExecutor) => Promise<T>): Promise<T> {
+          transactionAttempts += 1;
+          if (transactionAttempts === 1) {
+            throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
+          }
+          return transactions.transaction(work);
+        },
+      };
+      const retryServer = await buildServer({
+        stores,
+        users: new UserStore(),
+        projects: new ProjectStore(),
+        execution: { transactions, baseUrl: "http://127.0.0.1" },
+        runnerHttpAuthentication: new DeviceHttpRequestAuthenticator({
+          repository: new PostgresDeviceHttpCredentialRepository(transactions),
+          legacyCompatibility: {
+            enabled: true,
+            lookupRunner: (runnerId) => {
+              const runner = stores.runner(runnerId);
+              return runner
+                ? {
+                    public_key_pem: runner.public_key_pem,
+                    generation: runner.generation,
+                  }
+                : null;
+            },
+          },
+        }),
+        deviceActionAuthorization: {
+          service: new PostgresDeviceActionAuthorization({ deviceDispatchEnabled: true }),
+          transactions: deadlockingTransactions,
+        },
+      });
+      const retryOrigin = await listen(retryServer);
+      try {
+        const loader = new HashVerifiedContextLoader(deviceFetcher);
+        const prompt = await loader.load(
+          refs.map((ref) => ({
+            ...ref,
+            storage_ref: `${retryOrigin}${new URL(ref.storage_ref).pathname}`,
+          })),
+        );
+        expect(prompt).toContain("# Norns task briefing");
+        expect(transactionAttempts).toBe(refs.length + 1);
+      } finally {
+        await retryServer.app.close();
+      }
     });
 
     it("rejects a legacy HTTP subject for context scoped to a grant-backed device run", async () => {
