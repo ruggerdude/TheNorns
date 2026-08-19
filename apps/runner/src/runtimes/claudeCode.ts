@@ -38,6 +38,7 @@ import { basename, isAbsolute, relative } from "node:path";
 // between minting and spawning. A mint failure still throws before any
 // subprocess exists, and a run cancelled before it starts never mints at all.
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { executionPath } from "../executionPath.js";
 import {
   type GatewayCredentialProvider,
   type RuntimeCredentialMode,
@@ -353,9 +354,14 @@ export class ClaudeCodeRuntime implements CodingRuntime {
                 }
               : {}),
             ...(request.humanWaitPath ? { NORNS_HUMAN_WAIT_PATH: request.humanWaitPath } : {}),
+            // launchd's bare PATH has no developer toolchain (npm, git hooks);
+            // the agent's Bash tool would fail on the very commands the task
+            // needs, and verification later dies the same way.
+            PATH: executionPath((this.options.baseEnv ?? process.env).PATH),
           })
         : credentialFreeEnvironment(this.options.baseEnv ?? process.env, {
             ...(request.humanWaitPath ? { NORNS_HUMAN_WAIT_PATH: request.humanWaitPath } : {}),
+            PATH: executionPath((this.options.baseEnv ?? process.env).PATH),
           });
       // The first message IS the prompt that used to be passed as a string.
       input.push(request.prompt);

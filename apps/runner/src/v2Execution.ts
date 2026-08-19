@@ -12,6 +12,7 @@ import {
   V2DispatchCommand,
   type V2DispatchCommandT,
 } from "@norns/contracts";
+import { executionPath } from "./executionPath.js";
 import type { LiveRunRegistry } from "./liveRuns.js";
 import { ManagedProcessTree, managedProcessDetached } from "./managedProcessTree.js";
 import type { RuntimeCredentialMode } from "./modelGateway.js";
@@ -566,6 +567,9 @@ export class CommandPolicyVerifier implements RunnerVerifier {
         detached: managedProcessDetached(),
         // No shell, ever. `entry.command` is an argv vector and stays one.
         shell: false,
+        // launchd's bare PATH has no developer toolchain; without this,
+        // verification dies with `spawn npm ENOENT` regardless of the work.
+        env: { ...process.env, PATH: executionPath() },
       });
       const processTree = new ManagedProcessTree(child);
       let stdout = "";

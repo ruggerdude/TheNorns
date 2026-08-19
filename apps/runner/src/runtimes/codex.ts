@@ -15,6 +15,7 @@ import type { CodexReasoningEffortT } from "@norns/contracts";
 // every provider environment override, leaving Codex to read only its official
 // persisted ChatGPT login.
 import { Codex, type CodexOptions, type RunResult } from "@openai/codex-sdk";
+import { executionPath } from "../executionPath.js";
 import {
   type GatewayCredentialProvider,
   type RuntimeCredentialMode,
@@ -115,6 +116,8 @@ export class CodexRuntime implements CodingRuntime {
             }
           : {}),
         ...(request.humanWaitPath ? { NORNS_HUMAN_WAIT_PATH: request.humanWaitPath } : {}),
+        // launchd's bare PATH has no developer toolchain; see executionPath.
+        PATH: executionPath((this.options.baseEnv ?? process.env).PATH),
       });
       const codex = credential
         ? createClient({
