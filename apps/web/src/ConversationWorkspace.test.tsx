@@ -5474,6 +5474,11 @@ describe("conversation workspace", () => {
     expect(screen.getByText(/you did not set it separately/i)).toBeVisible();
     expect(screen.getByText(/corrected metered spend for the attempt is \$0\.82/i)).toBeVisible();
     expect(screen.getAllByText(failure)).toHaveLength(1);
+    const blockedPhases = screen.getByRole("region", { name: "Development phases" });
+    expect(blockedPhases).toHaveTextContent("Overall 25%");
+    expect(within(blockedPhases).getByRole("button", { name: /Core API/ })).toHaveTextContent(
+      "25% · blocked",
+    );
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "Switch agent and retry" })).toBeEnabled(),
     );

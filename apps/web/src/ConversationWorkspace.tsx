@@ -4097,6 +4097,11 @@ function developmentPhasePercent(phase: DevelopmentPhaseItem): number {
   if (phase.state === "complete") return 100;
   if (phase.state === "verifying") return 90;
   if (phase.state === "waiting") return 50;
+  if (phase.state === "blocked") {
+    const run = phase.task?.run;
+    if (run && (run.commit_sha || run.verification_status !== "pending")) return 90;
+    return run ? 25 : 0;
+  }
   if (phase.state !== "active") return 0;
   switch (phase.task?.run?.state) {
     case "created":
