@@ -162,9 +162,14 @@ export class RunnerSignedContextFetcher implements RunnerContentFetcher {
       timestamp: this.now().toISOString(),
       requestId: this.newRequestId(),
     });
+    // A context document is at most a few hundred KiB from our own server. A
+    // fetch that has not settled in a minute is lost, and without this bound
+    // the run hangs forever showing "preparing the coding session" — observed
+    // live: a pending fetch with no open socket and no rejection.
     const response = await this.httpFetch(url, {
       redirect: "error",
       headers: signed.headers,
+      signal: AbortSignal.timeout(60_000),
     });
     if (!response.ok) throw new Error(`context fetch failed with ${response.status}`);
     return new Uint8Array(await response.arrayBuffer());

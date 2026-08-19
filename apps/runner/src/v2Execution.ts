@@ -1141,6 +1141,14 @@ export class V2RunnerExecutor {
     }
 
     try {
+      // Stage breadcrumbs: without these the dispatched run shows "0 readable
+      // updates" until the runtime starts, and a hang in these stages is
+      // indistinguishable from a dead agent.
+      emit({
+        kind: "run_log",
+        run_id: command.run_id,
+        chunk: `Loading task context (${command.context_refs.length} document(s), ${command.input_files.length} input file(s))…`,
+      });
       let prompt = await this.context.load(command.context_refs);
       const approvedInputFiles = await Promise.all(
         command.input_files.map(async (input) => ({
@@ -1149,6 +1157,11 @@ export class V2RunnerExecutor {
         })),
       );
       if (controller.signal.aborted) return cancelledBefore("loading context");
+      emit({
+        kind: "run_log",
+        run_id: command.run_id,
+        chunk: "Task context loaded. Preparing the isolated worktree…",
+      });
       stage = "scratch_prepare";
       const scratchRoot = resolve(this.runner.scratch_root ?? tmpdir());
       await mkdir(scratchRoot, { recursive: true });
