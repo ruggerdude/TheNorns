@@ -732,7 +732,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // Recovery decision-point ids include durable aggregate identities and can
   // legitimately exceed Fastify's 100-character default. Keep the route
   // bounded while allowing server-generated ids to round-trip through params.
-  const app = Fastify({ logger: false, routerOptions: { maxParamLength: 512 } });
+  // `logger: false` silenced every `app.log.*` call in the server — drain
+  // refusals, route errors, all of it. Request logging stays off (the UI
+  // polls); explicit app.log calls now actually reach stdout.
+  const app = Fastify({
+    logger: { level: "info" },
+    disableRequestLogging: true,
+    routerOptions: { maxParamLength: 512 },
+  });
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof RelationalCompositionConflictError) {
       return reply.code(409).send(error.diagnostic());
