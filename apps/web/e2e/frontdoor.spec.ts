@@ -1299,6 +1299,12 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
     const runControls = page.getByRole("region", { name: "Run controls" });
     const transcript = page.locator(".conversation-thread-viewport");
     const composerFooter = page.locator(".conversation-composer-footer");
+    const phaseButtonBoxes = await phases.locator("li button").evaluateAll((buttons) =>
+      buttons.map((button) => {
+        const box = button.getBoundingClientRect();
+        return { top: box.top, bottom: box.bottom };
+      }),
+    );
     const [railBox, phasesBox, dialogueBox, recoveryBox, controlsBox, transcriptBox, footerBox] =
       await Promise.all([
         rail.boundingBox(),
@@ -1319,6 +1325,10 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
     expect(footerBox).not.toBeNull();
     expect(phasesBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(60);
     expect(Math.abs((phasesBox?.y ?? 0) - (transcriptBox?.y ?? 0))).toBeLessThanOrEqual(1);
+    for (const buttonBox of phaseButtonBoxes) {
+      expect(buttonBox.top).toBeGreaterThanOrEqual(phasesBox?.y ?? Number.POSITIVE_INFINITY);
+      expect(buttonBox.bottom).toBeLessThanOrEqual((phasesBox?.y ?? 0) + (phasesBox?.height ?? 0));
+    }
     if (viewport.width > 900) {
       expect(await rail.evaluate((element) => getComputedStyle(element).position)).toBe("fixed");
       expect(phasesBox?.x ?? 0).toBeGreaterThanOrEqual(

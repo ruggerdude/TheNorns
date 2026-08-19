@@ -6222,6 +6222,7 @@
   width: 100%;
   min-height: 3.25rem;
   max-height: 3.25rem;
+  flex-direction: row;
   align-items: center;
   gap: 0.65rem;
   padding: 0.35rem 3.5rem 0.35rem 0.65rem;
