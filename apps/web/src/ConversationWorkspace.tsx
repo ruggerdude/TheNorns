@@ -3801,7 +3801,11 @@ function developmentRunStatusMessage(task: DevelopmentTask | null): string {
     case "failed":
     case "cancelled":
     case "expired":
-      return `This attempt ${task.run.state}. Choose a recovery action below.`;
+      // Recovery only renders while the task itself is recoverable; a
+      // terminally cancelled task must not promise actions that never appear.
+      return ["failed", "blocked"].includes(task.state)
+        ? `This attempt ${task.run.state}. Choose a recovery action below.`
+        : `This attempt ${task.run.state}. Development is stopped for this task.`;
     default:
       return `Current run status: ${task.run.state.replaceAll("_", " ")}.`;
   }
@@ -3968,10 +3972,12 @@ function DevelopmentRecovery({
         </Button>
       </div>
       {recoveryError ? <Alert>{recoveryError}</Alert> : null}
-      <details>
-        <summary>Technical details</summary>
-        <p>{run?.failure_detail}</p>
-      </details>
+      {run?.failure_detail ? (
+        <details>
+          <summary>Technical details</summary>
+          <p>{run.failure_detail}</p>
+        </details>
+      ) : null}
     </section>
   );
 }
@@ -4149,7 +4155,10 @@ function DevelopmentAgentDialogue({
               onUnauthorized={onUnauthorized}
             />
           ) : null}
-          {task?.run && phaseId && task.run.failure_detail ? (
+          {task?.run &&
+          phaseId &&
+          ["failed", "cancelled", "expired"].includes(task.run.state) &&
+          ["failed", "blocked"].includes(task.state) ? (
             <DevelopmentRecovery
               projectId={projectId}
               phaseId={phaseId}

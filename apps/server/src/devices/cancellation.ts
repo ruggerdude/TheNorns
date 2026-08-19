@@ -9,7 +9,10 @@ import {
 } from "@norns/contracts";
 
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
-import { transitionV2AgentRunLifecycle } from "../persistence/v2/lifecycleMutation.js";
+import {
+  transitionV2AgentRunLifecycle,
+  transitionV2TaskLifecycle,
+} from "../persistence/v2/lifecycleMutation.js";
 import { SqlV2ApplicationTransaction } from "../persistence/v2/sqlRepositories.js";
 import { PostgresDeviceAuthorizationPolicy } from "./policy.js";
 
@@ -1200,6 +1203,31 @@ export class DeviceRunCancellationService {
             causation_id: input.run_id,
             occurred_at: input.process_exited_at ?? input.acknowledged_at,
           });
+          // Mirror the event processor's cascade: without this the task
+          // stays `assigned` to a terminal run and nothing ever offers
+          // recovery. `blocked` (not terminal `cancelled`) because this path
+          // cannot distinguish "stop this stuck run" from "abandon the
+          // task" — blocked keeps both retry and stop-for-good available.
+          const task = await lifecycle.lockTaskLifecycle(run.task_id);
+          if (task && !["completed", "failed", "cancelled", "blocked"].includes(task.state)) {
+            await transitionV2TaskLifecycle(lifecycle, {
+              project_id: run.project_id,
+              phase_id: run.phase_id,
+              task_id: run.task_id,
+              expected_aggregate_version: task.aggregate_version,
+              to: "blocked",
+              reason:
+                "the designated run was cancelled on runner evidence and requires operator attention",
+              actor_type: "runner",
+              actor_id: input.device_id,
+              correlation_id:
+                state === "process_exited"
+                  ? `device-process-exit:${input.run_id}:${input.device_generation}`
+                  : `device-cancel-ack:${input.run_id}:${input.device_generation}`,
+              causation_id: input.run_id,
+              occurred_at: input.process_exited_at ?? input.acknowledged_at,
+            });
+          }
         }
       }
       return cancellationRecord(evidence);

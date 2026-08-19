@@ -269,10 +269,13 @@ export class Phase4RecoveryActionService {
               "the requested failed run is no longer the current designated attempt",
             );
           }
-          if (!["failed", "expired"].includes(scope.run_state ?? "")) {
+          // `cancelled` is retryable too: a stop aimed at a hung or dead run
+          // (the task ends up `blocked`, not terminally `cancelled`) must
+          // leave the user a way to try again.
+          if (!["failed", "expired", "cancelled"].includes(scope.run_state ?? "")) {
             return failure(
               "run_not_retryable",
-              `the designated run is ${scope.run_state ?? "missing"}, not failed or expired`,
+              `the designated run is ${scope.run_state ?? "missing"}, not failed, expired, or cancelled`,
             );
           }
           if (!["failed", "blocked"].includes(scope.task_state)) {

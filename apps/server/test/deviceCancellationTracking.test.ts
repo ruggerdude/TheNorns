@@ -73,6 +73,17 @@ describe.sequential("device run cancellation tracking", () => {
         project_device_repository_grant_id TEXT
           REFERENCES project_device_repository_grants(id)
       );
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        phase_id TEXT NOT NULL DEFAULT 'phase-1',
+        state TEXT NOT NULL DEFAULT 'assigned',
+        lifecycle_version INTEGER NOT NULL DEFAULT 0,
+        aggregate_version INTEGER NOT NULL DEFAULT 1,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        completed_at TIMESTAMPTZ
+      );
       CREATE TABLE agent_runs (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL REFERENCES projects(id),
@@ -174,6 +185,8 @@ describe.sequential("device run cancellation tracking", () => {
         'binding-1','project-1','local_runner','connected',
         'workspace-1','repository-1','grant-1'
       );
+      INSERT INTO tasks (id,project_id)
+      VALUES ('task-1','project-1'), ('task-never-started','project-1');
       INSERT INTO agent_runs (
         id,project_id,repository_binding_id,initiated_by_user_id
       )
@@ -490,7 +503,9 @@ describe.sequential("device run cancellation tracking", () => {
   });
 
   it("finalizes a never-started run on acknowledgement alone, since no process ever existed", async () => {
-    await database.query("UPDATE agent_runs SET state='dispatched' WHERE id='run-never-started'");
+    await database.query(
+      "UPDATE agent_runs SET state='dispatched', task_id='task-never-started' WHERE id='run-never-started'",
+    );
     await service.request({
       run_id: "run-never-started",
       device_id: "device-1",
@@ -515,6 +530,10 @@ describe.sequential("device run cancellation tracking", () => {
       "SELECT state FROM agent_runs WHERE id='run-never-started'",
     );
     expect(run.rows[0]?.state).toBe("cancelled");
+    const task = await database.query<{ state: string }>(
+      "SELECT state FROM tasks WHERE id='task-never-started'",
+    );
+    expect(task.rows[0]?.state).toBe("blocked");
   });
 
   it("rejects evidence from another device, credential, or generation", async () => {

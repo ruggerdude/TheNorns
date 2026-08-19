@@ -81,6 +81,17 @@ describe.sequential("Phase 5 project-run cancellation routes", () => {
         project_device_repository_grant_id TEXT
           REFERENCES project_device_repository_grants(id)
       );
+      CREATE TABLE tasks (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        phase_id TEXT NOT NULL DEFAULT 'phase-1',
+        state TEXT NOT NULL DEFAULT 'assigned',
+        lifecycle_version INTEGER NOT NULL DEFAULT 0,
+        aggregate_version INTEGER NOT NULL DEFAULT 1,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        completed_at TIMESTAMPTZ
+      );
       CREATE TABLE agent_runs (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL REFERENCES projects(id),
@@ -222,6 +233,11 @@ describe.sequential("Phase 5 project-run cancellation routes", () => {
       UPDATE projects
          SET primary_repository_binding_id='binding-1'
        WHERE id='project-1';
+      INSERT INTO tasks (id,project_id)
+      VALUES
+        ('task-1','project-1'),
+        ('task-queued','project-1'),
+        ('task-new','project-1');
       INSERT INTO agent_runs (
         id,project_id,phase_id,task_id,repository_binding_id,
         initiated_by_user_id,state,created_at
