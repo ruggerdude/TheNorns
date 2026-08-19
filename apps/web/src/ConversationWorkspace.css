@@ -6234,10 +6234,19 @@
 }
 
 .conversation-development-phases > header {
+  position: relative;
   display: flex;
-  min-width: max-content;
+  width: 10rem;
+  min-width: 9rem;
+  min-height: 2.25rem;
+  flex: 0 1 10rem;
   align-items: center;
-  gap: 0.45rem;
+  padding: 0.25rem 2rem 0.25rem 0.55rem;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--brand-900) 82%, white);
+  border-radius: var(--radius-sm);
+  color: white;
+  background: var(--brand-900);
 }
 
 .conversation-development-phases > header > div:first-child {
@@ -6255,31 +6264,47 @@
 }
 
 .conversation-development-phase-progress {
-  display: flex;
+  display: grid;
   min-width: 0;
-  align-items: center;
-  gap: 0.4rem;
-  color: var(--ink-muted);
+  gap: 0;
+  color: color-mix(in srgb, white 78%, var(--brand-900));
   font-size: var(--text-xs);
+  line-height: 1;
   white-space: nowrap;
 }
 
 .conversation-development-phase-progress strong {
-  color: var(--ink);
+  color: white;
   text-align: left;
 }
 
+.conversation-development-phase-progress span {
+  overflow: hidden;
+  font-size: 0.67rem;
+  text-overflow: ellipsis;
+}
+
 .conversation-development-phase-progress progress {
-  width: 3.5rem;
-  height: 0.3rem;
-  flex: none;
-  accent-color: var(--accent);
+  position: absolute;
+  right: 2rem;
+  bottom: 0.08rem;
+  left: 0.55rem;
+  width: auto;
+  height: 0.12rem;
+  border: 0;
+  opacity: 0.55;
+  accent-color: white;
 }
 
 .conversation-development-overall-pause {
-  width: 1.9rem;
-  height: 1.9rem;
-  flex: none;
+  position: absolute;
+  top: 50%;
+  right: 0.3rem;
+  width: 1.45rem;
+  min-width: 1.45rem;
+  height: 1.45rem;
+  min-height: 1.45rem;
+  transform: translateY(-50%);
 }
 
 .conversation-development-pause-toggle {
@@ -6307,6 +6332,23 @@
 .conversation-development-pause-toggle:disabled {
   cursor: not-allowed;
   opacity: 0.42;
+}
+
+.conversation-development-phases > header .conversation-development-overall-pause {
+  border-color: color-mix(in srgb, white 58%, var(--brand-900));
+  color: white;
+  background: color-mix(in srgb, white 12%, var(--brand-900));
+}
+
+.conversation-development-phases
+  > header
+  .conversation-development-overall-pause:hover:not(:disabled),
+.conversation-development-phases
+  > header
+  .conversation-development-overall-pause[aria-pressed="true"] {
+  border-color: white;
+  color: var(--brand-900);
+  background: white;
 }
 
 .conversation-development-phase-list {
@@ -6410,9 +6452,5 @@
   .conversation-development-phases {
     gap: 0.4rem;
     padding-right: 3.25rem;
-  }
-
-  .conversation-development-phase-progress progress {
-    display: none;
   }
 }

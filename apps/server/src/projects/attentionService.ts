@@ -1337,6 +1337,8 @@ export class AttentionService {
         assignment_budget_limit_usd: string | number | null;
         run_id: string | null;
         run_state: string | null;
+        run_started_at: string | Date | null;
+        run_finished_at: string | Date | null;
         attempt: number | null;
         verification_status: string | null;
         commit_sha: string | null;
@@ -1358,7 +1360,9 @@ export class AttentionService {
           assignment.budget_limit_usd AS assignment_budget_limit_usd,
           reviewer.id AS reviewer_profile_id, reviewer.provider AS reviewer_provider,
           reviewer.model AS reviewer_model, reviewer.roles AS reviewer_roles,
-          run.id AS run_id, run.state AS run_state, run.attempt, run.verification_status,
+          run.id AS run_id, run.state AS run_state,
+          run.started_at AS run_started_at, run.finished_at AS run_finished_at,
+          run.attempt, run.verification_status,
           run.commit_sha, run.failure_detail,
           -- EXECUTION E10: the branch and pull request the run published, so a
           -- finished task is one click from its review instead of one grep
@@ -1485,6 +1489,8 @@ export class AttentionService {
               ? {
                   id: task.run_id,
                   state: task.run_state,
+                  started_at: task.run_started_at ? iso(task.run_started_at) : null,
+                  finished_at: task.run_finished_at ? iso(task.run_finished_at) : null,
                   attempt: task.attempt,
                   verification_status: task.verification_status,
                   commit_sha: task.commit_sha,

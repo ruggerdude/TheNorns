@@ -5160,7 +5160,7 @@ describe("conversation workspace", () => {
               status: "active",
               completed_tasks: 0,
               total_tasks: 1,
-              eta_at: new Date(Date.now() + 30 * 60_000).toISOString(),
+              eta_at: null,
             },
             tasks: [
               {
@@ -5182,7 +5182,9 @@ describe("conversation workspace", () => {
                 reviewer_agent: null,
                 run: {
                   id: "run-office-1",
-                  state: "dispatched",
+                  state: "running",
+                  started_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+                  finished_at: null,
                   attempt: 1,
                   verification_status: "pending",
                   commit_sha: null,
@@ -5230,11 +5232,11 @@ describe("conversation workspace", () => {
     const phases = screen.getByRole("region", { name: "Development phases" });
     expect(phases).toHaveTextContent("Foundation");
     expect(phases).not.toHaveTextContent("scaffold, auth, and database");
-    expect(phases).toHaveTextContent("10%");
-    expect(phases).toHaveTextContent(/~30 min left/);
+    expect(phases).toHaveTextContent("50%");
+    expect(phases).toHaveTextContent(/~10 min left/);
     expect(screen.getByRole("progressbar", { name: "Development progress" })).toHaveAttribute(
       "value",
-      "10",
+      "50",
     );
     expect(screen.getByRole("list", { name: "Agent activity transcript" })).toHaveTextContent(
       "Implementation agent",

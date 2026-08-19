@@ -217,6 +217,8 @@ export const V2PhaseExecution = z
               state: V2NonEmptyString,
               attempt: z.number().int().positive(),
               verification_status: V2NonEmptyString,
+              started_at: V2IsoDateTime.nullable().default(null),
+              finished_at: V2IsoDateTime.nullable().default(null),
               commit_sha: V2NonEmptyString.nullable(),
               failure_detail: z.string().nullable(),
               // EXECUTION E10 — a completed task must be clickable through to

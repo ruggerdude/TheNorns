@@ -3737,6 +3737,69 @@ function developmentEtaAt(execution: V2PhaseExecutionT | null): string | null {
   return typeof etaAt === "string" && Number.isFinite(Date.parse(etaAt)) ? etaAt : null;
 }
 
+function developmentComplexityWeight(phase: DevelopmentPhaseItem): number {
+  switch (phase.task?.complexity) {
+    case "S":
+      return 1;
+    case "L":
+      return 3;
+    case "XL":
+      return 5;
+    default:
+      return 2;
+  }
+}
+
+/**
+ * Provide an early ETA from real elapsed run time while the throughput-based
+ * server ETA is still waiting for two completed tasks. The visible execution
+ * milestones supply the completion fraction; completed run durations replace
+ * that estimate as soon as they exist. Each task remains bounded by the
+ * launcher's one-hour run limit so a stale run cannot produce an endless ETA.
+ */
+function developmentEstimatedEtaAt(phases: DevelopmentPhaseItem[], nowMs: number): string | null {
+  const normalizedSamples = phases.flatMap((phase) => {
+    const run = phase.task?.run;
+    if (!run?.started_at) return [];
+    const startedMs = Date.parse(run.started_at);
+    if (!Number.isFinite(startedMs) || startedMs > nowMs) return [];
+    const weight = developmentComplexityWeight(phase);
+    const finishedMs = run.finished_at ? Date.parse(run.finished_at) : Number.NaN;
+    if (Number.isFinite(finishedMs) && finishedMs > startedMs) {
+      return [(finishedMs - startedMs) / weight];
+    }
+    const percent = developmentPhasePercent(phase);
+    if (percent <= 0 || percent >= 100 || ["blocked", "waiting"].includes(phase.state)) {
+      return [];
+    }
+    const elapsedMs = Math.max(1_000, nowMs - startedMs);
+    return [elapsedMs / (percent / 100) / weight];
+  });
+  if (normalizedSamples.length === 0) return null;
+  normalizedSamples.sort((left, right) => left - right);
+  const midpoint = Math.floor(normalizedSamples.length / 2);
+  const normalizedDurationMs =
+    normalizedSamples.length % 2 === 0
+      ? ((normalizedSamples[midpoint - 1] ?? 0) + (normalizedSamples[midpoint] ?? 0)) / 2
+      : (normalizedSamples[midpoint] ?? 0);
+  if (!Number.isFinite(normalizedDurationMs) || normalizedDurationMs <= 0) return null;
+
+  const remainingMs = phases
+    .filter((phase) => phase.state !== "complete")
+    .reduce((total, phase) => {
+      const estimatedDurationMs = Math.min(
+        60 * 60_000,
+        Math.max(2 * 60_000, normalizedDurationMs * developmentComplexityWeight(phase)),
+      );
+      const startedMs = phase.task?.run?.started_at
+        ? Date.parse(phase.task.run.started_at)
+        : Number.NaN;
+      const elapsedMs = Number.isFinite(startedMs) ? Math.max(0, nowMs - startedMs) : 0;
+      return total + Math.max(60_000, estimatedDurationMs - elapsedMs);
+    }, 0);
+  return remainingMs > 0 ? new Date(nowMs + remainingMs).toISOString() : null;
+}
+
 function developmentTimeRemaining(remainingMs: number | null): string {
   if (remainingMs === null || !Number.isFinite(remainingMs)) return "estimating";
   if (remainingMs <= 0) return "due now";
@@ -4122,8 +4185,8 @@ function DevelopmentPhaseStrip({
           phases.reduce((total, phase) => total + developmentPhasePercent(phase), 0) /
             phases.length,
         );
-  const etaAt = developmentEtaAt(execution);
   const nowMs = Date.now();
+  const etaAt = developmentEtaAt(execution) ?? developmentEstimatedEtaAt(phases, nowMs);
   const overallRemaining = etaAt ? Math.max(0, Date.parse(etaAt) - nowMs) : null;
   const pauseEligible = phases.filter(
     (phase) => phase.task && (phase.state !== "complete" || phase.pauseAfterCompletion),
@@ -4133,15 +4196,23 @@ function DevelopmentPhaseStrip({
   const pauseReached =
     completed < phases.length &&
     phases.some((phase) => phase.state === "complete" && phase.pauseAfterCompletion);
+  const waitingForHuman = phases.some((phase) => phase.state === "waiting");
+  const blocked = phases.some((phase) => phase.state === "blocked");
+  const overallEtaLabel =
+    pauseReached || waitingForHuman
+      ? "paused"
+      : blocked
+        ? "blocked"
+        : `${developmentTimeRemaining(overallRemaining)} left`;
   const allTaskIds = pauseEligible.flatMap((phase) => (phase.task ? [phase.task.id] : []));
   const overallPauseBusy = allTaskIds.some((taskId) => pauseBusyIds.has(taskId));
   return (
     <section className="conversation-development-phases" aria-label="Development phases">
       <header>
         <div className="conversation-development-phase-progress">
-          <strong>Overall {progress}%</strong>
+          <strong>Overall</strong>{" "}
           <span aria-label="Overall estimated time remaining">
-            · {pauseReached ? "paused" : `${developmentTimeRemaining(overallRemaining)} left`}
+            {progress}% · {overallEtaLabel}
           </span>
           <progress aria-label="Development progress" max={100} value={progress} />
         </div>

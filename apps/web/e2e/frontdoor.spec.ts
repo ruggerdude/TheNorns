@@ -1220,7 +1220,7 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
       <section class="conversation-development-phases" aria-label="Development phases">
         <header>
           <div class="conversation-development-phase-progress">
-            <strong>Overall 13%</strong><span>· ~42 min left</span>
+            <strong>Overall</strong> <span aria-label="Overall estimated time remaining">13% · ~42 min left</span>
             <progress aria-label="Development progress" max="100" value="13"></progress>
           </div>
           <button class="conversation-development-pause-toggle conversation-development-overall-pause" aria-label="Pause after every phase" aria-pressed="false"><span>Ⅱ</span></button>
@@ -1286,6 +1286,18 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
     "aria-pressed",
     "true",
   );
+  const overallCard = page.getByRole("region", { name: "Development phases" }).locator("> header");
+  await expect(overallCard).toHaveCSS("color", "rgb(255, 255, 255)");
+  const [overallTitleBox, overallEtaBox, overallPauseBox] = await Promise.all([
+    overallCard.locator("strong").boundingBox(),
+    overallCard.locator('[aria-label="Overall estimated time remaining"]').boundingBox(),
+    overallCard.getByRole("button", { name: "Pause after every phase" }).boundingBox(),
+  ]);
+  expect(overallTitleBox).not.toBeNull();
+  expect(overallEtaBox).not.toBeNull();
+  expect(overallPauseBox).not.toBeNull();
+  expect(overallEtaBox?.y ?? 0).toBeGreaterThan(overallTitleBox?.y ?? Number.POSITIVE_INFINITY);
+  expect(overallPauseBox?.x ?? 0).toBeGreaterThan(overallEtaBox?.x ?? Number.POSITIVE_INFINITY);
 
   for (const viewport of [
     { width: 1920, height: 900 },
