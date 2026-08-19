@@ -6206,3 +6206,132 @@
     padding-right: 3.75rem;
   }
 }
+
+/* Keep development navigation visible without spending a large part of the
+   live workspace on it. The row stays pinned while the agent dialogue moves
+   underneath, and individual phase names scroll horizontally when needed. */
+.conversation-work-tab-development-chat .conversation-thread-viewport {
+  padding-top: 0;
+}
+
+.conversation-development-phases {
+  position: sticky;
+  top: 0;
+  z-index: 11;
+  display: flex;
+  width: 100%;
+  min-height: 3.25rem;
+  max-height: 3.25rem;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.35rem 3.5rem 0.35rem 0.65rem;
+  overflow: hidden;
+  border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 96%, var(--surface-2));
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--ink) 5%, transparent);
+}
+
+.conversation-development-phases > header {
+  display: flex;
+  min-width: max-content;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.conversation-development-phases > header > div:first-child {
+  display: block;
+}
+
+.conversation-development-phases > header h2 {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: 1;
+}
+
+.conversation-development-phases > header .eyebrow {
+  display: none;
+}
+
+.conversation-development-phase-progress {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--ink-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.conversation-development-phase-progress strong {
+  color: var(--ink);
+  text-align: left;
+}
+
+.conversation-development-phase-progress progress {
+  width: 4.5rem;
+  height: 0.3rem;
+  flex: none;
+  accent-color: var(--accent);
+}
+
+.conversation-development-phase-list {
+  min-width: 0;
+  flex: 1;
+}
+
+.conversation-development-phases ol {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  gap: 0.25rem;
+  margin: 0;
+  padding: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  list-style: none;
+  scrollbar-width: thin;
+}
+
+.conversation-development-phases li {
+  min-width: 8rem;
+  flex: 1 1 10rem;
+}
+
+.conversation-development-phases li button {
+  display: grid;
+  width: 100%;
+  min-height: 2.25rem;
+  grid-template-columns: 1.35rem minmax(0, 1fr);
+  gap: 0.35rem;
+  padding: 0.25rem 0.4rem;
+}
+
+.conversation-development-phases li .conversation-development-phase-index {
+  width: 1.35rem;
+  height: 1.35rem;
+}
+
+.conversation-development-phases li button > span:last-child {
+  display: block;
+}
+
+.conversation-development-phases li strong {
+  display: block;
+  font-size: var(--text-xs);
+}
+
+.conversation-development-phases li small {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .conversation-development-phases {
+    gap: 0.4rem;
+    padding-right: 3.25rem;
+  }
+
+  .conversation-development-phase-progress > span,
+  .conversation-development-phase-progress progress {
+    display: none;
+  }
+}

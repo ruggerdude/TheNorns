@@ -4005,6 +4005,23 @@ function developmentStateLabel(state: DevelopmentPhaseState): string {
   }
 }
 
+function developmentPhasePercent(phase: DevelopmentPhaseItem): number {
+  if (phase.state === "complete") return 100;
+  if (phase.state === "verifying") return 90;
+  if (phase.state === "waiting") return 50;
+  if (phase.state !== "active") return 0;
+  switch (phase.task?.run?.state) {
+    case "created":
+      return 5;
+    case "dispatched":
+      return 10;
+    case "running":
+      return 50;
+    default:
+      return 25;
+  }
+}
+
 function DevelopmentPhaseStrip({
   phases,
   selectedId,
@@ -4015,7 +4032,16 @@ function DevelopmentPhaseStrip({
   onSelect: (phaseId: string) => void;
 }): React.ReactElement {
   const completed = phases.filter((phase) => phase.state === "complete").length;
-  const progress = phases.length === 0 ? 0 : Math.round((completed / phases.length) * 100);
+  // The execution projection exposes durable milestones rather than a
+  // fabricated sub-task percentage. Give each milestone a conservative
+  // checkpoint so visible running work no longer reads as 0%.
+  const progress =
+    phases.length === 0
+      ? 0
+      : Math.round(
+          phases.reduce((total, phase) => total + developmentPhasePercent(phase), 0) /
+            phases.length,
+        );
   return (
     <section className="conversation-development-phases" aria-label="Development phases">
       <header>
@@ -4028,7 +4054,7 @@ function DevelopmentPhaseStrip({
             {completed} of {phases.length} complete
           </span>
           <strong>{progress}%</strong>
-          <progress aria-label="Development phases completed" max={100} value={progress} />
+          <progress aria-label="Development progress" max={100} value={progress} />
         </div>
       </header>
       {phases.length > 0 ? (

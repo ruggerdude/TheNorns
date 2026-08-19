@@ -1218,7 +1218,13 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
       <div class="conversation-thread-root">
         <div class="conversation-thread-viewport">
       <section class="conversation-development-phases" aria-label="Development phases">
-        <header><div><h2>Phases</h2></div></header>
+        <header>
+          <div><h2>Phases</h2></div>
+          <div class="conversation-development-phase-progress">
+            <span>0 of 4 complete</span><strong>13%</strong>
+            <progress aria-label="Development progress" max="100" value="13"></progress>
+          </div>
+        </header>
         <div class="conversation-development-phase-list">
           <ol>
             ${[
@@ -1311,6 +1317,8 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
     expect(controlsBox).not.toBeNull();
     expect(transcriptBox).not.toBeNull();
     expect(footerBox).not.toBeNull();
+    expect(phasesBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(60);
+    expect(Math.abs((phasesBox?.y ?? 0) - (transcriptBox?.y ?? 0))).toBeLessThanOrEqual(1);
     if (viewport.width > 900) {
       expect(await rail.evaluate((element) => getComputedStyle(element).position)).toBe("fixed");
       expect(phasesBox?.x ?? 0).toBeGreaterThanOrEqual(

@@ -263,6 +263,7 @@ export function RunLog({
   const [runId, setRunId] = useState<string | null>(null);
   const cursorRef = useRef<number | undefined>(undefined);
   const currentRunIdRef = useRef<string | null>(null);
+  const activityListRef = useRef<HTMLOListElement>(null);
   const logResourceKey = `${projectId}:${phaseId}:${taskId}`;
 
   useEffect(() => {
@@ -332,6 +333,13 @@ export function RunLog({
 
   const activities = useMemo(() => readableRunActivities(entries), [entries]);
 
+  useEffect(() => {
+    if (activities.length === 0) return;
+    const list = activityListRef.current;
+    if (!list) return;
+    list.scrollTop = list.scrollHeight;
+  }, [activities]);
+
   return (
     <details className="run-log" data-testid={`task-run-log-${taskId}`} open={active}>
       <summary>
@@ -355,6 +363,7 @@ export function RunLog({
           </span>
         ) : (
           <ol
+            ref={activityListRef}
             className="run-activity-list"
             data-testid={`task-run-log-output-${taskId}`}
             aria-live="polite"

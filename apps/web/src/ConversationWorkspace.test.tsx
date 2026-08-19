@@ -5201,6 +5201,11 @@ describe("conversation workspace", () => {
     const phases = screen.getByRole("region", { name: "Development phases" });
     expect(phases).toHaveTextContent("Core API");
     expect(phases).toHaveTextContent("In progress");
+    expect(phases).toHaveTextContent("10%");
+    expect(screen.getByRole("progressbar", { name: "Development progress" })).toHaveAttribute(
+      "value",
+      "10",
+    );
     expect(screen.getByRole("list", { name: "Agent activity transcript" })).toHaveTextContent(
       "Implementation agent",
     );

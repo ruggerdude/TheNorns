@@ -74,6 +74,9 @@ describe("RunLog polling", () => {
       />,
     );
     expect(await screen.findByText(/old run output/)).toBeVisible();
+    const output = screen.getByTestId("task-run-log-output-task:phase%3Aphase-1:task-1");
+    Object.defineProperty(output, "scrollHeight", { configurable: true, value: 480 });
+    output.scrollTop = 0;
 
     run = "run-2";
     await act(() => vi.advanceTimersByTimeAsync(3_001));
@@ -82,6 +85,7 @@ describe("RunLog polling", () => {
     expect(screen.queryByText(/old run output/)).not.toBeInTheDocument();
     expect(screen.getByText(/new run second line/)).toBeVisible();
     expect(screen.getByText(/Development chat · 2 readable updates/)).toBeVisible();
+    expect(output.scrollTop).toBe(480);
     expect(mock.calls.some((call) => call.url.endsWith("/run-log?after=100"))).toBe(true);
     expect(mock.calls.filter((call) => call.url.endsWith("/run-log"))).toHaveLength(2);
     expect(mock.calls[0]?.url).toContain(
