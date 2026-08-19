@@ -519,3 +519,47 @@ test("Claude emits readable messages and tool actions without hidden reasoning",
   ]);
   assert.doesNotMatch(JSON.stringify(logs), /hidden chain of thought|must-not-appear/);
 });
+
+test("Claude Code falls back to a fresh session when the resumed session no longer exists", async () => {
+  const resumeOptionsSeen = [];
+  const runtime = new ClaudeCodeRuntime({
+    credentialMode: "subscription",
+    baseEnv: { ...providerEnvironment },
+    subscriptionAuthProbe: () => claudeSubscriptionAuth(),
+    resumeSessionId: "session-gone",
+    queryImpl: ({ options }) => {
+      resumeOptionsSeen.push(options.resume);
+      return {
+        async interrupt() {},
+        async *[Symbol.asyncIterator]() {
+          if (options.resume !== undefined) {
+            yield {
+              type: "result",
+              subtype: "error_during_execution",
+              result: "No conversation found with session ID: session-gone",
+            };
+            return;
+          }
+          yield {
+            type: "result",
+            subtype: "success",
+            result: "done",
+            usage: { input_tokens: 2, output_tokens: 3 },
+          };
+        },
+      };
+    },
+  });
+
+  const logs = [];
+  const result = await runtime.run({
+    runId: "run-stale-claude-session",
+    worktreePath: "/tmp/norns-subscription-test",
+    prompt: "Continue the previous coding session.",
+    onLog: (line) => logs.push(line),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.deepEqual(resumeOptionsSeen, ["session-gone", undefined]);
+  assert.match(logs.join("\n"), /no longer available on this computer/);
+});
