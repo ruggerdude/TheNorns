@@ -144,3 +144,4 @@
 2026-08-19T05:57Z | EXEC-HANG-1 | Context-fetch timeout + stage breadcrumbs in runner; StrumSheetV01 attempt 4 dispatched and RUNNING end-to-end on the local agent
 2026-08-19T12:33Z | EXEC-AGENT-1 | Agent 0.4.5 packaged+installed; plist restored to /Applications; opened EXEC-WAIT-1 (human-wait refusal loses uncommitted work)
 2026-08-19T15:20Z | EXEC-PATH-1 | Runner children (runtimes + verification) get a real PATH; fixes 'spawn npm ENOENT' verification failures
+2026-08-19T15:30Z | QCFR-1 | QC failure now salvages the last completed round's plan instead of dead-ending

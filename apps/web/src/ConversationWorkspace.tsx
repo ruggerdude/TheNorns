@@ -1890,7 +1890,11 @@ function ConversationQcActivity({
   const latest = ordered[0] ?? null;
   if (!context || !latest) return null;
   const proposed = [...context.actions.values()].filter((action) => action.status === "proposed");
-  const targetPlanId = latest.revised_plan_version_id ?? latest.plan_version_id;
+  // A failed review exposes the last good plan it produced on
+  // salvaged_plan_version_id; that version is the work item's latest, and
+  // every recovery action the server proposed is bound to it.
+  const targetPlanId =
+    latest.revised_plan_version_id ?? latest.salvaged_plan_version_id ?? latest.plan_version_id;
   const targetPlan =
     planVersions.find((version) => version.id === targetPlanId) ??
     planVersions.find((version) => version.id === latest.plan_version_id) ??
@@ -1903,9 +1907,11 @@ function ConversationQcActivity({
         action.payload.parameters.plan_version_id === targetPlanId,
     ) ?? null;
   const reviewPlanIds = new Set(
-    [latest.plan_version_id, latest.revised_plan_version_id].filter(
-      (id): id is string => id !== null,
-    ),
+    [
+      latest.plan_version_id,
+      latest.revised_plan_version_id,
+      latest.salvaged_plan_version_id,
+    ].filter((id): id is string => id != null),
   );
   const targetsReview = (action: V2ConversationActionT): boolean =>
     reviewPlanIds.has(action.payload.parameters.plan_version_id as string);

@@ -2420,6 +2420,11 @@ export const V2ConversationPlanReview = z
     finding_decisions: z.array(V2ConversationPlanReviewFindingDecision).optional(),
     dispositions: z.array(V2ConversationPlanReviewDisposition),
     revised_plan_version_id: V2EntityId.nullable(),
+    // The last good plan a failed review produced before it died, materialized
+    // as a candidate version so the human can proceed from it instead of
+    // losing the completed round. Set only on status === "failed". Optional so
+    // fixtures predating salvage still parse.
+    salvaged_plan_version_id: V2EntityId.nullable().optional(),
     // Set only while status === "awaiting_human"; identifies which gate parked
     // the review and the round it parked at.
     paused_checkpoint: z.enum(["after_review", "after_revision", "adjudication"]).nullable(),
@@ -2684,6 +2689,13 @@ export const V2ConversationPlanReview = z
         code: z.ZodIssueCode.custom,
         path: ["revised_plan_version_id"],
         message: "non-terminal-success reviews cannot expose revision evidence",
+      });
+    }
+    if (review.salvaged_plan_version_id != null && review.status !== "failed") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["salvaged_plan_version_id"],
+        message: "only a failed review can carry a salvaged plan version",
       });
     }
     // Deliberately excludes "awaiting_human": a paused review must expose its

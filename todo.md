@@ -1304,3 +1304,21 @@ decision and is deliberately untouched.
   each module title as it arrives instead of showing only an elapsed counter.
   Falls back to the non-streaming `plan-proposals` call with the same
   idempotency key whenever the stream cannot open or dies before a proposal.
+
+## QC failure recovery (2026-08-19)
+
+- [x] ✅ QCFR-1 Stop discarding completed work when a QC review fails.
+  `failReviewOnly` now reads the durable `execution_checkpoint` it used to
+  clear, materializes the last good plan as a `qc_interim` candidate version,
+  records it on the review's new `salvaged_plan_version_id` column (migration
+  `0085_qc_salvaged_plan`), points all three recovery follow-ups at it, and
+  names what survived in the failure message. `continueWithoutQc` waives QC on
+  the salvage, which is the route that satisfies `approve_plan`'s
+  converged-review precondition. The failed QC card surfaces the salvaged plan
+  and promotes "Keep this plan".
+- [ ] 🟡 QCFR-2 `approve_plan` still cannot bind directly to a failed review
+  (its precondition, the `conversation_plan_reviews` evidence CHECKs, and the
+  0038 execution-handoff trigger all require `converged`/`cap_reached`).
+  Approving a salvage therefore costs two confirmations (waive, then approve).
+  Collapsing it to one means relaxing those DB invariants — a deliberate
+  design call, not a cleanup.

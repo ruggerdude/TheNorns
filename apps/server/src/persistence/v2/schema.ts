@@ -5042,6 +5042,10 @@ export const conversationPlanReviews = pgTable(
     revisedPlan: jsonb("revised_plan"),
     revisedPlanContentHash: text("revised_plan_content_hash"),
     revisedPlanVersionId: text("revised_plan_version_id"),
+    // The last good plan a failed review produced before it died — offered
+    // back to the human instead of discarding completed work. Deliberately
+    // separate from revisedPlanVersionId, which means "approvable QC result".
+    salvagedPlanVersionId: text("salvaged_plan_version_id"),
     startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
     completedAt: timestamp("completed_at", { withTimezone: true, mode: "string" }),
     failureCode: text("failure_code"),
@@ -5093,6 +5097,21 @@ export const conversationPlanReviews = pgTable(
         workPlanVersions.id,
       ],
     ).onDelete("restrict"),
+    lazyForeignKey(
+      "conversation_plan_reviews_salvage_scope_fk",
+      (): AnyPgColumn[] => [
+        table.projectId,
+        table.workItemId,
+        table.conversationId,
+        table.salvagedPlanVersionId,
+      ],
+      (): AnyPgColumn[] => [
+        workPlanVersions.projectId,
+        workPlanVersions.workItemId,
+        workPlanVersions.conversationId,
+        workPlanVersions.id,
+      ],
+    ).onDelete("restrict"),
     uniqueIndex("conversation_plan_reviews_action_unique").on(table.actionId),
     uniqueIndex("conversation_plan_reviews_run_unique").on(table.planningRunId),
     uniqueIndex("conversation_plan_reviews_attempt_unique").on(
@@ -5124,6 +5143,11 @@ export const conversationPlanReviews = pgTable(
     check(
       "conversation_plan_reviews_revision_format_check",
       sql`${table.revisionFormat} IN ('legacy_full','targeted_v1','targeted_v1_with_fallback')`,
+    ),
+    check(
+      "conversation_plan_reviews_salvage_shape_check",
+      sql`${table.salvagedPlanVersionId} IS NULL
+        OR (${table.status} = 'failed' AND ${table.salvagedPlanVersionId} <> ${table.planVersionId})`,
     ),
     check(
       "conversation_plan_reviews_status_check",

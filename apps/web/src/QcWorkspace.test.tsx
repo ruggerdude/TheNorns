@@ -890,4 +890,78 @@ describe("QcWorkspace", () => {
     ).toBeVisible();
     vi.useRealTimers();
   });
+
+  it("offers the salvaged plan on a failed review instead of dead-ending", () => {
+    const salvaged: V2WorkPlanVersionT = {
+      schema_version: 2,
+      id: "plan-2",
+      project_id: "project-1",
+      work_item_id: "work-1",
+      conversation_id: "conversation-1",
+      created_by_user_id: "user-1",
+      version: 2,
+      status: "candidate",
+      origin: "qc_interim",
+      plan: {
+        plan: makePlan({ modules: [makeCoreApiModule()] }),
+        staffing: [],
+        verification_requirements: ["pnpm test"],
+        open_decisions: [],
+        estimated_budget: { currency: "USD", amount: 12 },
+      },
+      content_hash: "c".repeat(64),
+      created_by_action_id: "action-1",
+      supersedes_plan_version_id: "plan-1",
+      diff_from_previous: null,
+      approved_by_user_id: null,
+      approved_at: null,
+      created_at: now,
+      updated_at: now,
+    };
+    const { onContinueWithoutQc } = renderWorkspace(
+      review({
+        status: "failed",
+        completed_at: now,
+        failure_code: "orphaned_server_restarted_before_the_review_completed",
+        paused_checkpoint: null,
+        paused_at_round: null,
+        findings: [],
+        finding_decisions: [],
+        dispositions: [],
+        salvaged_plan_version_id: "plan-2",
+      }),
+      undefined,
+      salvaged,
+      "plan_review",
+    );
+
+    expect(
+      screen.getByText(/the plan it had already revised survived as version 2/i),
+    ).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Review the plan QC produced" })).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "Keep this plan" }));
+    expect(onContinueWithoutQc).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the plain recovery copy when a failed review salvaged nothing", () => {
+    renderWorkspace(
+      review({
+        status: "failed",
+        completed_at: now,
+        failure_code: "adaptererror",
+        paused_checkpoint: null,
+        paused_at_round: null,
+        findings: [],
+        finding_decisions: [],
+        dispositions: [],
+      }),
+      undefined,
+      null,
+      "plan_review",
+    );
+
+    expect(screen.getAllByText(/The plan is unchanged\./).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("heading", { name: "Review the plan QC produced" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Keep plan without QC" })).toBeVisible();
+  });
 });

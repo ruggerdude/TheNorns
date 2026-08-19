@@ -935,4 +935,257 @@ describe.sequential("QC pause and resume (QCP-1B)", () => {
       evidence.rows[0]?.chat_messages.some((message) => message.request_id === "late-old-claim"),
     ).toBe(false);
   });
+
+  // A failed QC review must not throw away a round that already succeeded.
+  describe("salvaging a failed review", () => {
+    /** Drives a real round-1 reviewer pass + PM revision through the durable
+     * checkpoint recorder, then kills the run the way a server restart does. */
+    async function failAfterCompletedRound(label: string) {
+      const sent = await sendToQc(label, 2, "automatic");
+      const leaseToken = `${label}-lease`;
+      await pg.query(
+        `UPDATE planning_runs
+            SET status='reviewing', lease_token=$2, leased_until=$3, execution_attempt=1
+          WHERE id=$1`,
+        [sent.planningRunId, leaseToken, new Date(Date.now() + 60_000).toISOString()],
+      );
+      await workflow.markReviewOnlyStarted(sent.reviewId, leaseToken);
+      const seed = await workflow.loadReviewOnlySeed(sent.planningRunId, leaseToken);
+      reviewerV1.enqueue({ findings: [hollowMustFix] });
+      const revised = plan(`Objective ${label}`, "Deliver the durable workflow, now reviewed.");
+      pm.enqueue({
+        responses: [{ finding_index: 0, disposition: "accept", rationale: "Addressed." }],
+        plan: revised,
+      });
+      const recordAndCrashAfterRevision = async (checkpoint: ReviewOnlyDurableCheckpoint) => {
+        await workflow.recordReviewOnlyCheckpoint({
+          reviewId: sent.reviewId,
+          planningRunId: sent.planningRunId,
+          checkpoint,
+          leaseToken,
+        });
+        if (checkpoint.completed_step === "revision") {
+          throw new Error("simulated process death after revision checkpoint");
+        }
+      };
+      const session = {
+        pm,
+        reviewer: reviewerV1,
+        projectId,
+        initiatedByUserId: owner.id,
+        seedPlan: seed.seedPlan,
+        frozenContext: seed.frozenContext,
+        telemetryGroupId: seed.usageRequestGroupId,
+        maxRounds: 2,
+        qcMode: "automatic" as const,
+        executionAttempt: 1,
+        onCheckpoint: recordAndCrashAfterRevision,
+      };
+      // Round 1's reviewer pass always parks for finding triage; the PM
+      // revision that follows it is what dies here.
+      const findingReview = await runReviewOnlyPlanning(session);
+      if (findingReview.status !== "paused") throw new Error("expected finding review pause");
+      await expect(
+        runReviewOnlyPlanning({
+          ...session,
+          resume: {
+            kind: "human",
+            fromRound: findingReview.paused_at_round,
+            checkpoint: "after_review",
+            plan: findingReview.plan,
+            rounds: findingReview.rounds,
+            usage: findingReview.usage,
+            acceptedFindingIndices: [0],
+            forcedAcceptModuleIds: [],
+          },
+        }),
+      ).rejects.toThrow("simulated process death");
+      return { sent, leaseToken, revised };
+    }
+
+    async function salvagedVersion(reviewId: string) {
+      const rows = await pg.query<{
+        salvaged_plan_version_id: string | null;
+        status: string;
+        version: number;
+        plan: unknown;
+        content_hash: string;
+        origin: string;
+      }>(
+        `SELECT review.salvaged_plan_version_id, version.status, version.version,
+                version.plan, version.content_hash, version.origin
+           FROM conversation_plan_reviews review
+           LEFT JOIN work_plan_versions version
+             ON version.id = review.salvaged_plan_version_id
+          WHERE review.id=$1`,
+        [reviewId],
+      );
+      const row = rows.rows[0];
+      if (!row) throw new Error(`review "${reviewId}" not found`);
+      return row;
+    }
+
+    /** The plan version each of the three failure recovery choices binds to. */
+    async function recoveryTargets(sent: Awaited<ReturnType<typeof sendToQc>>) {
+      const detail = await workflow.detail(
+        owner.id,
+        projectId,
+        sent.work_item.id,
+        sent.conversation.id,
+      );
+      const proposed = detail.actions.filter((action) => action.status === "proposed");
+      const target = (predicate: (action: (typeof proposed)[number]) => boolean) =>
+        proposed.filter(predicate).at(-1)?.payload.parameters.plan_version_id ?? null;
+      const isSkip = (action: (typeof proposed)[number]) =>
+        (action.payload.parameters.review as { mode?: string } | undefined)?.mode === "skip_qc";
+      return {
+        retry_qc: target((action) => action.action_type === "send_plan_to_qc" && !isSkip(action)),
+        skip_qc: target((action) => action.action_type === "send_plan_to_qc" && isSkip(action)),
+        reject: target((action) => action.action_type === "reject_plan"),
+      };
+    }
+
+    async function lastPlanningMessage(conversationId: string) {
+      const rows = await pg.query<{ parts: Array<{ type: string; text?: string }> }>(
+        `SELECT parts FROM work_messages
+          WHERE conversation_id=$1 AND actor_id='conversation-plan-workflow'
+          ORDER BY sequence DESC LIMIT 1`,
+        [conversationId],
+      );
+      return (rows.rows[0]?.parts ?? []).map((part) => part.text ?? "").join(" ");
+    }
+
+    it("persists the completed round's plan as an approvable candidate", async () => {
+      const { sent, leaseToken, revised } = await failAfterCompletedRound("salvage-round");
+      await workflow.failReviewOnly(
+        sent.planningRunId,
+        new AdapterError("network", "reviewer never answered"),
+        leaseToken,
+      );
+
+      const review = await reviewRow(sent.reviewId);
+      expect(review.status).toBe("failed");
+      // The DB still reserves revised_plan* for an approvable QC result.
+      expect(review.revised_plan_version_id).toBeNull();
+      expect(review.result_plan_content_hash).toBe(review.plan_content_hash);
+
+      const salvaged = await salvagedVersion(sent.reviewId);
+      expect(salvaged.salvaged_plan_version_id).not.toBeNull();
+      expect(salvaged.status).toBe("candidate");
+      expect(salvaged.origin).toBe("qc_interim");
+      // Strict contract validation: an unvalidated plan is never persisted.
+      expect(V2WorkPlanContract.parse(salvaged.plan)).toEqual(revised);
+
+      const message = await lastPlanningMessage(sent.conversation.id);
+      expect(message).toContain("QC failed in round 2");
+      expect(message).toContain("round 1's reviewed plan survived");
+      expect(message).toContain(`Plan v${salvaged.version}`);
+
+      // Every recovery proposal binds to the salvage, not the discarded seed.
+      expect(await recoveryTargets(sent)).toEqual({
+        retry_qc: salvaged.salvaged_plan_version_id,
+        skip_qc: salvaged.salvaged_plan_version_id,
+        reject: salvaged.salvaged_plan_version_id,
+      });
+    });
+
+    it("leaves a failure with no completed round exactly as it was", async () => {
+      const sent = await sendToQc("salvage-none", 2, "automatic");
+      const leaseToken = "salvage-none-lease";
+      await pg.query(
+        `UPDATE planning_runs
+            SET status='reviewing', lease_token=$2, leased_until=$3
+          WHERE id=$1`,
+        [sent.planningRunId, leaseToken, new Date(Date.now() + 60_000).toISOString()],
+      );
+      await workflow.markReviewOnlyStarted(sent.reviewId, leaseToken);
+      await workflow.failReviewOnly(
+        sent.planningRunId,
+        new AdapterError("network", "reviewer never answered"),
+        leaseToken,
+      );
+
+      const review = await reviewRow(sent.reviewId);
+      expect(review.status).toBe("failed");
+      expect((await salvagedVersion(sent.reviewId)).salvaged_plan_version_id).toBeNull();
+      const message = await lastPlanningMessage(sent.conversation.id);
+      expect(message).toContain(
+        "QC stopped after its retry could not produce an applicable result",
+      );
+      const seed = await pg.query<{ id: string; status: string }>(
+        `SELECT version.id, version.status
+           FROM work_plan_versions version
+           JOIN conversation_plan_reviews review ON review.plan_version_id = version.id
+          WHERE review.id=$1`,
+        [sent.reviewId],
+      );
+      expect(seed.rows[0]?.status).toBe("candidate");
+      expect(await recoveryTargets(sent)).toEqual({
+        retry_qc: seed.rows[0]?.id,
+        skip_qc: seed.rows[0]?.id,
+        reject: seed.rows[0]?.id,
+      });
+    });
+
+    it("carries the salvaged plan all the way to an approved plan", async () => {
+      const { sent, leaseToken, revised } = await failAfterCompletedRound("salvage-approve");
+      await workflow.failReviewOnly(
+        sent.planningRunId,
+        new AdapterError("network", "reviewer never answered"),
+        leaseToken,
+      );
+      const salvaged = await salvagedVersion(sent.reviewId);
+
+      // "Keep this plan" waives the remaining QC on the salvage, which is the
+      // route that satisfies approve_plan's converged-review precondition.
+      await workflow.continueWithoutQc(owner.id, sent.scope, sent.reviewId, "salvage-waiver");
+      const afterWaiver = await workflow.detail(
+        owner.id,
+        projectId,
+        sent.work_item.id,
+        sent.conversation.id,
+      );
+      const approve = afterWaiver.actions.find(
+        (action) => action.action_type === "approve_plan" && action.status === "proposed",
+      );
+      if (!approve) throw new Error("waiving QC on the salvage must propose an approval");
+      expect(approve.payload.parameters.plan_version_id).toBe(salvaged.salvaged_plan_version_id);
+
+      await workflow.confirm(owner.id, {
+        project_id: projectId,
+        work_item_id: sent.work_item.id,
+        conversation_id: sent.conversation.id,
+        action_id: approve.id,
+        idempotency_key: "salvage-approve-confirm",
+      });
+      const approved = await pg.query<{ status: string; plan: unknown }>(
+        "SELECT status, plan FROM work_plan_versions WHERE id=$1",
+        [salvaged.salvaged_plan_version_id ?? ""],
+      );
+      expect(approved.rows[0]?.status).toBe("approved");
+      expect(V2WorkPlanContract.parse(approved.rows[0]?.plan)).toEqual(revised);
+      const item = await pg.query<{ approved_plan_version_id: string | null }>(
+        "SELECT approved_plan_version_id FROM work_items WHERE id=$1",
+        [sent.work_item.id],
+      );
+      expect(item.rows[0]?.approved_plan_version_id).toBe(salvaged.salvaged_plan_version_id);
+    });
+
+    it("salvages nothing when the checkpointed plan fails strict validation", async () => {
+      const { sent, leaseToken } = await failAfterCompletedRound("salvage-invalid");
+      await pg.query(
+        `UPDATE conversation_plan_reviews
+            SET execution_checkpoint = jsonb_set(execution_checkpoint, '{current_plan}', '{"plan":{}}'::jsonb)
+          WHERE id=$1`,
+        [sent.reviewId],
+      );
+      await workflow.failReviewOnly(
+        sent.planningRunId,
+        new AdapterError("network", "reviewer never answered"),
+        leaseToken,
+      );
+      expect((await reviewRow(sent.reviewId)).status).toBe("failed");
+      expect((await salvagedVersion(sent.reviewId)).salvaged_plan_version_id).toBeNull();
+    });
+  });
 });

@@ -239,6 +239,7 @@ interface ReviewRow {
   revised_plan: unknown | null;
   revised_plan_content_hash: string | null;
   revised_plan_version_id: string | null;
+  salvaged_plan_version_id: string | null;
   paused_checkpoint: V2ConversationPlanReviewT["paused_checkpoint"];
   paused_at_round: number | string | null;
   resume_idempotency_key: string | null;
@@ -331,7 +332,8 @@ const reviewColumns = `schema_version, id, project_id, work_item_id, conversatio
   usage_request_group_id,
   plan_content_hash, result_plan_content_hash, context_receipt, context_manifest,
   context_hash, findings, finding_decisions, dispositions, revised_plan, revised_plan_content_hash,
-  revised_plan_version_id, paused_checkpoint, paused_at_round, resume_idempotency_key,
+  revised_plan_version_id, salvaged_plan_version_id,
+  paused_checkpoint, paused_at_round, resume_idempotency_key,
   qc_mode, qc_mode_source, qc_mode_changed_at_round, qc_mode_changed_by_user_id,
   allow_unadjudicated_rebuttals, human_steered_rounds,
   adjudications, forced_accept_module_ids, adjudication_idempotency_key,
@@ -480,6 +482,7 @@ function toReview(row: ReviewRow): V2ConversationPlanReviewT {
     finding_decisions: decisions,
     dispositions: json(row.dispositions),
     revised_plan_version_id: row.revised_plan_version_id,
+    salvaged_plan_version_id: row.salvaged_plan_version_id,
     paused_checkpoint: row.paused_checkpoint,
     paused_at_round: row.paused_at_round === null ? null : Number(row.paused_at_round),
     started_at: nullableIso(row.started_at),
@@ -1825,8 +1828,19 @@ export class ConversationPlanWorkflowService {
       // pause point — the interim revision if the PM already revised it, the
       // original seed otherwise — never silently reverting to the seed out
       // from under a revision the human hasn't seen discarded.
-      const targetVersionId = review.revised_plan_version_id ?? review.plan_version_id;
-      const targetContentHash = review.result_plan_content_hash;
+      // A failed review keeps its last good plan on salvaged_plan_version_id
+      // (the DB reserves revised_plan* for an approvable QC result), and that
+      // salvage is the work item's latest version — so waiving QC here must
+      // accept it, not silently revert to the seed. Its hash comes off the
+      // version itself: result_plan_content_hash stays pinned to the seed on a
+      // failed review.
+      const salvaged =
+        review.status === "failed" && review.salvaged_plan_version_id !== null
+          ? await this.planById(tx, review.salvaged_plan_version_id, false)
+          : null;
+      const targetVersionId =
+        salvaged?.id ?? review.revised_plan_version_id ?? review.plan_version_id;
+      const targetContentHash = salvaged?.content_hash ?? review.result_plan_content_hash;
       // Gate A ("after_review") parks before the PM ever revises, so there is
       // no revised_plan_version_id and the target above falls back to the
       // seed version — whose status pauseReviewOnly left at 'in_qc' (only
@@ -2161,6 +2175,12 @@ export class ConversationPlanWorkflowService {
       if (!(await this.ownsReviewLease(tx, planningRunId, leaseToken))) return;
       const code = errorCode(error);
       const now = this.now().toISOString();
+      // Salvage before anything is cleared: a round that completed durably
+      // already parked its plan in execution_checkpoint.current_plan (see
+      // recordReviewOnlyCheckpoint). Discarding it here is what dead-ends the
+      // human — most production QC failures are orphaned server restarts that
+      // say nothing about the plan's quality.
+      const salvage = await this.salvageFailedReviewPlan(tx, review);
       await tx.query(
         `UPDATE planning_runs
             SET status='failed', error=$2, live_progress=NULL,
@@ -2181,9 +2201,10 @@ export class ConversationPlanWorkflowService {
                 execution_checkpoint=NULL,
                 findings='[]'::jsonb, dispositions='[]'::jsonb,
                 revised_plan=NULL, revised_plan_content_hash=NULL, revised_plan_version_id=NULL,
+                salvaged_plan_version_id=$4,
                 result_plan_content_hash=plan_content_hash
           WHERE id=$1 AND status IN ('queued','running','awaiting_human')`,
-        [review.id, code, now],
+        [review.id, code, now, salvage?.version.id ?? null],
       );
       const action = await this.actionById(tx, review.action_id, true);
       if (["sent", "agent_acknowledged"].includes(action.status)) {
@@ -2205,19 +2226,27 @@ export class ConversationPlanWorkflowService {
           WHERE project_id=$1 AND id=$2 AND status='in_qc'`,
         [review.project_id, review.work_item_id, now],
       );
+      // Every follow-up must name the work item's latest version — confirm()
+      // binds proposals through boundLatestPlan — so once a salvage is
+      // materialized the recovery choices operate on it, not on the seed.
+      const target = salvage
+        ? { id: salvage.version.id, hash: salvage.version.content_hash }
+        : { id: review.plan_version_id, hash: review.plan_content_hash };
       await this.appendVisibleMessage(
         tx,
         review,
         review.initiated_by_user_id,
-        "QC stopped after its retry could not produce an applicable result. Every response and Markdown artifact produced so far remains available in the review record. Choose whether to retry QC, continue without QC, or reject the plan.",
-        review.plan_version_id,
+        salvage
+          ? `QC failed in round ${salvage.failedRound} (${code}), but round ${salvage.salvagedRound}'s reviewed plan survived and is saved as Plan v${salvage.version.version}. Every response and Markdown artifact produced so far remains available in the review record. Keep this plan without further QC, send it back through QC, or reject it.`
+          : "QC stopped after its retry could not produce an applicable result. Every response and Markdown artifact produced so far remains available in the review record. Choose whether to retry QC, continue without QC, or reject the plan.",
+        target.id,
         review.action_id,
         [
           {
             action_type: "send_plan_to_qc",
             parameters: {
-              plan_version_id: review.plan_version_id,
-              content_hash: review.plan_content_hash,
+              plan_version_id: target.id,
+              content_hash: target.hash,
               review: {
                 mode: "qc",
                 reviewer: {
@@ -2231,22 +2260,79 @@ export class ConversationPlanWorkflowService {
           {
             action_type: "send_plan_to_qc",
             parameters: {
-              plan_version_id: review.plan_version_id,
-              content_hash: review.plan_content_hash,
+              plan_version_id: target.id,
+              content_hash: target.hash,
               review: { mode: "skip_qc" },
             },
           },
           {
             action_type: "reject_plan",
             parameters: {
-              plan_version_id: review.plan_version_id,
-              content_hash: review.plan_content_hash,
+              plan_version_id: target.id,
+              content_hash: target.hash,
               reason: null,
             },
           },
         ],
       );
     });
+  }
+
+  /**
+   * The last good plan a dying review already checkpointed, materialized as a
+   * candidate version so a failure offers a way forward instead of a dead end.
+   *
+   * Returns null when nothing was salvageable: no durable checkpoint, or a
+   * checkpoint whose plan is still byte-identical to the seed (no round ever
+   * changed anything), or a checkpoint that fails strict contract validation —
+   * an unvalidated plan is never persisted, and a malformed one must not turn
+   * the last-resort failure path into a throw.
+   */
+  private async salvageFailedReviewPlan(
+    tx: V2SqlExecutor,
+    review: ReviewRow,
+  ): Promise<{
+    version: V2WorkPlanVersionT;
+    salvagedRound: number;
+    failedRound: number;
+  } | null> {
+    if (review.execution_checkpoint === null) return null;
+    let checkpoint: V2ReviewExecutionCheckpointT;
+    let plan: V2WorkPlanContractT;
+    try {
+      checkpoint = V2ReviewExecutionCheckpoint.parse(json(review.execution_checkpoint));
+      plan = V2WorkPlanContract.parse(checkpoint.current_plan);
+    } catch {
+      return null;
+    }
+    const hash = canonicalSha256(plan);
+    if (hash === review.plan_content_hash) return null;
+    const salvagedRound = Number(checkpoint.round);
+    // A "review" checkpoint means the reviewer finished reading the plan the
+    // PM handed it, so the run died inside that same round's revision; a
+    // "revision" checkpoint means the round completed and the next one died.
+    const failedRound = salvagedRound + (checkpoint.completed_step === "revision" ? 1 : 0);
+    const priorVersion =
+      (await this.latestPlan(tx, review.project_id, review.work_item_id, true)) ??
+      (await this.planById(tx, review.plan_version_id, true));
+    // A park earlier in this same review may already have materialized this
+    // exact plan (pauseReviewOnly's interim) — reuse it rather than inserting
+    // a duplicate version with identical content.
+    if (priorVersion.content_hash === hash && priorVersion.id !== review.plan_version_id) {
+      return { version: priorVersion, salvagedRound, failedRound };
+    }
+    const version = await this.insertPlanVersion(
+      tx,
+      review.project_id,
+      review.work_item_id,
+      review.conversation_id,
+      review.initiated_by_user_id,
+      review.action_id,
+      plan,
+      priorVersion,
+      "qc_interim",
+    );
+    return { version, salvagedRound, failedRound };
   }
 
   private async confirmInTransaction(

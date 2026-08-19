@@ -1378,6 +1378,9 @@ export function QcWorkspace({
   const stageTitle = isPlanReview
     ? "Final plan decision"
     : `Round ${terminal ? review.rounds_completed : round} of ${review.max_rounds}`;
+  // A failed review that checkpointed a completed round keeps that plan as a
+  // real, approvable candidate version instead of discarding it.
+  const salvaged = review.status === "failed" && review.salvaged_plan_version_id != null;
   const stageDetail =
     waitingOnHuman && review.paused_checkpoint === "after_review"
       ? `Reviewer pass complete. ${currentFindings.length} finding${currentFindings.length === 1 ? " is" : "s are"} waiting for your decision before the PM can revise anything.`
@@ -1390,7 +1393,9 @@ export function QcWorkspace({
             : review.status === "cap_reached"
               ? "QC used the available rounds. Review the record and decide whether to proceed."
               : review.status === "failed"
-                ? "The plan is unchanged. Choose a recovery path without leaving QC."
+                ? salvaged
+                  ? "QC did not finish, but the reviewed plan it had already produced was kept. Choose how to proceed."
+                  : "The plan is unchanged. Choose a recovery path without leaving QC."
                 : review.status === "cancelled"
                   ? "The review was stopped. The plan remains unchanged."
                   : pmOwnsReviewStep(review)
@@ -1495,14 +1500,18 @@ export function QcWorkspace({
               </h2>
               <p>
                 {review.status === "failed"
-                  ? "The plan is unchanged. A fresh QC attempt will use the new finding-triage flow before the PM revises it."
+                  ? salvaged
+                    ? `QC stopped before it finished, but the plan it had already revised survived as version ${planVersion?.version ?? "the latest"}. Keep it as-is, send it back through QC, or return it to the PM.`
+                    : "The plan is unchanged. A fresh QC attempt will use the new finding-triage flow before the PM revises it."
                   : reviewRecordSummary(review, findings)}
               </p>
             </div>
-            {["converged", "cap_reached"].includes(review.status) ? (
+            {["converged", "cap_reached"].includes(review.status) || salvaged ? (
               <QcPlanVersion
                 planVersion={planVersion}
-                heading="Review the exact plan for approval"
+                heading={
+                  salvaged ? "Review the plan QC produced" : "Review the exact plan for approval"
+                }
               />
             ) : null}
             <div className="qc-new-outcome-actions">
@@ -1519,7 +1528,7 @@ export function QcWorkspace({
               ) : null}
               {actions.repeat ? (
                 <Button
-                  variant={review.status === "failed" ? "primary" : undefined}
+                  variant={review.status === "failed" && !salvaged ? "primary" : undefined}
                   disabled={busy}
                   onClick={() => {
                     if (actions.repeat) {
@@ -1531,8 +1540,12 @@ export function QcWorkspace({
                 </Button>
               ) : null}
               {review.status === "failed" ? (
-                <Button disabled={busy} onClick={() => void onContinueWithoutQc(review)}>
-                  Keep plan without QC
+                <Button
+                  variant={salvaged ? "primary" : undefined}
+                  disabled={busy}
+                  onClick={() => void onContinueWithoutQc(review)}
+                >
+                  {salvaged ? "Keep this plan" : "Keep plan without QC"}
                 </Button>
               ) : null}
               {actions.approve && ["converged", "cap_reached"].includes(review.status) ? (

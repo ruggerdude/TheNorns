@@ -4,6 +4,7 @@ import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import {
   HELD_EXECUTION_KICKOFF_MIGRATION_NAME,
   PROJECT_DESTROY_MIGRATION_NAME,
+  QC_SALVAGED_PLAN_MIGRATION_NAME,
   QC_TERMINAL_FOLLOWUP_CHAT_MIGRATION_NAME,
   SONNET_CACHE_PRICING_CORRECTION_MIGRATION_NAME,
   type V2MigrationDatabase,
@@ -40,11 +41,12 @@ describe.sequential("permanent project deletion", () => {
 
   it("registers held execution kickoff and terminal QC chat after project deletion", async () => {
     const names = (await currentV2MigrationSources()).map(({ name }) => name);
-    expect(names.slice(-4)).toEqual([
+    expect(names.slice(-5)).toEqual([
       PROJECT_DESTROY_MIGRATION_NAME,
       HELD_EXECUTION_KICKOFF_MIGRATION_NAME,
       QC_TERMINAL_FOLLOWUP_CHAT_MIGRATION_NAME,
       SONNET_CACHE_PRICING_CORRECTION_MIGRATION_NAME,
+      QC_SALVAGED_PLAN_MIGRATION_NAME,
     ]);
   });
 

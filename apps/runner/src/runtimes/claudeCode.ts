@@ -513,6 +513,22 @@ export class ClaudeCodeRuntime implements CodingRuntime {
           ...(observedStopReason !== undefined ? { stopReason: observedStopReason } : {}),
         };
       }
+      // Claude Code stores sessions per project directory, and every attempt
+      // runs in a fresh worktree — so a resumed session id from a prior
+      // attempt is routinely gone and, without this, every retry fails with
+      // "No conversation found with session ID". Same recovery the Codex
+      // runtime already has: fall back to a fresh session once.
+      if (
+        failed &&
+        this.options.resumeSessionId !== undefined &&
+        /no conversation found with session id/i.test(resultDetail)
+      ) {
+        request.onLog?.(
+          "The saved Claude Code session is no longer available on this computer. Starting a fresh session with the full approved task context.",
+        );
+        const { resumeSessionId: _stale, ...fresh } = this.options;
+        return new ClaudeCodeRuntime(fresh).run(request);
+      }
       return {
         outcome: failed ? "failed" : "completed",
         detail: resultDetail,
