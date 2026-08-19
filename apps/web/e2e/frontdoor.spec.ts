@@ -656,6 +656,29 @@ test("GitHub front door creates and immediately enters the project", async ({ pa
   await expectNewWorkEntry(page);
 });
 
+test("theme toggle hover does not reflow the desktop menu", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await prepare(page, "github");
+  await page.goto("/");
+
+  const toggle = page.getByRole("button", { name: /switch to dark mode/i });
+  const headerActions = page.locator(".global-top-menu > .header-actions");
+  await expect(toggle).toBeVisible();
+  await page.evaluate(() => document.fonts.ready);
+
+  const toggleBefore = await toggle.boundingBox();
+  const actionsBefore = await headerActions.boundingBox();
+  await toggle.hover();
+  await page.waitForTimeout(200);
+  const toggleAfter = await toggle.boundingBox();
+  const actionsAfter = await headerActions.boundingBox();
+
+  expect(toggleBefore).not.toBeNull();
+  expect(actionsBefore).not.toBeNull();
+  expect(toggleAfter).toEqual(toggleBefore);
+  expect(actionsAfter).toEqual(actionsBefore);
+});
+
 test("New-work actions remain reachable across viewport layouts", async ({ page }) => {
   await page.setViewportSize({ width: 2048, height: 1152 });
   await prepare(page, "github");

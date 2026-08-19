@@ -7890,7 +7890,7 @@ h4 {
   .topbar .theme-toggle,
   .topbar .theme-toggle:hover:not(:disabled) {
     width: 44px;
-    margin-left: 0.35rem;
+    margin-left: 0;
     border-color: transparent;
     color: #fff;
     background: transparent;
