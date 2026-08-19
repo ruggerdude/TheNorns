@@ -1064,7 +1064,9 @@ test("Workspace uses a compact top menu and one phase-chat sidebar", async ({ pa
   expect(Math.abs((phaseChatsBox?.y ?? 0) - (conversationChromeBox?.y ?? 0))).toBeLessThanOrEqual(
     1,
   );
-  expect(conversationChromeBox?.x ?? 0).toBeGreaterThanOrEqual(
+  // The title bar no longer reserves an indented column; only its compact
+  // options control remains, and that control must stay clear of the chat rail.
+  expect(optionsButtonBox?.x ?? 0).toBeGreaterThanOrEqual(
     (phaseChatsBox?.x ?? 0) + (phaseChatsBox?.width ?? 0) - 1,
   );
   const defineChatButton = phaseChats.getByRole("button", { name: "Define", exact: true });

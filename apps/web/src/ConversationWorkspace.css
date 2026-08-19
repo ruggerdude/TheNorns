@@ -6153,6 +6153,7 @@
 
 .conversation-thread-chrome {
   position: absolute;
+  z-index: 13;
   inset: 0 0 auto;
   display: block;
   min-height: 0;
@@ -6194,6 +6195,14 @@
 
 @media (min-width: 901px) {
   .conversation-stage-sidebar {
-    top: 0.5rem;
+    top: 4rem;
+  }
+}
+
+@media (max-width: 900px) {
+  .conversation-stage-sidebar {
+    /* Leave the compact header action clear instead of letting a phase tab
+       paint over it and intercept taps. */
+    padding-right: 3.75rem;
   }
 }
