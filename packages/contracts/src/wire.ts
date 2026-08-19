@@ -12,7 +12,10 @@ const opaqueId = z
   .string()
   .min(1)
   .max(200)
-  .regex(/^[A-Za-z0-9._:-]+$/);
+  // Nested orchestration IDs are percent-encoded before they become wire IDs.
+  // Accept only complete percent escapes so the handle remains bounded and
+  // cannot contain path separators or control characters.
+  .regex(/^(?:[A-Za-z0-9._:-]|%[0-9A-Fa-f]{2})+$/);
 const safeDisplayLabel = z
   .string()
   .min(1)

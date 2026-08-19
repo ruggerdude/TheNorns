@@ -141,6 +141,50 @@ describe("runner workspace wire", () => {
     ).toBe(true);
   });
 
+  it("accepts percent-encoded orchestration IDs in cancellation frames", () => {
+    const encodedRunId = "run:work%3Aphase%253Afoundation%3Atask-foundation:2";
+    expect(
+      ServerFrame.safeParse({
+        type: "device_cancellation_request",
+        device_id: "device-1",
+        credential_id: "credential-1",
+        generation: 1,
+        run_id: encodedRunId,
+        cause: "project_stop",
+        requested_at: "2026-08-18T20:37:00.000Z",
+        publication_fenced: true,
+      }).success,
+    ).toBe(true);
+    expect(
+      RunnerFrame.safeParse({
+        type: "device_cancellation_evidence",
+        device_id: "device-1",
+        credential_id: "credential-1",
+        generation: 1,
+        run_id: encodedRunId,
+        evidence_state: "runner_acknowledged",
+        acknowledged_at: "2026-08-18T20:37:01.000Z",
+        process_exited_at: null,
+        process_tree_reaped: false,
+        transcript_signature: "base64-signature",
+      }).success,
+    ).toBe(true);
+    expect(
+      ServerFrame.safeParse({
+        type: "device_cancellation_evidence_ack",
+        run_id: encodedRunId,
+        evidence_state: "runner_acknowledged",
+      }).success,
+    ).toBe(true);
+    expect(
+      ServerFrame.safeParse({
+        type: "device_cancellation_evidence_ack",
+        run_id: "run:malformed%escape",
+        evidence_state: "runner_acknowledged",
+      }).success,
+    ).toBe(false);
+  });
+
   it("accepts opaque browse handles and the matching response payload", () => {
     expect(
       RunnerWorkspaceRequest.safeParse({

@@ -169,6 +169,7 @@ test("device cancellation evidence survives response loss and replays in state o
     credential_id: "credential-1",
     generation: 7,
   };
+  const runId = "run:work%3Aphase%253Afoundation%3Atask-foundation:2";
   let resolveStop;
   const stopped = new Promise((resolve) => {
     resolveStop = resolve;
@@ -201,7 +202,7 @@ test("device cancellation evidence survives response loss and replays in state o
       JSON.stringify({
         type: "device_cancellation_request",
         ...identity,
-        run_id: "run-1",
+        run_id: runId,
         cause: "project_stop",
         requested_at: "2026-07-30T12:00:00.000Z",
         publication_fenced: false,
@@ -248,7 +249,7 @@ test("device cancellation evidence survives response loss and replays in state o
     second.socket.send(
       JSON.stringify({
         type: "device_cancellation_evidence_ack",
-        run_id: "run-1",
+        run_id: runId,
         evidence_state: "runner_acknowledged",
       }),
     );
@@ -286,7 +287,7 @@ test("device cancellation evidence survives response loss and replays in state o
     third.socket.send(
       JSON.stringify({
         type: "device_cancellation_evidence_ack",
-        run_id: "run-1",
+        run_id: runId,
         evidence_state: "process_exited",
       }),
     );

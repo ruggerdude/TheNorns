@@ -55,7 +55,7 @@ function validOpaqueId(value: unknown): value is string {
     typeof value === "string" &&
     value.length > 0 &&
     value.length <= 200 &&
-    /^[A-Za-z0-9._:-]+$/.test(value)
+    /^(?:[A-Za-z0-9._:-]|%[0-9A-Fa-f]{2})+$/.test(value)
   );
 }
 
