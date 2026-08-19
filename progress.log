@@ -140,3 +140,4 @@
 2026-08-19T04:23Z | EXEC-CANCEL-1 | Server finalizes cancelled never-started runs on runner acknowledgement; live StrumSheetV01 deadlock unstuck via agent evidence journal
 2026-08-19T04:44Z | EXEC-CANCEL-1 | Cancelled runs are now recoverable: task cascade on runner evidence, retry gate accepts cancelled, web panel gates on state; live task unblocked
 2026-08-19T05:09Z | EXEC-CANCEL-1 | Drainer refusals now logged; retry re-kicks ready tasks; retry detail surfaced in UI
+2026-08-19T05:35Z | EXEC-CANCEL-1 | Drainer/startPhase now supersedes terminal designated runs; unique-index violation fixed

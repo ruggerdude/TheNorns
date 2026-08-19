@@ -530,6 +530,45 @@ describe.sequential("EXECUTION E12 — concurrent tasks within one phase", () =>
     ]);
   }, 60_000);
 
+  it("supersedes a terminal designated run when re-dispatching a ready task, instead of violating one-designated-per-task", async () => {
+    await seed({ cap: 1, taskCount: 1 });
+    const launch = service();
+    const firstRun = (await start(launch)).scheduled[0]?.run_id;
+    if (!firstRun) throw new Error("expected a scheduled run");
+    await markRunning(firstRun);
+    await runnerEvent({ kind: "run_status", run_id: firstRun, status: "cancelled" });
+    expect((await runStates())[firstRun]).toBe("cancelled");
+
+    // A recovery retry prepared the task back to `ready` but its launch step
+    // was refused (runner offline). The task stays designated to the
+    // terminal run — the state the drainer then finds every 5 seconds.
+    await pg.query("UPDATE tasks SET state='ready' WHERE id=$1", [taskId(1)]);
+
+    const drainer = new PhaseQueueDrainer(transactions, launch, {
+      now: () => new Date("2026-07-21T15:00:00.000Z"),
+    });
+    const drained = await drainer.drain();
+    expect(drained).toHaveLength(1);
+    expect(drained[0]?.dispatched).toHaveLength(1);
+    expect(drained[0]?.not_dispatched).toEqual([]);
+
+    const runs = await pg.query<{
+      id: string;
+      state: string;
+      is_designated: boolean;
+      superseded_at: string | null;
+    }>("SELECT id, state, is_designated, superseded_at FROM agent_runs ORDER BY attempt");
+    expect(runs.rows).toHaveLength(2);
+    expect(runs.rows[0]).toMatchObject({ id: firstRun, is_designated: false });
+    expect(runs.rows[0]?.superseded_at).not.toBeNull();
+    expect(runs.rows[1]).toMatchObject({ state: "created", is_designated: true });
+    const task = await pg.query<{ designated_run_id: string }>(
+      "SELECT designated_run_id FROM tasks WHERE id=$1",
+      [taskId(1)],
+    );
+    expect(task.rows[0]?.designated_run_id).toBe(runs.rows[1]?.id);
+  }, 60_000);
+
   it("never exceeds the cap even when the launcher is invoked repeatedly", async () => {
     await seed({ cap: 2, taskCount: 5 });
     const launch = service();

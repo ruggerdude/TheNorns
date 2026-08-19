@@ -78,7 +78,12 @@ export interface PhaseConcurrencySnapshot {
 export const SCHEDULABLE_TASKS_SQL = `
   SELECT t.id AS task_id, t.title AS task_title,
          t.designated_assignment_id AS assignment_id,
-         a.budget_limit_usd AS budget_limit_usd
+         a.budget_limit_usd AS budget_limit_usd,
+         (SELECT run.id FROM agent_runs run
+           WHERE run.task_id = t.id AND run.is_designated = true
+             AND run.superseded_at IS NULL
+             AND run.state IN ('failed','expired','cancelled')
+           LIMIT 1) AS designated_terminal_run_id
     FROM tasks t
     JOIN agent_assignments a ON a.id = t.designated_assignment_id
    WHERE t.project_id = $1 AND t.phase_id = $2

@@ -154,6 +154,10 @@ interface SchedulableTaskRow {
   task_title: string;
   assignment_id: string;
   budget_limit_usd: string | number;
+  /** Current designated run when it is terminal-unsuccessful; scheduling this
+   *  task MUST supersede it or the one-designated-run-per-task unique index
+   *  refuses the insert (the drainer hit exactly that, silently, forever). */
+  designated_terminal_run_id: string | null;
 }
 
 function numeric(value: string | number): number {
@@ -482,7 +486,11 @@ export class PhaseLaunchService {
         max_duration_seconds: this.policy.maxDurationSeconds,
         issued_at: input.issued_at,
         expires_at: expiresAt,
-        ...(input.retry ? { supersedes_run_id: input.retry.failed_run_id } : {}),
+        ...(input.retry
+          ? { supersedes_run_id: input.retry.failed_run_id }
+          : task.designated_terminal_run_id
+            ? { supersedes_run_id: task.designated_terminal_run_id }
+            : {}),
       };
 
       try {
