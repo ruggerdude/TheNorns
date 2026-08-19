@@ -147,6 +147,7 @@ import {
  */
 const PHASE_QUEUE_DRAIN_INTERVAL_MS = 5_000;
 const PHASE_REVIEW_AUTO_COMPLETE_INTERVAL_MS = 5_000;
+const BUILD_FAILURE_EMAIL_INTERVAL_MS = 5_000;
 const CONTEXT_FETCH_TRANSACTION_ATTEMPTS = 3;
 
 function isPostgresDeadlock(error: unknown): boolean {
@@ -235,7 +236,7 @@ import type {
   AuthenticatedDeviceWssIdentity,
   DeviceWssAuthenticator,
 } from "./devices/wssAuthentication.js";
-import { EmailNotConfiguredError, sendEmail } from "./email/resend.js";
+import { EmailNotConfiguredError, type SendEmailInput, sendEmail } from "./email/resend.js";
 // EXECUTION E1: task-context assembly + the runner-facing context fetch route.
 import {
   DEVICE_HTTP_DEVICE_ID_HEADER,
@@ -274,6 +275,11 @@ import {
   runnerTarballPath,
 } from "./integrations/runnerDistribution.js";
 import { type KnowledgeSystemService, registerKnowledgeRoutes } from "./knowledge/index.js";
+import {
+  BuildFailureEmailPreferenceNotFoundError,
+  BuildFailureEmailPreferences,
+  BuildFailureEmailWorker,
+} from "./notifications/buildFailureEmail.js";
 import type { Phase7OperationsService } from "./operations/phase7Operations.js";
 import { SqlAiUsageTelemetryRepository } from "./persistence/v2/aiUsageTelemetry.js";
 import type { V2TransactionRunner } from "./persistence/v2/database.js";
@@ -736,6 +742,11 @@ export interface ServerOptions {
   secureCookies?: boolean;
   /** Canonical browser origin used in emailed links. */
   publicOrigin?: string;
+  /** Test seam for build-failure email availability and delivery. */
+  buildFailureEmail?: {
+    configured: boolean;
+    send?: (input: SendEmailInput) => Promise<void>;
+  };
   /** Absolute repository scripts directory used for the fixed helper installers. */
   installScriptsDir?: string;
 }
@@ -1178,6 +1189,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   // is constructed, so the onClose hook can clear it alongside its siblings.
   let phaseQueueDrainTimer: ReturnType<typeof setInterval> | undefined;
   let phaseReviewAutoCompleteTimer: ReturnType<typeof setInterval> | undefined;
+  let buildFailureEmailTimer: ReturnType<typeof setInterval> | undefined;
   let conversationTurns: ConversationTurnService | null = null;
   let conversationService: ConversationService | null = null;
   let conversationContextAssembler: ConversationContextAssembler | null = null;
@@ -1465,6 +1477,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
     if (conversationPmUpdateTimer) clearInterval(conversationPmUpdateTimer);
     if (phaseQueueDrainTimer) clearInterval(phaseQueueDrainTimer);
     if (phaseReviewAutoCompleteTimer) clearInterval(phaseReviewAutoCompleteTimer);
+    if (buildFailureEmailTimer) clearInterval(buildFailureEmailTimer);
     if (usageBudgetEvaluationTimer) clearInterval(usageBudgetEvaluationTimer);
     if (conversationKickoffTimer) clearInterval(conversationKickoffTimer);
     if (planningWorkerTimer) clearInterval(planningWorkerTimer);
@@ -1999,6 +2012,85 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       service: projectAccess,
       requireIdentity: requireSessionUser,
     });
+
+    const buildFailureEmailConfigured =
+      options.buildFailureEmail?.configured ?? Boolean(process.env.RESEND_API_KEY?.trim());
+    const buildFailureEmailPreferences = new BuildFailureEmailPreferences(
+      runtimeTransactionsForInference,
+      buildFailureEmailConfigured,
+    );
+    const BuildFailureEmailPreferenceBody = z.object({ enabled: z.boolean() }).strict();
+    const sendBuildFailureEmailPreferenceError = (reply: FastifyReply, error: unknown): void => {
+      if (error instanceof BuildFailureEmailPreferenceNotFoundError) {
+        reply.code(404).send({ error: "not_found" });
+        return;
+      }
+      throw error;
+    };
+    app.get("/api/v2/projects/:projectId/build-failure-email", async (request, reply) => {
+      const user = await requireSessionUser(request, reply);
+      if (!user) return;
+      const { projectId } = request.params as { projectId: string };
+      try {
+        reply
+          .header("Cache-Control", "no-store")
+          .send(await buildFailureEmailPreferences.get(projectId, user.id));
+      } catch (error) {
+        sendBuildFailureEmailPreferenceError(reply, error);
+      }
+    });
+    app.patch("/api/v2/projects/:projectId/build-failure-email", async (request, reply) => {
+      const user = await requireSessionUser(request, reply);
+      if (!user) return;
+      const body = BuildFailureEmailPreferenceBody.safeParse(request.body);
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      if (body.data.enabled && !buildFailureEmailConfigured) {
+        return reply.code(409).send({
+          error: "email_not_configured",
+          message: "Email delivery has not been configured for this deployment.",
+        });
+      }
+      const { projectId } = request.params as { projectId: string };
+      try {
+        const preference = await buildFailureEmailPreferences.set(
+          projectId,
+          user.id,
+          body.data.enabled,
+        );
+        stores.audit(
+          user.email,
+          body.data.enabled
+            ? "project.build_failure_email_enabled"
+            : "project.build_failure_email_disabled",
+          projectId,
+          now(),
+        );
+        reply.header("Cache-Control", "no-store").send(preference);
+      } catch (error) {
+        sendBuildFailureEmailPreferenceError(reply, error);
+      }
+    });
+
+    if (buildFailureEmailConfigured) {
+      const buildFailureEmailWorker = new BuildFailureEmailWorker(runtimeTransactionsForInference, {
+        send: options.buildFailureEmail?.send ?? sendEmail,
+        publicOrigin: configuredOrigin ?? "http://127.0.0.1:5173",
+      });
+      let buildFailureEmailTicking = false;
+      const tickBuildFailureEmail = (): void => {
+        if (buildFailureEmailTicking) return;
+        buildFailureEmailTicking = true;
+        void buildFailureEmailWorker
+          .tick()
+          .catch((error) => app.log.error({ err: error }, "build failure email tick failed"))
+          .finally(() => {
+            buildFailureEmailTicking = false;
+          });
+      };
+      buildFailureEmailTimer = setInterval(tickBuildFailureEmail, BUILD_FAILURE_EMAIL_INTERVAL_MS);
+      buildFailureEmailTimer.unref();
+      tickBuildFailureEmail();
+    }
 
     const usageIntelligence = new UsageIntelligenceService(runtimeTransactionsForInference);
     registerUsageIntelligenceRoutes(app, {

@@ -7370,6 +7370,58 @@ export const conversationPmUpdateCursors = pgTable(
   ],
 );
 
+export const buildFailureEmailSubscriptions = pgTable(
+  "build_failure_email_subscriptions",
+  {
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "cascade" }),
+    enabled: boolean("enabled").notNull().default(false),
+    enabledAt: timestamp("enabled_at", { withTimezone: true, mode: "string" }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.projectId, table.userId] }),
+    index("build_failure_email_subscriptions_enabled_idx")
+      .on(table.projectId, table.userId)
+      .where(sql`${table.enabled}`),
+  ],
+);
+
+export const buildFailureEmailDeliveries = pgTable(
+  "build_failure_email_deliveries",
+  {
+    runId: text("run_id")
+      .notNull()
+      .references(() => agentRuns.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => phase2Users.id, { onDelete: "cascade" }),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    status: text("status").notNull().default("pending"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true, mode: "string" })
+      .notNull()
+      .defaultNow(),
+    sentAt: timestamp("sent_at", { withTimezone: true, mode: "string" }),
+    lastError: text("last_error"),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.runId, table.userId] }),
+    index("build_failure_email_deliveries_ready_idx")
+      .on(table.nextAttemptAt, table.createdAt)
+      .where(sql`${table.status} IN ('pending', 'failed')`),
+  ],
+);
+
 export const conversationDomainSchema = {
   workItems,
   workConversations,
@@ -7467,6 +7519,8 @@ export const phase2PreservationSchema = {
   aiUsageEvents,
   usageBudgetPolicies,
   usageBudgetThresholdNotifications,
+  buildFailureEmailSubscriptions,
+  buildFailureEmailDeliveries,
   aiProviderUsagePlans,
   aiUsageCalibrationObservations,
   globalRuleSettings,

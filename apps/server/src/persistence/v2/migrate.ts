@@ -548,6 +548,12 @@ export const DEVELOPMENT_PAUSE_POINTS_MIGRATION_URL = new URL(
   "../../../drizzle/0086_development_pause_points.sql",
   import.meta.url,
 );
+export const BUILD_FAILURE_EMAIL_NOTIFICATIONS_MIGRATION_NAME =
+  "0087_build_failure_email_notifications";
+export const BUILD_FAILURE_EMAIL_NOTIFICATIONS_MIGRATION_URL = new URL(
+  "../../../drizzle/0087_build_failure_email_notifications.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -923,6 +929,10 @@ export async function loadQcSalvagedPlanMigrationSql(): Promise<string> {
 
 export async function loadDevelopmentPausePointsMigrationSql(): Promise<string> {
   return readFile(DEVELOPMENT_PAUSE_POINTS_MIGRATION_URL, "utf8");
+}
+
+export async function loadBuildFailureEmailNotificationsMigrationSql(): Promise<string> {
+  return readFile(BUILD_FAILURE_EMAIL_NOTIFICATIONS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1440,6 +1450,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: DEVELOPMENT_PAUSE_POINTS_MIGRATION_NAME,
       sql: await loadDevelopmentPausePointsMigrationSql(),
+    },
+    {
+      name: BUILD_FAILURE_EMAIL_NOTIFICATIONS_MIGRATION_NAME,
+      sql: await loadBuildFailureEmailNotificationsMigrationSql(),
     },
   ];
 }

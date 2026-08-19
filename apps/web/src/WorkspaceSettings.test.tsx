@@ -42,6 +42,20 @@ describe("WorkspaceSettings project archiving", () => {
         default_max_rounds: 3,
       },
     });
+    mock.get(`/api/v2/projects/${projectId}/build-failure-email`, {
+      body: {
+        enabled: false,
+        email: "owner@example.com",
+        delivery_configured: true,
+      },
+    });
+    mock.patch(`/api/v2/projects/${projectId}/build-failure-email`, {
+      body: {
+        enabled: true,
+        email: "owner@example.com",
+        delivery_configured: true,
+      },
+    });
     mock.del(`/api/projects/${projectId}`, { status: 204 });
     mock.install();
   });
@@ -87,6 +101,30 @@ describe("WorkspaceSettings project archiving", () => {
 
     expect(mock.calls.some((call) => call.method === "DELETE")).toBe(false);
     expect(onProjectArchived).not.toHaveBeenCalled();
+  });
+
+  it("enables a build-failure email for the signed-in user's account", async () => {
+    setup();
+    const user = userEvent.setup();
+
+    const toggle = await screen.findByRole("checkbox", {
+      name: "Email me when a development attempt fails",
+    });
+    expect(toggle).not.toBeChecked();
+    expect(screen.getByText(/Notifications go to owner@example.com/)).toBeVisible();
+    await user.click(toggle);
+    await user.click(screen.getByRole("button", { name: "Save notification setting" }));
+
+    await waitFor(() =>
+      expect(
+        mock.calls.find(
+          (call) =>
+            call.method === "PATCH" &&
+            call.url === `/api/v2/projects/${projectId}/build-failure-email`,
+        ),
+      ).toMatchObject({ body: { enabled: true } }),
+    );
+    expect(await screen.findByText("Notification setting saved")).toBeVisible();
   });
 
   it("keeps the project open and shows the server safeguard when work is active", async () => {
@@ -276,6 +314,13 @@ describe("WorkspaceSettings QC settings", () => {
         qc_mode: "gated_when_contested",
         allow_unadjudicated_rebuttals: false,
         default_max_rounds: 3,
+      },
+    });
+    mock.get(`/api/v2/projects/${projectId}/build-failure-email`, {
+      body: {
+        enabled: false,
+        email: "owner@example.com",
+        delivery_configured: true,
       },
     });
     mock.patch(`/api/v2/projects/${projectId}/planning-reviewer`, { status: 204 });

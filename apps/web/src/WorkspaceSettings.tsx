@@ -62,6 +62,40 @@ interface PlanningQcSettingsDto {
   default_max_rounds: number;
 }
 
+interface BuildFailureEmailPreferenceDto {
+  enabled: boolean;
+  email: string;
+  delivery_configured: boolean;
+}
+
+async function buildFailureEmailPreferenceRequest(
+  projectId: string,
+  method: "GET" | "PATCH",
+  enabled?: boolean,
+): Promise<BuildFailureEmailPreferenceDto> {
+  const response = await fetch(
+    `/api/v2/projects/${encodeURIComponent(projectId)}/build-failure-email`,
+    {
+      method,
+      headers: authHeaders(method === "PATCH"),
+      ...(method === "PATCH" ? { body: JSON.stringify({ enabled: enabled ?? false }) } : {}),
+    },
+  );
+  if (response.status === 401) throw new UnauthorizedError();
+  const payload = (await response.json().catch(() => ({}))) as
+    | BuildFailureEmailPreferenceDto
+    | { message?: string };
+  if (!response.ok) {
+    throw new ApiError(
+      "message" in payload && payload.message
+        ? payload.message
+        : `request failed: ${response.status}`,
+      response.status,
+    );
+  }
+  return payload as BuildFailureEmailPreferenceDto;
+}
+
 async function planningQcSettingsRequest(
   projectId: string,
   method: "GET" | "PATCH",
@@ -257,6 +291,11 @@ export function WorkspaceSettings({
   const [qcRebuttals, setQcRebuttals] = useState(false);
   const [qcSaving, setQcSaving] = useState(false);
   const [qcSaved, setQcSaved] = useState(false);
+  const [failureEmailPreference, setFailureEmailPreference] =
+    useState<BuildFailureEmailPreferenceDto | null>(null);
+  const [failureEmailEnabled, setFailureEmailEnabled] = useState(false);
+  const [failureEmailSaving, setFailureEmailSaving] = useState(false);
+  const [failureEmailSaved, setFailureEmailSaved] = useState(false);
 
   useEffect(() => {
     let current = true;
@@ -268,6 +307,26 @@ export function WorkspaceSettings({
         if (!current) return;
         setRules(next);
         setRulesDraft(next.content);
+      })
+      .catch((caught) => {
+        if (!current) return;
+        if (caught instanceof UnauthorizedError) handleUnauthorized();
+        else setError(caught instanceof Error ? caught.message : String(caught));
+      });
+    return () => {
+      current = false;
+    };
+  }, [projectId, handleUnauthorized]);
+
+  useEffect(() => {
+    let current = true;
+    setFailureEmailPreference(null);
+    setFailureEmailSaved(false);
+    void buildFailureEmailPreferenceRequest(projectId, "GET")
+      .then((preference) => {
+        if (!current) return;
+        setFailureEmailPreference(preference);
+        setFailureEmailEnabled(preference.enabled);
       })
       .catch((caught) => {
         if (!current) return;
@@ -317,6 +376,27 @@ export function WorkspaceSettings({
       else setError(caught instanceof Error ? caught.message : String(caught));
     } finally {
       setQcSaving(false);
+    }
+  };
+
+  const saveFailureEmailPreference = async () => {
+    setFailureEmailSaving(true);
+    setFailureEmailSaved(false);
+    setError(null);
+    try {
+      const preference = await buildFailureEmailPreferenceRequest(
+        projectId,
+        "PATCH",
+        failureEmailEnabled,
+      );
+      setFailureEmailPreference(preference);
+      setFailureEmailEnabled(preference.enabled);
+      setFailureEmailSaved(true);
+    } catch (caught) {
+      if (caught instanceof UnauthorizedError) handleUnauthorized();
+      else setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      setFailureEmailSaving(false);
     }
   };
 
@@ -402,6 +482,58 @@ export function WorkspaceSettings({
       <Suspense fallback={<Spinner label="Loading execution target settings…" />}>
         <ExecutionTargetSettings projectId={projectId} onUnauthorized={handleUnauthorized} />
       </Suspense>
+
+      <section
+        className="card workspace-settings-card"
+        aria-labelledby="failure-email-heading"
+        data-testid="failure-email-settings-card"
+      >
+        <div className="section-head">
+          <div>
+            <div className="eyebrow">Notifications</div>
+            <h2 id="failure-email-heading">Build failures</h2>
+          </div>
+        </div>
+        {failureEmailPreference === null ? (
+          <Spinner label="Loading email notification settings…" />
+        ) : (
+          <>
+            <label className="debate-toggle">
+              <input
+                type="checkbox"
+                checked={failureEmailEnabled}
+                disabled={!failureEmailPreference.delivery_configured}
+                onChange={(event) => {
+                  setFailureEmailEnabled(event.target.checked);
+                  setFailureEmailSaved(false);
+                }}
+              />
+              Email me when a development attempt fails
+            </label>
+            <p className="muted">
+              {failureEmailPreference.delivery_configured
+                ? `Notifications go to ${failureEmailPreference.email}. Each failed attempt is emailed once.`
+                : "Email delivery is not configured for this deployment. An administrator must add the Resend API key."}
+            </p>
+            <div className="settings-save-row">
+              <span className="muted">
+                {failureEmailSaved ? "Notification setting saved" : null}
+              </span>
+              <Button
+                variant="primary"
+                disabled={
+                  failureEmailSaving ||
+                  !failureEmailPreference.delivery_configured ||
+                  failureEmailEnabled === failureEmailPreference.enabled
+                }
+                onClick={() => void saveFailureEmailPreference()}
+              >
+                {failureEmailSaving ? "Saving…" : "Save notification setting"}
+              </Button>
+            </div>
+          </>
+        )}
+      </section>
 
       <section
         className="card workspace-settings-card"
