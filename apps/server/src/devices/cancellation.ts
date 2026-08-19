@@ -1166,13 +1166,20 @@ export class DeviceRunCancellationService {
         }
       }
 
-      if (state === "process_exited") {
+      // A run that never reached `running` never emitted run_status started,
+      // so no managed process tree can exist for it; the runner's
+      // acknowledgement is the strongest evidence it will ever be able to
+      // send. Requiring process_exited for those runs deadlocked them forever
+      // when the runner (correctly) refused to fabricate exit proof for a run
+      // it was not executing.
+      const finalizableStates =
+        state === "process_exited"
+          ? ["created", "dispatched", "running", "waiting_for_human", "verifying"]
+          : ["created", "dispatched"];
+      {
         const lifecycle = new SqlV2ApplicationTransaction(sql);
         const run = await lifecycle.lockAgentRunLifecycle(input.run_id);
-        if (
-          run &&
-          ["created", "dispatched", "running", "waiting_for_human", "verifying"].includes(run.state)
-        ) {
+        if (run && finalizableStates.includes(run.state)) {
           await transitionV2AgentRunLifecycle(lifecycle, {
             project_id: run.project_id,
             phase_id: run.phase_id,
@@ -1180,10 +1187,16 @@ export class DeviceRunCancellationService {
             run_id: input.run_id,
             expected_aggregate_version: run.aggregate_version,
             to: "cancelled",
-            reason: "authenticated runner evidence confirmed the managed process tree exited",
+            reason:
+              state === "process_exited"
+                ? "authenticated runner evidence confirmed the managed process tree exited"
+                : "the runner acknowledged the cancellation before the run ever started, so no managed process existed",
             actor_type: "runner",
             actor_id: input.device_id,
-            correlation_id: `device-process-exit:${input.run_id}:${input.device_generation}`,
+            correlation_id:
+              state === "process_exited"
+                ? `device-process-exit:${input.run_id}:${input.device_generation}`
+                : `device-cancel-ack:${input.run_id}:${input.device_generation}`,
             causation_id: input.run_id,
             occurred_at: input.process_exited_at ?? input.acknowledged_at,
           });

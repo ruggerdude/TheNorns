@@ -184,7 +184,8 @@ describe.sequential("device run cancellation tracking", () => {
         ('run-mismatch','project-1','binding-1','project-owner-1'),
         ('run-hook','project-1','binding-1','project-owner-1'),
         ('run-continuation','project-1','binding-1','project-owner-1'),
-        ('run-rebound','project-1','binding-1','project-owner-1');
+        ('run-rebound','project-1','binding-1','project-owner-1'),
+        ('run-never-started','project-1','binding-1','project-owner-1');
       INSERT INTO commands (
         command_id,run_id,runner_id,runner_generation,created_at
       )
@@ -216,6 +217,10 @@ describe.sequential("device run cancellation tracking", () => {
         (
           'command-continuation-z','run-continuation','device-1',4,
           '2026-07-29T13:10:00.000Z'
+        ),
+        (
+          'command-never-started','run-never-started','device-1',4,
+          '2026-07-29T13:00:00.000Z'
         ),
         (
           'command-rebound-a','run-rebound','device-1',4,
@@ -482,6 +487,34 @@ describe.sequential("device run cancellation tracking", () => {
     );
     expect(run.rows[0]?.state).toBe("cancelled");
     expect(run.rows[0]?.finished_at).not.toBeNull();
+  });
+
+  it("finalizes a never-started run on acknowledgement alone, since no process ever existed", async () => {
+    await database.query("UPDATE agent_runs SET state='dispatched' WHERE id='run-never-started'");
+    await service.request({
+      run_id: "run-never-started",
+      device_id: "device-1",
+      credential_id: "credential-1",
+      device_generation: 4,
+      cause: "project_stop",
+      requested_by_user_id: "owner-1",
+      reason: "Stopped by the user from the Development chat.",
+      requested_at: "2026-07-29T15:00:00.000Z",
+    });
+
+    const acknowledged = await service.acknowledge({
+      run_id: "run-never-started",
+      device_id: "device-1",
+      credential_id: "credential-1",
+      device_generation: 4,
+      acknowledged_at: "2026-07-29T15:01:00.000Z",
+    });
+    expect(acknowledged.state).toBe("runner_acknowledged");
+
+    const run = await database.query<{ state: string }>(
+      "SELECT state FROM agent_runs WHERE id='run-never-started'",
+    );
+    expect(run.rows[0]?.state).toBe("cancelled");
   });
 
   it("rejects evidence from another device, credential, or generation", async () => {
