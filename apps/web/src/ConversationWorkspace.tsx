@@ -3722,7 +3722,7 @@ type DevelopmentPhaseItem = {
 type DevelopmentPauseState = "available" | "pause_pending" | "paused" | "resume_pending";
 
 function shortDevelopmentPhaseTitle(title: string): string {
-  return title.split(":", 1)[0]?.trim() || title;
+  return title.split(/:|\s+with\s+/i, 1)[0]?.trim() || title;
 }
 
 function developmentPauseState(

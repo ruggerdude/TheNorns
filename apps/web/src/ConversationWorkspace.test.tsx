@@ -5499,7 +5499,10 @@ describe("conversation workspace", () => {
   it("matches plan phases to their task ids instead of whichever task row arrives first", async () => {
     const execution = executionConversation();
     const core = makeCoreApiModule();
-    const web = makeWebUiModule();
+    const web = {
+      ...makeWebUiModule(),
+      title: "End-to-end verification with SLTS fixture",
+    };
     const baseVersion = planVersion({ status: "approved" });
     const approvedVersion = {
       ...baseVersion,
@@ -5647,17 +5650,19 @@ describe("conversation workspace", () => {
     const phases = screen.getByRole("region", { name: "Development phases" });
     const phaseButtons = within(phases).getAllByRole("button");
     expect(within(phases).getByText(core.title)).toBeInTheDocument();
-    expect(within(phases).getByText(web.title)).toBeInTheDocument();
+    expect(within(phases).getByText("End-to-end verification")).toBeInTheDocument();
+    expect(within(phases).queryByText(web.title)).not.toBeInTheDocument();
     expect(
       phaseButtons.find((button) => button.textContent?.includes(core.title)),
     ).toHaveTextContent("50% · estimating");
     expect(
-      phaseButtons.find((button) => button.textContent?.includes(web.title)),
+      phaseButtons.find((button) => button.textContent?.includes("End-to-end verification")),
     ).toHaveTextContent("0% · estimating");
     expect(
       phaseButtons.filter(
         (button) =>
-          button.textContent?.includes(core.title) || button.textContent?.includes(web.title),
+          button.textContent?.includes(core.title) ||
+          button.textContent?.includes("End-to-end verification"),
       ),
     ).toHaveLength(2);
   });
