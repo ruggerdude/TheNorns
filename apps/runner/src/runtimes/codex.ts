@@ -14,7 +14,7 @@ import type { CodexReasoningEffortT } from "@norns/contracts";
 // Subscription mode deliberately omits the gateway SDK options and strips
 // every provider environment override, leaving Codex to read only its official
 // persisted ChatGPT login.
-import { Codex, type CodexOptions } from "@openai/codex-sdk";
+import { Codex, type CodexOptions, type RunResult } from "@openai/codex-sdk";
 import {
   type GatewayCredentialProvider,
   type RuntimeCredentialMode,
@@ -25,6 +25,16 @@ import type { CodingRuntime, RuntimeRunRequest, RuntimeRunResult, RuntimeUsage }
 
 type CodexClient = Pick<Codex, "resumeThread" | "startThread">;
 type CodexClientFactory = (options?: CodexOptions) => CodexClient;
+
+function isMissingLocalCodexSession(error: unknown): boolean {
+  const detail = error instanceof Error ? error.message : String(error);
+  return (
+    /no rollout found for thread id/i.test(detail) ||
+    /thread\/resume[^\n]*(?:rollout|thread|session)[^\n]*(?:not found|missing|does not exist)/i.test(
+      detail,
+    )
+  );
+}
 
 export class CodexRuntime implements CodingRuntime {
   readonly name = "codex";
@@ -132,12 +142,29 @@ export class CodexRuntime implements CodingRuntime {
           ? { modelReasoningEffort: this.options.reasoningEffort }
           : {}),
       };
-      const thread = this.options.resumeThreadId
+      const turnOptions = {
+        ...(request.signal !== undefined ? { signal: request.signal } : {}),
+      };
+      let thread = this.options.resumeThreadId
         ? codex.resumeThread(this.options.resumeThreadId, threadOptions)
         : codex.startThread(threadOptions);
-      const turn = await thread.run(request.prompt, {
-        ...(request.signal !== undefined ? { signal: request.signal } : {}),
-      });
+      let turn: RunResult;
+      try {
+        turn = await thread.run(request.prompt, turnOptions);
+      } catch (error) {
+        if (
+          request.signal?.aborted ||
+          !this.options.resumeThreadId ||
+          !isMissingLocalCodexSession(error)
+        ) {
+          throw error;
+        }
+        request.onLog?.(
+          "The saved Codex session is no longer available on this computer. Starting a fresh Codex session with the full approved task context.",
+        );
+        thread = codex.startThread(threadOptions);
+        turn = await thread.run(request.resumeFallbackPrompt ?? request.prompt, turnOptions);
+      }
       request.onLog?.(turn.finalResponse.slice(0, 2000));
       const threadId = (thread as { id?: string | null }).id;
       return {

@@ -33,6 +33,13 @@ export interface RuntimeRunRequest {
   /** the isolated worktree the runtime may write to (Sandbox Contract) */
   worktreePath: string;
   prompt: string;
+  /**
+   * Full task context to use only when a requested provider session cannot be
+   * recovered from local durable storage. A runtime must not use this for an
+   * ordinary provider or transport failure: doing so could duplicate work from
+   * a turn whose outcome is merely uncertain.
+   */
+  resumeFallbackPrompt?: string;
   /** Runner-owned, hash-verified task inputs the runtime may read but not write. */
   additionalReadDirectories?: string[];
   /** Runner-owned state directory used as HOME/cache instead of the user's home. */

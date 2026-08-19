@@ -87,6 +87,92 @@ test("Codex subscription mode never mints and uses only sanitized persisted logi
   assertProviderEnvironmentWasStripped(clientOptions.env);
 });
 
+test("Codex replaces a missing local rollout with a fresh session and full task context", async () => {
+  const calls = [];
+  const logs = [];
+  const runtime = new CodexRuntime({
+    credentialMode: "subscription",
+    resumeThreadId: "thread-missing-locally",
+    subscriptionAuthProbe: () => codexSubscriptionAuth(),
+    createClient: () => ({
+      resumeThread(id) {
+        calls.push(["resume", id]);
+        return {
+          id,
+          async run(prompt) {
+            calls.push(["resume-run", prompt]);
+            throw new Error(
+              "Codex Exec exited with code 1: Error: thread/resume: thread/resume failed: no rollout found for thread id thread-missing-locally (code -32600)",
+            );
+          },
+        };
+      },
+      startThread() {
+        calls.push(["start"]);
+        return {
+          id: "thread-fresh",
+          async run(prompt) {
+            calls.push(["start-run", prompt]);
+            return { finalResponse: "implemented and committed" };
+          },
+        };
+      },
+    }),
+  });
+
+  const result = await runtime.run({
+    runId: "run-missing-rollout",
+    worktreePath: "/tmp/norns-subscription-test",
+    prompt: "Continue the previous coding session.",
+    resumeFallbackPrompt: "Full approved task context.",
+    onLog: (chunk) => logs.push(chunk),
+  });
+
+  assert.equal(result.outcome, "completed");
+  assert.equal(result.sessionId, "thread-fresh");
+  assert.deepEqual(calls, [
+    ["resume", "thread-missing-locally"],
+    ["resume-run", "Continue the previous coding session."],
+    ["start"],
+    ["start-run", "Full approved task context."],
+  ]);
+  assert.match(logs[0], /saved Codex session is no longer available/);
+  assert.equal(logs[1], "implemented and committed");
+});
+
+test("Codex does not start a replacement session for an uncertain resume failure", async () => {
+  let freshStarts = 0;
+  const runtime = new CodexRuntime({
+    credentialMode: "subscription",
+    resumeThreadId: "thread-network-error",
+    subscriptionAuthProbe: () => codexSubscriptionAuth(),
+    createClient: () => ({
+      resumeThread() {
+        return {
+          async run() {
+            throw new Error("connection closed before the resume response arrived");
+          },
+        };
+      },
+      startThread() {
+        freshStarts += 1;
+        throw new Error("must not start a duplicate session");
+      },
+    }),
+  });
+
+  const result = await runtime.run({
+    runId: "run-uncertain-resume",
+    worktreePath: "/tmp/norns-subscription-test",
+    prompt: "Continue the previous coding session.",
+    resumeFallbackPrompt: "Full approved task context.",
+  });
+
+  assert.equal(result.outcome, "failed");
+  assert.match(result.detail, /connection closed/);
+  assert.equal(freshStarts, 0);
+});
+
 test("Claude subscription mode never mints and strips API, OAuth, and base URL overrides", async () => {
   let mintCalls = 0;
   let queryOptions;

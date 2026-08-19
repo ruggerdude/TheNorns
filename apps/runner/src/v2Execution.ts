@@ -1228,6 +1228,9 @@ export class V2RunnerExecutor {
       // If the adapter throws after spawning but before returning a proof, the
       // result must remain unconfirmed.
       processTreeReaped = false;
+      const fullTaskPrompt = command.human_wait_channel
+        ? `${prompt}\n\n${humanWaitPrompt()}\n\nWork efficiently: inspect only the files needed, begin making concrete changes early, then verify and commit. Do not spend repeated turns restating or replanning the approved task.`
+        : `${prompt}\n\nWork efficiently: inspect only the files needed, begin making concrete changes early, then verify and commit. Do not spend repeated turns restating or replanning the approved task.`;
       const runtimePrompt = command.recovery
         ? [
             "Continue the previous coding session for this same approved task.",
@@ -1237,13 +1240,19 @@ export class V2RunnerExecutor {
           ]
             .filter(Boolean)
             .join("\n\n")
-        : command.human_wait_channel
-          ? `${prompt}\n\n${humanWaitPrompt()}\n\nWork efficiently: inspect only the files needed, begin making concrete changes early, then verify and commit. Do not spend repeated turns restating or replanning the approved task.`
-          : `${prompt}\n\nWork efficiently: inspect only the files needed, begin making concrete changes early, then verify and commit. Do not spend repeated turns restating or replanning the approved task.`;
+        : fullTaskPrompt;
+      const resumeFallbackPrompt = command.recovery
+        ? [
+            "The previous coding session is unavailable. Begin a fresh coding session for the same approved task using the complete task package below.",
+            "Inspect the current worktree, implement the approved scope, run the required verification, and commit the result.",
+            fullTaskPrompt,
+          ].join("\n\n")
+        : fullTaskPrompt;
       let runtimeResult = await runtime.run({
         runId: command.run_id,
         worktreePath: worktree.path,
         prompt: runtimePrompt,
+        ...(resumeSessionId ? { resumeFallbackPrompt } : {}),
         additionalReadDirectories: approvedInputDirectory ? [approvedInputDirectory] : [],
         runtimeStateDirectory,
         humanWaitPath,
