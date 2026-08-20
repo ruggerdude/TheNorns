@@ -92,6 +92,7 @@ interface WorkItemRow {
   title: string;
   objective: string;
   status: V2WorkItemT["status"];
+  workflow: V2WorkItemT["workflow"];
   planning_run_id: string | null;
   phase_id: string | null;
   approved_plan_version_id: string | null;
@@ -342,8 +343,8 @@ function action(row: ActionRow): V2ConversationActionT {
 }
 
 const workItemColumns = `schema_version, id, project_id, created_by_user_id,
-  title, objective, status, planning_run_id, phase_id, approved_plan_version_id, aggregate_version,
-  created_at, updated_at, execution_started_at, completed_at`;
+  title, objective, status, workflow, planning_run_id, phase_id, approved_plan_version_id,
+  aggregate_version, created_at, updated_at, execution_started_at, completed_at`;
 const conversationColumns = `schema_version, id, project_id, work_item_id,
   created_by_user_id, kind, status, provider, model, next_message_sequence,
   created_at, updated_at, archived_at`;
@@ -367,10 +368,6 @@ export interface InsertWorkItem {
   id: string;
   actorUserId: string;
   input: V2CreateWorkItemInputT;
-}
-
-export interface InsertQuickWorkItem extends InsertWorkItem {
-  phaseId: string;
 }
 
 export interface InsertConversation {
@@ -476,7 +473,6 @@ export interface ConversationRepository {
     cursor: ConversationNavigationCursor | null,
   ): Promise<ConversationNavigationResult>;
   insertWorkItem(input: InsertWorkItem): Promise<V2WorkItemT>;
-  insertQuickWorkItem(input: InsertQuickWorkItem): Promise<V2WorkItemT>;
   findWorkItem(projectId: string, workItemId: string): Promise<V2WorkItemT | null>;
   listWorkItems(projectId: string): Promise<V2WorkItemT[]>;
   updateWorkItemTitle(
@@ -878,40 +874,13 @@ class SqlConversationRepository implements ConversationRepository {
   async insertWorkItem({ id, actorUserId, input }: InsertWorkItem): Promise<V2WorkItemT> {
     const result = await this.sql.query<WorkItemRow>(
       `INSERT INTO work_items (
-         id, project_id, created_by_user_id, title, objective
-       ) VALUES ($1,$2,$3,$4,$5)
+         id, project_id, created_by_user_id, title, objective, workflow
+       ) VALUES ($1,$2,$3,$4,$5,$6)
        RETURNING ${workItemColumns}`,
-      [id, input.project_id, actorUserId, input.title, input.objective],
+      [id, input.project_id, actorUserId, input.title, input.objective, input.workflow],
     );
     const row = result.rows[0];
     if (!row) throw new Error("work item insert returned no row");
-    return workItem(row);
-  }
-
-  async insertQuickWorkItem({
-    id,
-    phaseId,
-    actorUserId,
-    input,
-  }: InsertQuickWorkItem): Promise<V2WorkItemT> {
-    const result = await this.sql.query<WorkItemRow>(
-      `WITH materialized_phase AS (
-         INSERT INTO phases (
-           id, project_id, objective_summary, priority, status
-         ) VALUES ($1,$2,$3,0,'proposed')
-         RETURNING id
-       )
-       INSERT INTO work_items (
-         id, project_id, created_by_user_id, title, objective,
-         status, phase_id, execution_started_at
-       )
-       SELECT $4,$2,$5,$6,$3,'executing',materialized_phase.id,now()
-         FROM materialized_phase
-       RETURNING ${workItemColumns}`,
-      [phaseId, input.project_id, input.objective, id, actorUserId, input.title],
-    );
-    const row = result.rows[0];
-    if (!row) throw new Error("quick work item insert returned no row");
     return workItem(row);
   }
 

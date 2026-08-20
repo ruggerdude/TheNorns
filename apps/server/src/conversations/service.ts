@@ -16,7 +16,6 @@ import {
   V2CreateWorkConversationInput,
   type V2CreateWorkConversationInputT,
   V2CreateWorkItemInput,
-  type V2CreateWorkItemInputT,
   V2ProposeConversationActionInput,
   type V2ProposeConversationActionInputT,
   V2ReorderConversationFoldersInput,
@@ -316,7 +315,7 @@ export class ConversationService {
 
   createWorkItem(
     actor: ConversationActor,
-    candidate: V2CreateWorkItemInputT,
+    candidate: z.input<typeof V2CreateWorkItemInput>,
   ): Promise<V2WorkItemT> {
     const input = V2CreateWorkItemInput.parse(candidate);
     return this.store.transaction(async (repository) => {
@@ -331,7 +330,7 @@ export class ConversationService {
 
   createPlanningWorkspace(
     actor: ConversationActor,
-    candidate: V2CreateWorkItemInputT,
+    candidate: z.input<typeof V2CreateWorkItemInput>,
     pin: PlanningConversationPin,
   ): Promise<{ work_item: V2WorkItemT; conversation: V2WorkConversationT }> {
     const input = V2CreateWorkItemInput.parse(candidate);
@@ -347,37 +346,6 @@ export class ConversationService {
       await repository.assertProjectAccess(input.project_id, actor.id);
       const work_item = await repository.insertWorkItem({
         id: workItemId,
-        actorUserId: actor.id,
-        input,
-      });
-      const conversation = await repository.insertConversation({
-        id: this.makeId("conversation"),
-        actorUserId: actor.id,
-        input: conversationInput,
-      });
-      return { work_item, conversation };
-    });
-  }
-
-  createQuickWorkspace(
-    actor: ConversationActor,
-    candidate: V2CreateWorkItemInputT,
-    pin: PlanningConversationPin,
-  ): Promise<{ work_item: V2WorkItemT; conversation: V2WorkConversationT }> {
-    const input = V2CreateWorkItemInput.parse(candidate);
-    const workItemId = this.makeId("work");
-    const conversationInput = V2CreateWorkConversationInput.parse({
-      project_id: input.project_id,
-      work_item_id: workItemId,
-      kind: "execution_pm",
-      provider: pin.provider,
-      model: pin.model,
-    });
-    return this.store.transaction(async (repository) => {
-      await repository.assertProjectAccess(input.project_id, actor.id);
-      const work_item = await repository.insertQuickWorkItem({
-        id: workItemId,
-        phaseId: this.makeId("phase"),
         actorUserId: actor.id,
         input,
       });

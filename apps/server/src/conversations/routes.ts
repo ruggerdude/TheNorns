@@ -327,13 +327,17 @@ export function registerConversationRoutes(
       const pin = body.model
         ? { provider: providerForPmModel(body.model), model: body.model }
         : await options.pinForProject(projectId);
-      const createWorkspace =
-        body.workflow === "quick"
-          ? options.conversations.createQuickWorkspace.bind(options.conversations)
-          : options.conversations.createPlanningWorkspace.bind(options.conversations);
-      const created = await createWorkspace(
+      // Quick and phased are the same planning→implement flow; the only
+      // difference is that quick waives QC (enforced downstream from
+      // work_items.workflow). Both build a planning workspace.
+      const created = await options.conversations.createPlanningWorkspace(
         user,
-        { project_id: projectId, title: body.title, objective: body.objective },
+        {
+          project_id: projectId,
+          title: body.title,
+          objective: body.objective,
+          workflow: body.workflow,
+        },
         pin,
       );
       return reply.code(201).send(created);

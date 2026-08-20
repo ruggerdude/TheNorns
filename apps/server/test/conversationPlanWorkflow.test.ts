@@ -131,13 +131,14 @@ describe.sequential("conversation plan workflow", () => {
     await pg.close();
   });
 
-  async function workspace(label: string) {
+  async function workspace(label: string, flow: "phased" | "quick" = "phased") {
     const created = await conversations.createPlanningWorkspace(
       owner,
       {
         project_id: projectId,
         title: `Work ${label}`,
         objective: `Objective ${label}`,
+        workflow: flow,
       },
       { provider: "anthropic", model: "claude-fable-5" },
     );
@@ -169,8 +170,9 @@ describe.sequential("conversation plan workflow", () => {
           }
         | { mode: "skip_qc" };
     },
+    flow: "phased" | "quick" = "phased",
   ) {
-    const created = await workspace(label);
+    const created = await workspace(label, flow);
     const envelope = plan();
     const action = await conversations.proposeAction(owner, {
       project_id: projectId,
@@ -416,6 +418,49 @@ describe.sequential("conversation plan workflow", () => {
       idempotency_key: "approve-after-qc-waiver",
     });
     expect(approved.effect.kind).toBe("plan_approved");
+  });
+
+  it("a quick work item auto-waives QC — no reviewer, no explicit skip_qc needed", async () => {
+    // Quick is phased minus QC. The plan carries NO skip_qc waiver, yet
+    // confirming send_plan_to_qc must waive QC (converged, no reviewer) purely
+    // because the work item's workflow is 'quick'. This is the whole fix.
+    const saved = await saveCandidate("quick-flow", undefined, "quick");
+    const detail = await workflow.detail(
+      owner.id,
+      projectId,
+      saved.work_item.id,
+      saved.conversation.id,
+    );
+    const send = detail.actions.find(
+      (action) => action.action_type === "send_plan_to_qc" && action.status === "proposed",
+    );
+    if (!send) throw new Error("save must emit a send_plan_to_qc action");
+
+    const waived = await workflow.confirm(owner.id, {
+      project_id: projectId,
+      work_item_id: saved.work_item.id,
+      conversation_id: saved.conversation.id,
+      action_id: send.id,
+      idempotency_key: "quick-flow",
+    });
+    expect(waived.effect.kind).toBe("qc_started");
+    if (waived.effect.kind !== "qc_started") throw new Error("expected waiver effect");
+    expect(waived.effect.plan_review).toMatchObject({
+      review_mode: "waived",
+      status: "converged",
+    });
+
+    // And it lands on the exact approval action — the human "proceed".
+    const afterWaiver = await workflow.detail(
+      owner.id,
+      projectId,
+      saved.work_item.id,
+      saved.conversation.id,
+    );
+    const approve = afterWaiver.actions.find(
+      (action) => action.action_type === "approve_plan" && action.status === "proposed",
+    );
+    expect(approve).toBeDefined();
   });
 
   it("persists an exact human change intent idempotently and mutates only on confirmation", async () => {

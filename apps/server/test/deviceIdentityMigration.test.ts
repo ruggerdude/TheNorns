@@ -37,6 +37,7 @@ import {
   QC_TERMINAL_FOLLOWUP_CHAT_MIGRATION_NAME,
   QC_ZERO_ROUNDS_MIGRATION_NAME,
   SONNET_CACHE_PRICING_CORRECTION_MIGRATION_NAME,
+  WORK_ITEM_WORKFLOW_MIGRATION_NAME,
   currentV2MigrationSources,
   loadDeviceIdentityCoreMigrationSql,
   loadDeviceManagementObservationsMigrationSql,
@@ -108,6 +109,7 @@ describe.sequential("device identity core migration", () => {
       QC_SALVAGED_PLAN_MIGRATION_NAME,
       DEVELOPMENT_PAUSE_POINTS_MIGRATION_NAME,
       BUILD_FAILURE_EMAIL_NOTIFICATIONS_MIGRATION_NAME,
+      WORK_ITEM_WORKFLOW_MIGRATION_NAME,
     ]);
     expect(tail[0]?.sql).toContain("CREATE TABLE IF NOT EXISTS devices");
     expect(tail[4]?.sql).toContain("ADD COLUMN os_version TEXT");

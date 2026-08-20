@@ -14,6 +14,7 @@ function workItem(projectId: string): V2WorkItemT {
     created_by_user_id: "user-1",
     title: `Conversation work for ${projectId}`,
     objective: "Deliver the approved work from a compact handoff.",
+    workflow: "phased",
     status: "executing",
     planning_run_id: null,
     phase_id: null,

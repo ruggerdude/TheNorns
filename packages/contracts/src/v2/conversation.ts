@@ -48,6 +48,8 @@ export const V2WorkItem = z
     title: V2NonEmptyString,
     objective: V2NonEmptyString,
     status: V2WorkItemStatus,
+    /** Quick waives QC; phased runs it. Both use the same planning→implement flow. */
+    workflow: V2WorkItemWorkflow,
     planning_run_id: V2EntityId.nullable(),
     phase_id: V2EntityId.nullable(),
     approved_plan_version_id: V2EntityId.nullable(),
@@ -3129,6 +3131,10 @@ export const V2CreateWorkItemInput = z
     project_id: V2EntityId,
     title: V2NonEmptyString,
     objective: V2NonEmptyString,
+    // Quick and phased are the SAME planning→implement flow; quick just waives
+    // QC. Persisted on the work item so the plan-approval seam can waive QC for
+    // quick without a separate, dead-end execution path.
+    workflow: V2WorkItemWorkflow.default("phased"),
   })
   .strict();
 export type V2CreateWorkItemInputT = z.infer<typeof V2CreateWorkItemInput>;

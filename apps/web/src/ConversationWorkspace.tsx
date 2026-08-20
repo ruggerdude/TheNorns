@@ -6926,7 +6926,7 @@ function NewWorkForm({
           />
           <span>
             <strong>Phased work</strong>
-            <small>Plan with PM → optional QC → Development chat</small>
+            <small>Plan with the PM → QC review → build</small>
           </span>
         </label>
         <label className={workflow === "quick" ? "is-selected" : ""}>
@@ -6940,7 +6940,7 @@ function NewWorkForm({
           />
           <span>
             <strong>Quick push</strong>
-            <small>Go directly to a Development chat for a small, clear change</small>
+            <small>Plan with the PM → build, skipping QC — for a small, clear change</small>
           </span>
         </label>
       </fieldset>

@@ -59,43 +59,23 @@ describe("AI SDK UI protocol conversation stream", () => {
       conversations: {
         createPlanningWorkspace: async (
           _user: unknown,
-          input: { project_id: string; title: string; objective: string },
+          input: { project_id: string; title: string; objective: string; workflow?: string },
           pin: { provider: string; model: string },
         ) => {
           createdWorkspacePin = pin;
-          createdWorkflow = "phased";
+          createdWorkflow = input.workflow === "quick" ? "quick" : "phased";
           return {
             work_item: {
               id: "work-created",
               project_id: input.project_id,
               title: input.title,
               objective: input.objective,
+              status: "planning",
+              workflow: createdWorkflow,
             },
             conversation: {
               id: "conversation-created",
-              provider: pin.provider,
-              model: pin.model,
-            },
-          };
-        },
-        createQuickWorkspace: async (
-          _user: unknown,
-          input: { project_id: string; title: string; objective: string },
-          pin: { provider: string; model: string },
-        ) => {
-          createdWorkspacePin = pin;
-          createdWorkflow = "quick";
-          return {
-            work_item: {
-              id: "work-created-quick",
-              project_id: input.project_id,
-              title: input.title,
-              objective: input.objective,
-              status: "executing",
-            },
-            conversation: {
-              id: "conversation-created-quick",
-              kind: "execution_pm",
+              kind: "planning",
               status: "active",
               provider: pin.provider,
               model: pin.model,
@@ -259,7 +239,10 @@ describe("AI SDK UI protocol conversation stream", () => {
     });
   });
 
-  it("creates a direct execution workspace only for the explicit quick workflow", async () => {
+  it("routes the quick workflow through the same planning workspace, tagged quick", async () => {
+    // Quick is phased minus QC: the same planning workspace, carrying
+    // workflow='quick' so the plan-approval seam waives QC. It is NOT a
+    // separate, plan-less 'executing' dead end anymore.
     createdWorkspacePin = null;
     createdWorkflow = null;
     const response = await app.inject({
@@ -274,8 +257,8 @@ describe("AI SDK UI protocol conversation stream", () => {
     expect(response.statusCode).toBe(201);
     expect(createdWorkflow).toBe("quick");
     expect(response.json()).toMatchObject({
-      work_item: { status: "executing" },
-      conversation: { kind: "execution_pm", status: "active" },
+      work_item: { status: "planning", workflow: "quick" },
+      conversation: { kind: "planning", status: "active" },
     });
   });
 

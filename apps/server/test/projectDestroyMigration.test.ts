@@ -5,11 +5,11 @@ import {
   BUILD_FAILURE_EMAIL_NOTIFICATIONS_MIGRATION_NAME,
   DEVELOPMENT_PAUSE_POINTS_MIGRATION_NAME,
   HELD_EXECUTION_KICKOFF_MIGRATION_NAME,
-  PROJECT_DESTROY_MIGRATION_NAME,
   QC_SALVAGED_PLAN_MIGRATION_NAME,
   QC_TERMINAL_FOLLOWUP_CHAT_MIGRATION_NAME,
   SONNET_CACHE_PRICING_CORRECTION_MIGRATION_NAME,
   type V2MigrationDatabase,
+  WORK_ITEM_WORKFLOW_MIGRATION_NAME,
   currentV2MigrationSources,
   runCurrentV2Migrations,
 } from "../src/persistence/v2/migrate.js";
@@ -44,13 +44,13 @@ describe.sequential("permanent project deletion", () => {
   it("registers the latest additive migrations after project deletion", async () => {
     const names = (await currentV2MigrationSources()).map(({ name }) => name);
     expect(names.slice(-7)).toEqual([
-      PROJECT_DESTROY_MIGRATION_NAME,
       HELD_EXECUTION_KICKOFF_MIGRATION_NAME,
       QC_TERMINAL_FOLLOWUP_CHAT_MIGRATION_NAME,
       SONNET_CACHE_PRICING_CORRECTION_MIGRATION_NAME,
       QC_SALVAGED_PLAN_MIGRATION_NAME,
       DEVELOPMENT_PAUSE_POINTS_MIGRATION_NAME,
       BUILD_FAILURE_EMAIL_NOTIFICATIONS_MIGRATION_NAME,
+      WORK_ITEM_WORKFLOW_MIGRATION_NAME,
     ]);
   });
 

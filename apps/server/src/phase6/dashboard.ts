@@ -71,6 +71,7 @@ interface WorkRow {
   title: string;
   objective: string;
   status: string;
+  workflow: string;
   planning_run_id: string | null;
   phase_id: string | null;
   approved_plan_version_id: string | null;
@@ -201,6 +202,7 @@ export class Phase6DashboardService {
             title: row.title,
             objective: row.objective,
             status: row.status,
+            workflow: row.workflow,
             planning_run_id: row.planning_run_id,
             phase_id: row.phase_id,
             approved_plan_version_id: row.approved_plan_version_id,

@@ -661,16 +661,19 @@ export class ConversationPlanWorkflowService {
     let resolvedQcMode: ResolvedQcMode | null = null;
     if (preview.action_type === "send_plan_to_qc") {
       const parameters = V2SendPlanToQcParameters.parse(preview.payload.parameters);
-      const conversation = await this.transactions.transaction((tx) =>
-        this.assertConversation(
+      const { conversation, quickWorkflow } = await this.transactions.transaction(async (tx) => ({
+        conversation: await this.assertConversation(
           tx,
           input.project_id,
           input.work_item_id,
           input.conversation_id,
           false,
         ),
-      );
-      if (parameters.review?.mode !== "skip_qc") {
+        quickWorkflow: await this.isQuickWorkItem(tx, input.project_id, input.work_item_id),
+      }));
+      // Quick waives QC, so it needs no QC model pins and no reviewer
+      // resolution — the same short-circuit as an explicit skip_qc waiver.
+      if (parameters.review?.mode !== "skip_qc" && !quickWorkflow) {
         const pm = {
           provider: this.provider(conversation.provider),
           model: conversation.model,
@@ -2335,6 +2338,25 @@ export class ConversationPlanWorkflowService {
     return { version, salvagedRound, failedRound };
   }
 
+  /**
+   * A quick work item is the phased flow with QC waived. This reads the
+   * persisted choice so the plan-approval seam can auto-waive QC for quick
+   * without a separate execution path.
+   */
+  private async isQuickWorkItem(
+    tx: V2SqlExecutor,
+    projectId: string,
+    workItemId: string,
+  ): Promise<boolean> {
+    const row = (
+      await tx.query<{ workflow: string }>(
+        "SELECT workflow FROM work_items WHERE project_id=$1 AND id=$2",
+        [projectId, workItemId],
+      )
+    ).rows[0];
+    return row?.workflow === "quick";
+  }
+
   private async confirmInTransaction(
     tx: V2SqlExecutor,
     userId: string,
@@ -2505,7 +2527,12 @@ export class ConversationPlanWorkflowService {
       case "send_plan_to_qc": {
         const sendParameters = V2SendPlanToQcParameters.parse(parameters);
         const reviewPreference = sendParameters.review;
-        const skipQc = reviewPreference?.mode === "skip_qc";
+        // Quick work items waive QC by definition — the same effect as an
+        // explicit skip_qc waiver, decided from the persisted workflow rather
+        // than the AI-authored action parameters.
+        const skipQc =
+          reviewPreference?.mode === "skip_qc" ||
+          (await this.isQuickWorkItem(tx, input.project_id, input.work_item_id));
         if (
           !skipQc &&
           (!models ||

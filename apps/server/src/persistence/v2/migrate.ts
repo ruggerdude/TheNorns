@@ -554,6 +554,11 @@ export const BUILD_FAILURE_EMAIL_NOTIFICATIONS_MIGRATION_URL = new URL(
   "../../../drizzle/0087_build_failure_email_notifications.sql",
   import.meta.url,
 );
+export const WORK_ITEM_WORKFLOW_MIGRATION_NAME = "0088_work_item_workflow";
+export const WORK_ITEM_WORKFLOW_MIGRATION_URL = new URL(
+  "../../../drizzle/0088_work_item_workflow.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -933,6 +938,10 @@ export async function loadDevelopmentPausePointsMigrationSql(): Promise<string> 
 
 export async function loadBuildFailureEmailNotificationsMigrationSql(): Promise<string> {
   return readFile(BUILD_FAILURE_EMAIL_NOTIFICATIONS_MIGRATION_URL, "utf8");
+}
+
+export async function loadWorkItemWorkflowMigrationSql(): Promise<string> {
+  return readFile(WORK_ITEM_WORKFLOW_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1454,6 +1463,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: BUILD_FAILURE_EMAIL_NOTIFICATIONS_MIGRATION_NAME,
       sql: await loadBuildFailureEmailNotificationsMigrationSql(),
+    },
+    {
+      name: WORK_ITEM_WORKFLOW_MIGRATION_NAME,
+      sql: await loadWorkItemWorkflowMigrationSql(),
     },
   ];
 }

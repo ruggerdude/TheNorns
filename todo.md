@@ -1335,3 +1335,76 @@ decision and is deliberately untouched.
   design call, not a cleanup.
 - [x] EXEC-VERIFY-AUTODETECT — ✅ **Verification works for all projects without per-project setup.** Root cause (live on StrumSheetTA): verification commands only reached the runner from ingested `project_memory` build/test/lint facts, plan-level command acceptance, or a committed `.norns/verification.json`. A greenfield project has none of these, so it failed closed — an opaque "verification failed" with nothing to fix. Fix (runner-side, in `verify()` before fail-closed): `autoDetectVerificationCommands` reads the committed `package.json` at the exact commit and derives `install`/`build`/`test` from the project's OWN declared scripts, with the package manager taken from the committed lockfile (`pnpm`/`yarn`/`npm ci`, or `npm install` with no lockfile). Honest by construction — it runs the tests a human reading the repo would run, never a stand-in; a project with no real build/test (or only the `npm init` "no test specified" placeholder) still returns null and fails closed with an improved, actionable message. Also made a committed manifest and auto-detect **override the built-in git-hygiene DEFAULT** (a whitespace lint E4 flags as not-a-test), while leaving a real operator-configured `NORNS_VERIFICATION_POLICIES_JSON` policy untouched; opt out with `NORNS_VERIFICATION_AUTODETECT=0`. Tests: unit (pnpm/npm-ci/npm-install detection, placeholder/no-package.json → null) + a **small-development end-to-end through the real executor** (runtime writes a module+test+package.json, no verification configured → auto-detect runs real `npm test` → passes → work integrates into `main`). runnerVerificationPolicies + runnerPublication 21/21, 88 across verification-touching suites, tsc + biome clean. Ships in a new agent build (runner change). NOTE re StrumSheetTA specifically: its foundation branch has only `probe.txt`="hello" and no `package.json` — no real project — so it still (correctly) fails; that's an agent-output problem, not a verification-config one.
 - [x] EXEC-PICKER-ASYNC — ✅ **Local folder picker no longer fails with "upstream error" / "Failed to fetch".** Recurring bug (hit live during the verify-test setup): choosing a project folder for a This-computer project did `await workspaceBroker.request({operation:"choose"})` inside the HTTP handler, holding ONE request open for up to the broker's 5-minute timeout while the human picks a directory. No edge proxy holds a request open that long — Railway returns 502 "upstream error", and a redeploy (or any network blip) mid-request drops it as "Failed to fetch". Fix (server + web, NO agent change — the agent answers the same `workspace_request` frames): `RunnerWorkspaceBroker` gains `initiate()` (fire the pick, return a request_id immediately, store the eventual outcome for a TTL) and `poll()` (collect it once). The route splits into POST `/…/choose` → `{request_id}` and GET `/…/choose/:requestId` → pending(202)/selection/error. The web `chooseLocalRepository()` initiates then polls with fast requests, treating a network blip or 5xx as "keep waiting" and only bailing on a definitive answer or a client deadline — so proxy timeouts, redeploys-between-polls, and blips can no longer kill a pick. (A server restart *during* the pick still loses the in-memory pending → a clean "try again", vs. the old opaque 502.) Tests: broker initiate/poll + disconnect-mid-pick unit tests, and the real-daemon frontDoor end-to-end updated to the poll flow (POST→poll→selection→create). runnerWorkspaceBroker 6/6, frontDoorLocalProjectCreation + deviceCutoverRoutes green, Account.connections 11/11, tsc + biome + web build clean. **Follow-up:** the New Project wizard uses a SECOND picker route — POST /api/v2/computers/:id/clone-destination (choose_clone_parent) — whose web caller did an uncaught res.json() (so a 502 body threw "Unexpected token u", the exact wizard error); applied the same initiate+poll async fix there (chooseCloneDestination polls resiliently), with the real-daemon clone-destination e2e and Projects.onboarding tests updated.
+
+## Pipeline create→dispatch fixes (2026-08-20)
+
+Root-caused live: a new project (esp. an empty/greenfield repo) cannot run a
+development end-to-end. Evidence walked a real run through every gate. Five
+root causes; fixes are shared across quick AND QC/phased unless noted.
+
+- [x] ✅ PIPE-GREENFIELD — Server fail-closed dispatch when a project had no
+  build/test/lint fact or committed manifest (`taskContextAssembler.ts:1243`),
+  permanently blocking the first task on an empty repo — the one that would
+  CREATE the tests (chicken-and-egg). Fix: `deriveAuthoritativeRepositoryFacts`
+  records a deterministic `verification_bootstrap: greenfield` marker when the
+  committed tree has no root `package.json` and no `.norns/verification.json`;
+  it's an authoritative (reconciled) fact so it appears while greenfield and
+  vanishes once a build system lands. The gate allows dispatch when the marker
+  is present, deferring to the runner's chain (auto-detect → git-hygiene →
+  fail-closed). Populated-but-undeclared repos still fail closed. ponytail
+  ceiling: a non-Node greenfield repo is also flagged and would dispatch then
+  fail closed at the runner — safe, minor wasted compute. Tests: 5 derivation +
+  2 gate (bootstrap allows / populated still fails) — repositoryVerificationFacts
+  + executionTaskContext 45/45. Shared (quick + phased).
+- [ ] 🟡 PIPE-AUTOINGEST — New projects have no architecture revision, so the
+  first dispatch is refused ("no architecture revision"); today only a
+  frontend recovery triggers ingest, and the quick path never reaches it.
+  Auto-ingest at project creation (or server-side on the missing-revision
+  dispatch error). Shared.
+- [ ] 🟡 PIPE-VALIDATE — After deploy, drive BOTH end-to-end live from fresh
+  projects: (1) a quick push and (2) a phased plan, each through plan →
+  implement → verify → integrate onto `main`. Definition of done for this
+  batch.
+- [x] ✅ PIPE-QUICKRUN — Quick push had no execution engine: it routed to a
+  bespoke dead-end (`createQuickWorkspace`/`insertQuickWorkItem`) that stamped
+  the work item `executing` with `planning_run_id=NULL` and no plan, so the
+  coordinator never dispatched and the UI spun "Preparing the approved phases…"
+  forever (404s swallowed). Root design: quick IS phased minus QC — the two had
+  diverged into separate code paths. Fix (convergence, per the product owner):
+  persist `work_items.workflow` (migration 0088 + contract field on
+  V2CreateWorkItemInput/V2WorkItem); route the quick workflow through the SAME
+  `createPlanningWorkspace` as phased; at the plan-approval seam
+  (`planWorkflow.send_plan_to_qc`) auto-waive QC when `workflow='quick'` (reuses
+  the existing `skip_qc` waiver → converged review, no reviewer, then the human
+  "proceed"/approve → kickoff intent → ExecutionKickoffService → real phase +
+  tasks + dispatch). Deleted the dead-end (`createQuickWorkspace`,
+  `insertQuickWorkItem`, the route branch). Frontend needs no change (quick now
+  yields a planning conversation, rendered like phased); updated the composer
+  copy. Tests: quick auto-waives-QC behavioral test (conversationPlanWorkflow),
+  rewritten quickWorkItem + conversationUiStream, web fixtures. Server tsc/biome
+  clean; conversation+qc+kickoff+migration suites green; web conversation/
+  onboarding 98 green.
+- [ ] ⛔ PIPE-BINDINGS — REASSESSED (attempt reverted). The 3-binding tangle is
+  a KNOWN, deliberate artifact, not the dispatch blocker: for local execution
+  the header of projectOnboardingService.ts intentionally records a github
+  WORKSPACE candidate that activation promotes as a transient primary, then the
+  device path repoints primary to the local binding — leaving the github
+  workspace binding orphaned (cosmetic UI noise in the resume payload).
+  Threading `source='local'` into the candidate BREAKS activation:
+  `ProjectActivationService.promote` hard-throws `no_repository_attached`
+  without a github workspace candidate (it needs one to set the primary). And
+  live evidence shows the extra binding never blocked dispatch (the test run
+  died at the verification gate, before the dispatch-target stage); a
+  device-backed local binding is launchable even while `disconnected`. So this
+  is cosmetic hygiene, not a runtime fix. Correct fix (deferred): revoke the
+  orphaned github workspace binding after the local binding becomes primary —
+  needs careful validation, low urgency.
+- [x] ✅ PIPE-RUNNER-REAP — Runner never reaped orphaned `executing` runs on
+  restart, so a killed run pinned the single concurrency slot and blocked all
+  new dispatches. Fix: `RunnerStateFile.orphanedExecutingIds(live)` returns
+  stuck `executing` entries with no live owner; `handleReconcileResponse` fails
+  each once (`executing → failed`, the only legal terminal edge from
+  `executing`) so the run frees its slot. `inFlightCommands` (empty on a fresh
+  process) distinguishes a true orphan from a live run across a reconnect.
+  Tests: orphanReap.test.mjs (3) + full runner suite 81/81. Requires a new
+  agent build.

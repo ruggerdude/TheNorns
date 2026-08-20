@@ -35,6 +35,7 @@ const workItem: V2WorkItemT = {
   created_by_user_id: "user-1",
   title: "# Conversation-first planning",
   objective: "Plan a durable project conversation.",
+  workflow: "phased",
   status: "planning",
   planning_run_id: null,
   phase_id: null,
