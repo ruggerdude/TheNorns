@@ -5,7 +5,7 @@ import type {
   V2HumanWaitT,
 } from "@norns/contracts";
 import { V2_HUMAN_WAIT_INSTRUCTION_HASH } from "@norns/contracts";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConversationActionCard } from "./ConversationActionCard";
@@ -251,7 +251,7 @@ describe("Phase 5 execution conversation controls", () => {
     expect(screen.queryByText(/It has not been sent/i)).not.toBeInTheDocument();
   });
 
-  it("prepares an exact durable answer, then requires separate action confirmation", async () => {
+  it("sends a reply in one step: the proposed answer is confirmed automatically", async () => {
     const wait = humanWait();
     const onPrepareAnswer = vi.fn(async () => true);
     const onConfirm = vi.fn(async () => undefined);
@@ -261,7 +261,7 @@ describe("Phase 5 execution conversation controls", () => {
       expected_version: wait.version,
       question_hash: wait.question_hash,
       answer: "Run it before the deploy.",
-      rationale: "Rollback is simpler before traffic moves.",
+      rationale: null,
     });
     const { rerender } = render(
       <HumanWaitCard
@@ -277,26 +277,17 @@ describe("Phase 5 execution conversation controls", () => {
       />,
     );
 
-    expect(screen.getByText("phase5/wait-1")).toBeInTheDocument();
-    expect(
-      screen.getByText(/runner was released after publishing its branch/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/The agent paused to ask you this/i)).toBeInTheDocument();
     await user.type(
-      screen.getByRole("textbox", { name: "Exact answer" }),
+      screen.getByRole("textbox", { name: "Your reply" }),
       "Run it before the deploy.",
     );
-    await user.type(
-      screen.getByRole("textbox", { name: "Rationale (optional)" }),
-      "Rollback is simpler before traffic moves.",
-    );
-    await user.click(screen.getByRole("button", { name: "Prepare answer for confirmation" }));
-    expect(onPrepareAnswer).toHaveBeenCalledWith(
-      wait,
-      "Run it before the deploy.",
-      "Rollback is simpler before traffic moves.",
-    );
+    await user.click(screen.getByRole("button", { name: "Send reply" }));
+    expect(onPrepareAnswer).toHaveBeenCalledWith(wait, "Run it before the deploy.", null);
     expect(onConfirm).not.toHaveBeenCalled();
 
+    // Once the proposed answer action exists, the card confirms it on its own —
+    // no separate "confirm the action card" click.
     rerender(
       <HumanWaitCard
         view={{ wait, answer: null, continuation: null }}
@@ -310,10 +301,7 @@ describe("Phase 5 execution conversation controls", () => {
         onRefresh={vi.fn()}
       />,
     );
-    await user.click(screen.getByRole("button", { name: "Confirm action: Submit exact answer" }));
-    // Not a send_plan_to_qc action, so no kickoff qc_mode control renders and
-    // no override is passed.
-    expect(onConfirm).toHaveBeenCalledWith(proposed, undefined);
+    await waitFor(() => expect(onConfirm).toHaveBeenCalledWith(proposed));
   });
 
   it("locks an uncertain human-wait answer to the exact persisted draft for retry", async () => {
@@ -342,13 +330,12 @@ describe("Phase 5 execution conversation controls", () => {
       />,
     );
 
-    expect(screen.getByRole("textbox", { name: "Exact answer" })).toBeDisabled();
-    expect(screen.getByRole("textbox", { name: "Rationale (optional)" })).toBeDisabled();
-    await user.click(screen.getByRole("button", { name: "Retry exact answer proposal" }));
+    expect(screen.getByRole("textbox", { name: "Your reply" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Retry reply" }));
     expect(onPrepareAnswer).toHaveBeenCalledWith(
       wait,
       "Keep the migration before deployment.",
-      "This preserves the tested rollback path.",
+      null,
     );
   });
 
@@ -391,11 +378,13 @@ describe("Phase 5 execution conversation controls", () => {
         onRefresh={vi.fn()}
       />,
     );
-    const timeline = within(
-      screen.getByRole("region", { name: "Continuation delivery" }),
-    ).getByRole("list");
-    expect(within(timeline).getByText("dispatched")).toHaveAttribute("aria-current", "step");
-    expect(screen.getByText(/One continuation is queued/i)).toBeInTheDocument();
+    // No step-tracker any more — a plain, self-updating status line reflects the
+    // dispatched continuation, and there is no Refresh/Continue button to click.
+    expect(screen.getByText(/Sending your answer to the agent/i)).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Continuation delivery" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Refresh continuation status/i }),
+    ).not.toBeInTheDocument();
 
     rerender(
       <HumanWaitCard
@@ -410,8 +399,8 @@ describe("Phase 5 execution conversation controls", () => {
         onRefresh={vi.fn()}
       />,
     );
-    expect(screen.getByText(/cancelled\. No continuation was sent/i)).toBeInTheDocument();
-    expect(screen.queryByRole("textbox", { name: "Exact answer" })).not.toBeInTheDocument();
+    expect(screen.getAllByText(/This question was cancelled/i).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("textbox", { name: "Your reply" })).not.toBeInTheDocument();
   });
 
   it("saves an explicit project PM update override or clears it to inherit", async () => {

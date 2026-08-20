@@ -10,7 +10,7 @@ import type {
   V2HumanWaitT,
   V2WorkPlanVersionT,
 } from "@norns/contracts";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ConversationActionCard } from "./ConversationActionCard";
 import { Badge, Button, Field, Input, Select, TextArea } from "./ui";
 
@@ -512,33 +512,34 @@ export function ExecutionActionComposer({
 
 function waitStatusCopy(wait: V2HumanWaitT): string {
   if (wait.status === "awaiting_human") {
-    return "The runner was released after publishing its branch. Your answer will create one continuation.";
+    return "The agent paused to ask you this. Reply below and it'll pick up where it left off.";
   }
-  if (wait.status === "answered")
-    return "Your answer is recorded. Continuation dispatch is pending.";
+  if (wait.status === "answered") return "Your reply is saved. Handing it back to the agent…";
   if (wait.status === "continuation_queued") {
-    return "One continuation is queued from the saved commit and budget reservation.";
+    return "Your reply is saved. Waiting for the agent to pick it up.";
   }
-  if (wait.status === "resumed") return "The saved run resumed from this answer.";
-  if (wait.status === "expired") return "This question expired without resuming work.";
-  if (wait.status === "cancelled") return "This question was cancelled. No continuation was sent.";
-  return "The continuation failed. Review the evidence before retrying.";
+  if (wait.status === "resumed") return "The agent resumed from your reply.";
+  if (wait.status === "expired") return "This question expired before the agent could resume.";
+  if (wait.status === "cancelled") return "This question was cancelled.";
+  return "The agent couldn't apply your reply. Try again below.";
 }
 
-function continuationStepState(
-  continuation: V2HumanWaitContinuationT,
-  step: V2HumanWaitContinuationT["status"],
-): "complete" | "current" | "pending" {
-  const statuses: V2HumanWaitContinuationT["status"][] = [
-    "queued",
-    "dispatched",
-    "acknowledged",
-    "applied",
-  ];
-  if (continuation.status === "failed") return step === "queued" ? "complete" : "pending";
-  const current = statuses.indexOf(continuation.status);
-  const candidate = statuses.indexOf(step);
-  return candidate === current ? "current" : candidate < current ? "complete" : "pending";
+// Plain, self-updating one-liner shown after a reply is sent — replaces the
+// delivery/continuation step-trackers and the Continue/Refresh buttons.
+function humanWaitAnswerStatusCopy(
+  wait: V2HumanWaitT,
+  continuation: V2HumanWaitContinuationT | null,
+): string {
+  if (wait.status === "resumed" || continuation?.status === "applied") {
+    return "Answer sent — the agent has picked up where it left off.";
+  }
+  if (wait.status === "expired") return "This question expired before the agent could resume.";
+  if (wait.status === "cancelled") return "This question was cancelled.";
+  if (continuation?.status === "acknowledged") return "The agent has your answer; resuming…";
+  if (continuation?.status === "dispatched") return "Sending your answer to the agent…";
+  // queued, or not yet reported: the answer is saved and will resume on its own
+  // once the agent is available — no action needed from you.
+  return "Answer saved — waiting for the agent to pick it up. This resumes on its own.";
 }
 
 function waitDraftKey(waitId: string): string {
@@ -588,7 +589,6 @@ export function HumanWaitCard({
 }): React.ReactElement {
   const initialDraft = useMemo(() => storedWaitDraft(view.wait.id), [view.wait.id]);
   const [answer, setAnswer] = useState(initialDraft.answer);
-  const [rationale, setRationale] = useState(initialDraft.rationale);
   const titleId = `human-wait-${view.wait.id}`;
   const terminal = ["resumed", "expired", "cancelled", "failed"].includes(view.wait.status);
   const matchingEffect = effect?.kind === "human_wait_answered" ? effect : null;
@@ -596,15 +596,49 @@ export function HumanWaitCard({
   const immutableAnswer = matchingEffect?.answer ?? view.answer;
   const retryLocked =
     exactRetryLocked || (error?.startsWith("Answer status is uncertain.") ?? false);
+  // An answer is in flight (or recorded) once the wait leaves awaiting_human or
+  // a proposed answer action exists — that's when the plain status line shows
+  // instead of the reply box.
+  const answered = answerAction !== null || view.wait.status !== "awaiting_human";
 
-  const persistDraft = (nextAnswer: string, nextRationale: string) => {
+  // One-step reply: once the proposed answer action exists, confirm it
+  // automatically so a single "Send reply" resumes the run. This runs after
+  // render — `busy` has cleared and `onConfirm` is fresh — so there is no
+  // stale-closure race on the shared busy flag. If the confirm fails the
+  // action stays `proposed` and its card shows a manual Confirm as a fallback;
+  // the ref keeps us from re-firing the same confirm in a loop.
+  const autoConfirmedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      answerAction &&
+      answerAction.status === "proposed" &&
+      !busy &&
+      !error &&
+      autoConfirmedRef.current !== answerAction.id
+    ) {
+      autoConfirmedRef.current = answerAction.id;
+      void onConfirm(answerAction);
+    }
+  }, [answerAction, busy, error, onConfirm]);
+
+  // Auto-advance: once the answer is in, poll for status on its own until the
+  // continuation applies (or the wait ends) so the run resumes without any
+  // "Continue action" / "Refresh continuation status" clicks.
+  const pending = answered && !terminal && continuation?.status !== "applied" && !error;
+  useEffect(() => {
+    if (!pending) return;
+    const id = setInterval(() => onRefresh(), 5_000);
+    return () => clearInterval(id);
+  }, [pending, onRefresh]);
+
+  const persistDraft = (nextAnswer: string) => {
     try {
       window.sessionStorage.setItem(
         waitDraftKey(view.wait.id),
-        JSON.stringify({ answer: nextAnswer, rationale: nextRationale }),
+        JSON.stringify({ answer: nextAnswer, rationale: "" }),
       );
     } catch {
-      // The controlled fields still retain the exact draft for this mount.
+      // The controlled field still retains the exact draft for this mount.
     }
   };
 
@@ -633,24 +667,27 @@ export function HumanWaitCard({
       </header>
       <p className="human-wait-question">{view.wait.question}</p>
       <p className="muted">{waitStatusCopy(view.wait)}</p>
-      <dl className="human-wait-evidence">
-        <div>
-          <dt>Published branch</dt>
-          <dd>{view.wait.published.branch}</dd>
-        </div>
-        <div>
-          <dt>Saved commit</dt>
-          <dd>
-            <code title={view.wait.published.commit_sha}>
-              {view.wait.published.commit_sha.slice(0, 12)}
-            </code>
-          </dd>
-        </div>
-        <div>
-          <dt>Budget reservation</dt>
-          <dd>{view.wait.budget.reservation_id}</dd>
-        </div>
-      </dl>
+      <details className="human-wait-details">
+        <summary>Details</summary>
+        <dl className="human-wait-evidence">
+          <div>
+            <dt>Published branch</dt>
+            <dd>{view.wait.published.branch}</dd>
+          </div>
+          <div>
+            <dt>Saved commit</dt>
+            <dd>
+              <code title={view.wait.published.commit_sha}>
+                {view.wait.published.commit_sha.slice(0, 12)}
+              </code>
+            </dd>
+          </div>
+          <div>
+            <dt>Budget reservation</dt>
+            <dd>{view.wait.budget.reservation_id}</dd>
+          </div>
+        </dl>
+      </details>
 
       {immutableAnswer ? (
         <blockquote>
@@ -665,7 +702,7 @@ export function HumanWaitCard({
           className="human-wait-answer-form"
           onSubmit={(event) => {
             event.preventDefault();
-            void onPrepareAnswer(view.wait, answer.trim(), nullable(rationale)).then((created) => {
+            void onPrepareAnswer(view.wait, answer.trim(), null).then((created) => {
               if (!created) return;
               try {
                 window.sessionStorage.removeItem(waitDraftKey(view.wait.id));
@@ -675,7 +712,7 @@ export function HumanWaitCard({
             });
           }}
         >
-          <Field label="Exact answer">
+          <Field label="Your reply">
             <TextArea
               required
               maxLength={8_000}
@@ -683,77 +720,52 @@ export function HumanWaitCard({
               disabled={busy || retryLocked}
               onChange={(event) => {
                 setAnswer(event.target.value);
-                persistDraft(event.target.value, rationale);
+                persistDraft(event.target.value);
               }}
             />
           </Field>
-          <Field label="Rationale (optional)">
-            <TextArea
-              maxLength={4_000}
-              value={rationale}
-              disabled={busy || retryLocked}
-              onChange={(event) => {
-                setRationale(event.target.value);
-                persistDraft(answer, event.target.value);
-              }}
-            />
-          </Field>
-          <p>
-            Preparing this answer does not resume work. Confirm the resulting action card
-            separately.
-          </p>
           {error ? (
             <output className="conversation-action-error" role="alert">
               {error}
             </output>
           ) : null}
           <Button type="submit" variant="primary" disabled={busy || !answer.trim()}>
-            {busy
-              ? "Preparing exact answer…"
-              : retryLocked
-                ? "Retry exact answer proposal"
-                : "Prepare answer for confirmation"}
+            {busy ? "Sending…" : retryLocked ? "Retry reply" : "Send reply"}
           </Button>
         </form>
       ) : null}
 
-      {answerAction ? (
-        <ConversationActionCard
-          action={answerAction}
-          busy={busy}
-          effect={effect}
-          deliveryEvents={eventsFor(answerAction.id, deliveryEvents)}
-          error={error}
-          onConfirm={onConfirm}
-        />
+      {answered ? (
+        <p className="human-wait-status" aria-live="polite">
+          {humanWaitAnswerStatusCopy(view.wait, continuation)}
+        </p>
       ) : null}
 
-      {continuation ? (
-        <section className="human-wait-continuation" aria-label="Continuation delivery">
-          <strong>Continuation</strong>
-          <ol>
-            {(["queued", "dispatched", "acknowledged", "applied"] as const).map((status) => (
-              <li
-                key={status}
-                className={`is-${continuationStepState(continuation, status)}`}
-                aria-current={continuation.status === status ? "step" : undefined}
-              >
-                {status}
-              </li>
-            ))}
-          </ol>
-          {continuation.status === "failed" ? (
-            <output className="conversation-action-outcome is-failed" aria-live="polite">
-              Continuation failed
+      {answered && (error || continuation?.status === "failed") ? (
+        <div className="human-wait-answer-retry">
+          {error ? (
+            <output className="conversation-action-error" role="alert">
+              {error}
             </output>
-          ) : null}
-        </section>
-      ) : null}
-
-      {!terminal && view.wait.status !== "awaiting_human" ? (
-        <Button className="btn-small" onClick={onRefresh}>
-          Refresh continuation status
-        </Button>
+          ) : (
+            <output className="conversation-action-outcome is-failed" aria-live="polite">
+              The agent could not apply your answer.
+            </output>
+          )}
+          {answerAction ? (
+            <Button
+              className="btn-small"
+              disabled={busy}
+              onClick={() => void onConfirm(answerAction)}
+            >
+              {busy ? "Retrying…" : "Try again"}
+            </Button>
+          ) : (
+            <Button className="btn-small" disabled={busy} onClick={onRefresh}>
+              Refresh
+            </Button>
+          )}
+        </div>
       ) : null}
     </article>
   );
