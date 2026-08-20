@@ -175,3 +175,97 @@ export async function readRepositoryVerificationManifest(
   if (record.commands.length === 0) return null;
   return parseCommands(REPOSITORY_VERIFICATION_MANIFEST, record.commands);
 }
+
+/** A blob at the exact commit, or null when the path is absent there. */
+async function fileAtCommit(
+  worktreePath: string,
+  commit: string,
+  path: string,
+): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-C", worktreePath, "show", `${commit}:${path}`],
+      { maxBuffer: 4 * 1024 * 1024 },
+    );
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * EXEC-VERIFY-AUTODETECT — the last resort BEFORE failing closed: run the
+ * project's OWN declared build/test, derived from its committed `package.json`.
+ *
+ * This is what makes verification work for a greenfield project with no
+ * ingested facts, no plan-level acceptance commands, and no committed
+ * `.norns/verification.json` — the exact case that otherwise fails closed with
+ * nothing to run. It is honest by construction: it runs the scripts the project
+ * itself declares (the tests a human reading the repo would run), never a
+ * stand-in. A project with no real build or test script (only the `npm init`
+ * "no test specified" placeholder, or nothing) still returns null and falls
+ * through to the fail-closed message, because inventing a green check for a
+ * project that declares no verification is the dishonesty E4 removed.
+ *
+ * The package manager is read from the committed lockfile so the command
+ * matches how the project is actually built; `npm` with no lockfile is the
+ * conservative default. Set NORNS_VERIFICATION_AUTODETECT=0 to disable and rely
+ * only on explicit configuration.
+ */
+export async function autoDetectVerificationCommands(
+  worktreePath: string,
+  commit: string,
+): Promise<readonly VerificationCommand[] | null> {
+  if (process.env.NORNS_VERIFICATION_AUTODETECT === "0") return null;
+  const raw = await fileAtCommit(worktreePath, commit, "package.json");
+  if (raw === null) return null;
+  let pkg: { scripts?: unknown };
+  try {
+    pkg = JSON.parse(raw) as { scripts?: unknown };
+  } catch {
+    return null;
+  }
+  const scripts =
+    pkg.scripts && typeof pkg.scripts === "object" ? (pkg.scripts as Record<string, unknown>) : {};
+  const scriptValue = (name: string): string | null => {
+    const value = scripts[name];
+    return typeof value === "string" && value.trim() !== "" ? value : null;
+  };
+  const buildScript = scriptValue("build");
+  const testScript = scriptValue("test");
+  // The `npm init` default test is a placeholder that always exits 1; treating
+  // its presence as "has tests" would fail every unconfigured project. Absence
+  // of a real build AND a real test means nothing to verify -> fail closed.
+  const hasTest = testScript !== null && !/no test specified/i.test(testScript);
+  const hasBuild = buildScript !== null;
+  if (!hasTest && !hasBuild) return null;
+
+  const [pnpmLock, yarnLock, npmLock] = await Promise.all([
+    fileAtCommit(worktreePath, commit, "pnpm-lock.yaml"),
+    fileAtCommit(worktreePath, commit, "yarn.lock"),
+    fileAtCommit(worktreePath, commit, "package-lock.json"),
+  ]);
+  let pm: "pnpm" | "yarn" | "npm";
+  let install: [string, ...string[]];
+  if (pnpmLock !== null) {
+    pm = "pnpm";
+    install = ["pnpm", "install", "--frozen-lockfile"];
+  } else if (yarnLock !== null) {
+    pm = "yarn";
+    install = ["yarn", "install", "--frozen-lockfile"];
+  } else if (npmLock !== null) {
+    pm = "npm";
+    install = ["npm", "ci"];
+  } else {
+    pm = "npm";
+    install = ["npm", "install"];
+  }
+
+  const commands: VerificationCommand[] = [{ name: "install", command: install }];
+  if (hasBuild) commands.push({ name: "build", command: [pm, "run", "build"] });
+  if (hasTest) {
+    commands.push({ name: "test", command: pm === "npm" ? ["npm", "test"] : [pm, "test"] });
+  }
+  return commands;
+}

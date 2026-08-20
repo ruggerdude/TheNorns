@@ -28,6 +28,7 @@ import {
   REPOSITORY_VERIFICATION_MANIFEST,
   type VerificationCommand,
   type VerificationPolicyMap,
+  autoDetectVerificationCommands,
   isHygieneOnly,
   readRepositoryVerificationManifest,
 } from "./verificationPolicies.js";
@@ -477,7 +478,15 @@ export class CommandPolicyVerifier implements RunnerVerifier {
       commands = this.policies.get(input.policy_ref);
       source = `policy ${input.policy_ref}`;
     }
-    if (!commands) {
+    // A project that declares its OWN verification — a committed manifest or
+    // package.json build/test scripts — must outrank the built-in git-hygiene
+    // DEFAULT, which is a whitespace lint, not a test suite (E4). The guard is
+    // `!commands || isHygieneOnly(commands)`, so a real operator-configured
+    // policy (from NORNS_VERIFICATION_POLICIES_JSON) is left untouched, but the
+    // weak default gives way to the project's real checks. Nothing here can
+    // manufacture a green: if the project declares no real verification, the
+    // hygiene default (or the fail-closed message) still stands.
+    if (!commands || isHygieneOnly(commands)) {
       try {
         const manifest = await readRepositoryVerificationManifest(
           input.worktree_path,
@@ -491,12 +500,31 @@ export class CommandPolicyVerifier implements RunnerVerifier {
         return refuse(error instanceof Error ? error.message : String(error));
       }
     }
+    if (!commands || isHygieneOnly(commands)) {
+      // EXEC-VERIFY-AUTODETECT — run the project's OWN declared build/test from
+      // its committed package.json. This is what makes a greenfield project (no
+      // ingested facts, no plan-level acceptance, no committed manifest)
+      // verifiable without per-project setup, while staying honest — a project
+      // that declares no real build or test keeps the prior outcome.
+      try {
+        const detected = await autoDetectVerificationCommands(
+          input.worktree_path,
+          input.expected_commit,
+        );
+        if (detected) {
+          commands = detected;
+          source = "auto-detected from package.json";
+        }
+      } catch (error) {
+        return refuse(error instanceof Error ? error.message : String(error));
+      }
+    }
     if (!commands) {
       // FAIL CLOSED. The old code threw here, which the executor turned into an
       // opaque failure; and where it did not throw it returned a meaningless
       // pass. Neither told anyone what to fix.
       return refuse(
-        `verification policy ${input.policy_ref} is not approved on this runner and the repository has no ${REPOSITORY_VERIFICATION_MANIFEST}; set NORNS_VERIFICATION_POLICIES_JSON or commit a verification manifest`,
+        `verification policy ${input.policy_ref} is not approved on this runner, the repository has no ${REPOSITORY_VERIFICATION_MANIFEST}, and no build or test script was found in package.json; set NORNS_VERIFICATION_POLICIES_JSON, commit a verification manifest, or declare build/test scripts`,
       );
     }
 

@@ -850,6 +850,80 @@ describe("EXECUTION E4 — a run's work is published, and verification is real",
     expect(await git(h.remote, "rev-parse", "refs/heads/main")).toBe(commit);
   });
 
+  it("SMALL DEVELOPMENT end-to-end: auto-detected npm test verifies the work, which then integrates into the base", async () => {
+    const h = await harness(cleanup);
+    // A runtime that writes a real (if tiny) Node project — a module, its test,
+    // and a package.json declaring how to test it — then commits it. No
+    // verification is configured anywhere: the point is that the runner derives
+    // it from the project itself.
+    const buildingRuntime: CodingRuntime = {
+      ...idleRuntime,
+      run: async (request) => {
+        const files: Record<string, string> = {
+          "package.json": JSON.stringify({
+            name: "smalldev",
+            version: "1.0.0",
+            private: true,
+            scripts: { test: "node test.js" },
+          }),
+          "src.js": "module.exports = (a, b) => a + b;\n",
+          "test.js":
+            'const assert = require("assert");\nconst add = require("./src.js");\nassert.strictEqual(add(2, 3), 5);\nconsole.log("ok");\n',
+        };
+        for (const [name, body] of Object.entries(files)) {
+          await execFileAsync(
+            "node",
+            ["-e", `require('fs').writeFileSync(${JSON.stringify(name)}, ${JSON.stringify(body)})`],
+            { cwd: request.worktreePath },
+          );
+        }
+        await git(request.worktreePath, "add", "-A");
+        await git(request.worktreePath, "commit", "-m", "add adder + test");
+        return {
+          outcome: "completed",
+          detail: "done",
+          usage: { input_tokens: 10, output_tokens: 5, usage_source: "runtime_report" },
+        };
+      },
+    };
+
+    // Empty policy map + no committed manifest + no dispatch commands: the
+    // ONLY way this verifies is the auto-detected package.json scripts.
+    const runner = new V2RunnerExecutor(
+      { id: "runner-1", generation: 3, scratch_root: h.root },
+      h.registry,
+      contextLoader(),
+      new GitWorktreeManager(h.worktreeRoot),
+      new Map([["codex", buildingRuntime]]),
+      new CommandPolicyVerifier(new Map()),
+      undefined,
+      new GitPublisher({
+        repositorySlug: "acme/widgets",
+        token: "test-token",
+        fetchImpl: githubApi().fetchImpl,
+      }),
+    );
+    const events: EventPayloadT[] = [];
+    const result = await runner.execute(
+      // Local-runner direct-to-base: integrate into main once verified.
+      dispatchCommand({ expected_revision: h.base, integrate_base_branch: "main" }),
+      (event) => events.push(event),
+    );
+
+    // Verification ran the project's OWN test (not git hygiene) and passed.
+    expect(result.verification_passed).toBe(true);
+    expect(result.outcome).toBe("succeeded");
+    const verification = events.find((event) => event.kind === "verification_result");
+    expect(verification).toMatchObject({ passed: true });
+
+    // The verified work integrated: main on the remote IS the run's commit.
+    const published = events.find((event) => event.kind === "run_published") as
+      | (EventPayloadT & { kind: "run_published" })
+      | undefined;
+    expect(published?.integration_outcome).toBe("integrated");
+    expect(await git(h.remote, "rev-parse", "refs/heads/main")).toBe(result.commit_sha);
+  });
+
   it("EXEC-INTEGRATE-1: reports a conflict rather than force-moving a base that advanced independently", async () => {
     const h = await harness(cleanup);
     const work = resolve(h.root, "work");

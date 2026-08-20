@@ -120,6 +120,7 @@ export {
 export {
   DEFAULT_VERIFICATION_POLICY_REF,
   REPOSITORY_VERIFICATION_MANIFEST,
+  autoDetectVerificationCommands,
   isHygieneOnly,
   readRepositoryVerificationManifest,
   runnerVerificationPolicies,
