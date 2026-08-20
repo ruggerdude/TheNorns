@@ -21,6 +21,10 @@
 import type { V2ContentAddressedReferenceT, V2TaskInputFileT } from "@norns/contracts";
 import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
+import {
+  REPOSITORY_BOOTSTRAP_FACT_KEY,
+  REPOSITORY_BOOTSTRAP_GREENFIELD,
+} from "../projects/repositoryVerificationFacts.js";
 import { type TaskContextStore, taskContextDocumentId } from "./taskContextStore.js";
 import {
   VERIFICATION_COMMAND_KEYS,
@@ -1240,7 +1244,19 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
         policy: (VERIFICATION_POLICY_FACT_KEYS as readonly string[]).includes(key),
       };
     });
-    if (!facts.some((fact) => fact.policy) && !frozenPackageHasVerification) {
+    // A greenfield repo (deterministically: no committed build system yet) is
+    // allowed through without a verification command: its first task exists to
+    // CREATE the files verification will key off, so refusing here is a
+    // permanent chicken-and-egg deadlock. The runner's own chain (auto-detect
+    // once package.json exists → git-hygiene → fail-closed) is the guarantor
+    // that unverifiable work never publishes. A repo that already HAS a build
+    // system but declares no command still fails closed below.
+    const greenfield = facts.some(
+      (fact) =>
+        fact.key === REPOSITORY_BOOTSTRAP_FACT_KEY &&
+        fact.value === REPOSITORY_BOOTSTRAP_GREENFIELD,
+    );
+    if (!facts.some((fact) => fact.policy) && !frozenPackageHasVerification && !greenfield) {
       throw new TaskContextAssemblyError(
         "verification_commands_missing",
         `project ${project.id} has no ${VERIFICATION_POLICY_FACT_KEYS.join(", ")} repository fact`,

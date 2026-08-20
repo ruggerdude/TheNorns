@@ -485,6 +485,34 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
     expect(repository).toContain("runner will execute that full committed manifest");
   });
 
+  it("bootstraps a greenfield repo: the marker fact allows dispatch with no verification command", async () => {
+    // A brand-new repo has no build/test/lint fact and no manifest; ingestion
+    // records only the deterministic greenfield marker. The first task must be
+    // allowed to run (it creates the files verification later keys off), so
+    // assembly succeeds instead of the verification_commands_missing deadlock.
+    await pg.exec(
+      "DELETE FROM project_memory_entries WHERE id IN ('memory-fact-build_command','memory-fact-test_command','memory-fact-lint_command')",
+    );
+    await seedFact("verification_bootstrap", "greenfield", 1);
+
+    const refs = await assembler().assembleForTask(TASK);
+    expect(refs.length).toBeGreaterThan(0);
+  });
+
+  it("still fails closed for a populated repo with no verification command and no greenfield marker", async () => {
+    await pg.exec(
+      "DELETE FROM project_memory_entries WHERE id IN ('memory-fact-build_command','memory-fact-test_command','memory-fact-lint_command')",
+    );
+    const error = await assembler()
+      .assembleForTask(TASK)
+      .then(
+        () => null,
+        (thrown: unknown) => thrown,
+      );
+    expect(error).toBeInstanceOf(TaskContextAssemblyError);
+    expect((error as TaskContextAssemblyError).code).toBe("verification_commands_missing");
+  });
+
   it("never invents repository facts", async () => {
     const refs = await assembler().assembleForTask(TASK);
     const store = new TaskContextStore(transactions);

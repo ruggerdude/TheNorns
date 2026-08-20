@@ -40,8 +40,8 @@ import {
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import type { RepositoryIngestionService } from "./repositoryIngestionService.js";
 import {
-  REPOSITORY_VERIFICATION_FACT_KEYS,
-  deriveRepositoryVerificationFacts,
+  REPOSITORY_AUTHORITATIVE_FACT_KEYS,
+  deriveAuthoritativeRepositoryFacts,
   mergeRepositoryVerificationFacts,
 } from "./repositoryVerificationFacts.js";
 
@@ -258,7 +258,7 @@ export class RepositoryAnalysisService {
         `${sample.displayName} has no committed files at ${sample.headSha.slice(0, 12)}, so there is nothing to analyze.`,
       );
     }
-    const verificationFacts = deriveRepositoryVerificationFacts(sample.files, sample.treePaths);
+    const verificationFacts = deriveAuthoritativeRepositoryFacts(sample.files, sample.treePaths);
 
     // Upgrade/backfill path: a repository revision may already have been
     // analyzed before deterministic command discovery existed. Repair its
@@ -269,7 +269,7 @@ export class RepositoryAnalysisService {
       repository_binding_id: target.binding.id,
       repository_revision: sample.headSha,
       repository_facts: verificationFacts,
-      authoritative_fact_keys: REPOSITORY_VERIFICATION_FACT_KEYS,
+      authoritative_fact_keys: REPOSITORY_AUTHORITATIVE_FACT_KEYS,
     });
     if (replay) {
       return {
@@ -340,7 +340,7 @@ export class RepositoryAnalysisService {
         budget_policy_ref: target.project.budget_policy_ref,
         created_by: { actor_type: "human", actor_id: actor.actor_id },
       },
-      { authoritative_repository_fact_keys: REPOSITORY_VERIFICATION_FACT_KEYS },
+      { authoritative_repository_fact_keys: REPOSITORY_AUTHORITATIVE_FACT_KEYS },
     );
     return {
       architecture_revision_id: result.architecture_revision_id,

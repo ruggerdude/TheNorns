@@ -12,10 +12,27 @@ export const REPOSITORY_VERIFICATION_FACT_KEYS = [
   "verification_manifest",
 ] as const;
 
-export type RepositoryVerificationFactKey = (typeof REPOSITORY_VERIFICATION_FACT_KEYS)[number];
+/**
+ * Deterministic marker recorded when the repository has no committed build
+ * system yet (no root package.json and no committed verification manifest) — a
+ * greenfield repo whose first task must be allowed to run to CREATE the very
+ * files verification later keys off. It is authoritative and reconciled like a
+ * verification fact, so it appears while the repo is greenfield and disappears
+ * once a build system is committed.
+ */
+export const REPOSITORY_BOOTSTRAP_FACT_KEY = "verification_bootstrap";
+export const REPOSITORY_BOOTSTRAP_GREENFIELD = "greenfield";
+
+/** Authoritative fact keys derived only from committed files, never a model. */
+export const REPOSITORY_AUTHORITATIVE_FACT_KEYS = [
+  ...REPOSITORY_VERIFICATION_FACT_KEYS,
+  REPOSITORY_BOOTSTRAP_FACT_KEY,
+] as const;
+
+export type RepositoryAuthoritativeFactKey = (typeof REPOSITORY_AUTHORITATIVE_FACT_KEYS)[number];
 
 export interface RepositoryVerificationFact {
-  key: RepositoryVerificationFactKey;
+  key: RepositoryAuthoritativeFactKey;
   value: string;
   confidence: number;
 }
@@ -134,6 +151,47 @@ export function deriveRepositoryVerificationFacts(
 }
 
 /**
+ * A repo with no committed build system our tooling recognizes — no root
+ * package.json and no committed verification manifest. Its first task is a
+ * bootstrap that must run to create those files, so dispatch is allowed and the
+ * runner's own verification chain (auto-detect once package.json exists →
+ * git-hygiene → fail-closed) becomes the guard.
+ *
+ * ponytail: recognizes only the package.json / manifest ecosystems the runner
+ * can auto-verify. A non-Node greenfield repo (a lone Makefile, say) is also
+ * flagged greenfield and would dispatch, then fail closed at the runner if it
+ * produces nothing verifiable — safe, just some wasted compute. Widen this
+ * predicate if/when the runner learns to bootstrap-verify other ecosystems.
+ */
+function repositoryIsGreenfield(treePaths: readonly string[]): boolean {
+  const paths = new Set(treePaths);
+  return !paths.has("package.json") && !paths.has(".norns/verification.json");
+}
+
+/**
+ * All authoritative (committed-file-derived, never model-authored) facts: the
+ * verification commands/manifest plus the greenfield bootstrap marker. Recorded
+ * under REPOSITORY_AUTHORITATIVE_FACT_KEYS so re-ingestion reconciles them —
+ * the marker appears while greenfield and vanishes once a build system lands.
+ */
+export function deriveAuthoritativeRepositoryFacts(
+  files: readonly InspectedRepositoryFile[],
+  treePaths: readonly string[],
+): RepositoryVerificationFact[] {
+  const verification = deriveRepositoryVerificationFacts(files, treePaths);
+  if (verification.length > 0) return verification;
+  return repositoryIsGreenfield(treePaths)
+    ? [
+        {
+          key: REPOSITORY_BOOTSTRAP_FACT_KEY,
+          value: REPOSITORY_BOOTSTRAP_GREENFIELD,
+          confidence: 1,
+        },
+      ]
+    : [];
+}
+
+/**
  * Model output remains useful for descriptive facts, but it is never trusted
  * for executable policy keys. Exact command/manifest keys are removed first
  * and replaced only with facts deterministically supported by inspected files.
@@ -141,6 +199,6 @@ export function deriveRepositoryVerificationFacts(
 export function mergeRepositoryVerificationFacts<
   T extends { key: string; value: string; confidence: number },
 >(modelFacts: readonly T[], derivedFacts: readonly RepositoryVerificationFact[]) {
-  const policyKeys = new Set<string>(REPOSITORY_VERIFICATION_FACT_KEYS);
-  return [...modelFacts.filter((fact) => !policyKeys.has(fact.key.trim())), ...derivedFacts];
+  const authoritativeKeys = new Set<string>(REPOSITORY_AUTHORITATIVE_FACT_KEYS);
+  return [...modelFacts.filter((fact) => !authoritativeKeys.has(fact.key.trim())), ...derivedFacts];
 }
