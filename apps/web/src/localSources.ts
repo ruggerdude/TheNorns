@@ -102,10 +102,12 @@ export async function chooseLocalRepository(): Promise<
     ) & { detail?: string; message?: string };
     if (response.ok) return body as LocalRepositorySelection | { cancelled: true };
     const message = body.message?.trim() || body.detail?.trim();
-    // 422 = not a Git repo, 404 = the request was lost (e.g. a mid-pick
-    // restart). Those are final; everything else (409/429/5xx) is transient and
-    // we keep polling until the deadline.
-    if (response.status === 422 || response.status === 404) {
+    // 422 = not a Git repo — final. Everything else is transient and we keep
+    // polling until the deadline: 409/429/5xx are retries, and 404 "not found"
+    // is expected across a multi-replica deployment — the pick's state lives on
+    // the one instance holding the agent's socket, so a poll routed to another
+    // instance 404s and just needs to try again until it reaches the right one.
+    if (response.status === 422) {
       throw new Error(message ?? "Choose the root folder of a Git repository with a commit.");
     }
     lastError = message;

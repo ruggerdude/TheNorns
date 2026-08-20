@@ -1062,11 +1062,15 @@ export function Projects({
           setCloneDestination({ ...body, computer_id: selectedComputerId });
           return;
         }
-        // 422 = bad folder, 404 = the request was lost (a mid-pick restart);
-        // both final. Everything else (409/429/5xx) is transient — keep polling.
-        if (res.status === 404 || res.status === 422) {
+        // 422 = the chosen folder is invalid — final. Everything else is
+        // transient and we keep polling until the deadline: 409/429/5xx are
+        // retries, and 404 "not found" is expected across a multi-replica
+        // deployment — the pick's state lives on the one instance holding the
+        // agent's socket, so a poll load-balanced to another instance 404s and
+        // simply needs to try again until it reaches the right one.
+        if (res.status === 422) {
           throw new ApiError(
-            body.message ?? "The folder request was lost. Try again.",
+            body.message ?? "The chosen folder is not usable. Try again.",
             res.status,
             body.error ?? null,
           );

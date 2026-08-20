@@ -95,14 +95,19 @@ export class RunnerWorkspaceBroker {
 
   /**
    * Collect an initiated request's outcome. `pending` while the human is still
-   * choosing; a settled outcome is returned once and then discarded; `unknown`
-   * for an id this broker never held or has already handed back.
+   * choosing; a settled outcome; `unknown` for an id this broker never held
+   * (expected across a multi-replica deployment — the pick's state lives only
+   * on the instance that sent the frame, so a poll routed elsewhere is
+   * `unknown` and the caller simply retries until it reaches the right one).
+   *
+   * Reads are idempotent: the outcome is kept until its TTL, not consumed on
+   * read, so a retried or duplicated poll keeps returning the same answer
+   * rather than flipping to `unknown` after the first read.
    */
   poll(request_id: string): WorkspacePoll {
     this.pruneOutcomes();
     const settled = this.outcomes.get(request_id);
     if (settled) {
-      this.outcomes.delete(request_id);
       return settled.outcome.kind === "ok"
         ? { state: "ok", response: settled.outcome.response }
         : { state: "error", code: settled.outcome.code };

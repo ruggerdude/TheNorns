@@ -122,8 +122,9 @@ describe("runner workspace broker", () => {
 
     const collected = broker.poll(request_id);
     expect(collected.state).toBe("ok");
-    // Single consumption: a second poll no longer finds it.
-    expect(broker.poll(request_id)).toEqual({ state: "unknown" });
+    // Idempotent: a retried/duplicated poll keeps returning the same answer
+    // (important across replicas), rather than flipping to unknown.
+    expect(broker.poll(request_id).state).toBe("ok");
   });
 
   it("poll surfaces a runner disconnect during a pick as an error, not a hang", async () => {
