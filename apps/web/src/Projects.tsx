@@ -1004,12 +1004,75 @@ export function Projects({
     setFolderPickerBusy(true);
     setFolderPickerError(null);
     setSubmissionError(null);
+    // EXEC-PICKER-ASYNC — a folder pick can take minutes; a single request that
+    // waits for it gets killed by the edge proxy (502 "upstream error") or a
+    // redeploy. So initiate the pick (a fast request that returns an id) and
+    // poll for the outcome, treating a network blip or 5xx as "keep waiting".
+    const base = `/api/v2/computers/${encodeURIComponent(selectedComputerId)}/clone-destination`;
+    const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
     try {
-      const selection = await request<
-        { cancelled: true } | { clone_destination_id: string; label: string }
-      >(`/api/v2/computers/${encodeURIComponent(selectedComputerId)}/clone-destination`, {});
-      if ("cancelled" in selection) return;
-      setCloneDestination({ ...selection, computer_id: selectedComputerId });
+      let requestId: string | undefined;
+      const initiateBy = Date.now() + 30_000;
+      while (!requestId && Date.now() < initiateBy) {
+        try {
+          const res = await fetch(base, { method: "POST", headers: authHeaders(true), body: "{}" });
+          if (res.status === 401) throw new UnauthorizedError();
+          const body = (await res.json().catch(() => ({}))) as {
+            request_id?: string;
+            error?: string;
+            message?: string;
+          };
+          if (res.ok && body.request_id) requestId = body.request_id;
+          else if (res.status >= 400 && res.status < 500 && res.status !== 409) {
+            throw new ApiError(
+              body.message ?? `Request failed (${res.status}).`,
+              res.status,
+              body.error ?? null,
+            );
+          }
+        } catch (error) {
+          if (error instanceof UnauthorizedError || error instanceof ApiError) throw error;
+          // Network blip — retry the initiate.
+        }
+        if (!requestId) await sleep(1_500);
+      }
+      if (!requestId) {
+        throw new ApiError("Couldn't reach the Local Agent to open the folder chooser.", 502, null);
+      }
+
+      const pollBy = Date.now() + 6 * 60_000;
+      while (Date.now() < pollBy) {
+        await sleep(1_500);
+        let res: Response;
+        try {
+          res = await fetch(`${base}/${encodeURIComponent(requestId)}`, {
+            headers: authHeaders(false),
+          });
+        } catch {
+          continue; // blip: the pick is still alive server-side
+        }
+        if (res.status === 401) throw new UnauthorizedError();
+        if (res.status === 202) continue;
+        const body = (await res.json().catch(() => ({}))) as (
+          | { cancelled: true }
+          | { clone_destination_id: string; label: string }
+        ) & { error?: string; message?: string };
+        if (res.ok) {
+          if ("cancelled" in body) return;
+          setCloneDestination({ ...body, computer_id: selectedComputerId });
+          return;
+        }
+        // 422 = bad folder, 404 = the request was lost (a mid-pick restart);
+        // both final. Everything else (409/429/5xx) is transient — keep polling.
+        if (res.status === 404 || res.status === 422) {
+          throw new ApiError(
+            body.message ?? "The folder request was lost. Try again.",
+            res.status,
+            body.error ?? null,
+          );
+        }
+      }
+      throw new ApiError("The folder chooser timed out. Try again.", 504, null);
     } catch (error) {
       if (error instanceof UnauthorizedError) onUnauthorized();
       else setFolderPickerError(error instanceof Error ? error.message : String(error));

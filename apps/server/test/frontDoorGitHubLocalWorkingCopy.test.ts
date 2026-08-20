@@ -376,7 +376,9 @@ describe.sequential("Front Door GitHub + this computer creation", () => {
   });
 
   it("targets the exact enrolled computer without using a global helper lookup", async () => {
-    const folderResponse = await fetch(`${url}/api/v2/computers/device-local/clone-destination`, {
+    // The pick is initiated (returns an id at once, never held open) and
+    // collected by polling — the async flow that survives a long pick.
+    const initiated = await fetch(`${url}/api/v2/computers/device-local/clone-destination`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${token}`,
@@ -384,11 +386,24 @@ describe.sequential("Front Door GitHub + this computer creation", () => {
       },
       body: JSON.stringify({}),
     });
-    expect(folderResponse.status).toBe(200);
-    const folder = (await folderResponse.json()) as {
-      clone_destination_id: string;
-      label: string;
+    expect(initiated.status).toBe(200);
+    const { request_id } = (await initiated.json()) as { request_id: string };
+    expect(request_id).toMatch(/^workspace:/);
+
+    let folder: { clone_destination_id: string; label: string } = {
+      clone_destination_id: "",
+      label: "",
     };
+    await waitFor(async () => {
+      const poll = await fetch(
+        `${url}/api/v2/computers/device-local/clone-destination/${request_id}`,
+        { headers: { authorization: `Bearer ${token}` } },
+      );
+      if (poll.status === 202) return false;
+      expect(poll.status).toBe(200);
+      folder = (await poll.json()) as typeof folder;
+      return true;
+    }, "clone destination pick");
     expect(folder.label).toBeTruthy();
     expect(JSON.stringify(folder)).not.toContain(parent);
 

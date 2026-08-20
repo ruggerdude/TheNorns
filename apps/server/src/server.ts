@@ -4826,25 +4826,28 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }),
       ]);
 
-      app.post("/api/v2/computers/:id/clone-destination", async (req, reply) => {
-        if (!(await requireSession(req, reply))) return;
+      // Resolve the owned, online computer for a clone-destination pick, sending
+      // the right error and returning null when it is not usable.
+      const resolveCloneComputer = async (req: FastifyRequest, reply: FastifyReply, id: string) => {
+        if (!(await requireSession(req, reply))) return null;
         const user = await resolveUser(req);
-        if (!user) return;
-        const { id } = req.params as { id: string };
+        if (!user) return null;
         if (!options.deviceManagement) {
-          return reply.code(503).send({
+          reply.code(503).send({
             error: "computer_working_copy_unavailable",
             message: "Computer working copies are not enabled on this Norns installation.",
           });
+          return null;
         }
         let computer: OwnedDeviceProjectionT;
         try {
           computer = await options.deviceManagement.service.getOwnedDevice(user.id, id);
         } catch {
-          return reply.code(404).send({
+          reply.code(404).send({
             error: "computer_not_found",
             message: "That computer is no longer connected to your account.",
           });
+          return null;
         }
         const reconciled = reconciledRunners.get(computer.device_id);
         if (
@@ -4855,30 +4858,46 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           reconciled.socket !== runnerSockets.get(computer.device_id) ||
           reconciled.generation !== computer.active_credential?.generation
         ) {
-          return reply.code(409).send({
+          reply.code(409).send({
             error: "computer_unavailable",
             message:
               "Update or open the Norns Local Agent on that computer before choosing a project folder.",
           });
+          return null;
         }
-        try {
-          const response = await workspaceBroker.request(
-            computer.device_id,
-            reconciled.generation,
-            {
-              operation: "choose_clone_parent",
-            },
-          );
-          if (response.status === "cancelled") return reply.send({ cancelled: true });
-          if (response.status !== "ok" || !response.clone_destination) {
-            return reply.code(409).send({
-              error: "folder_selection_failed",
-              message: "The folder chooser could not save that location. Try again.",
-            });
-          }
-          return reply.send(response.clone_destination);
-        } catch (error) {
-          const code = error instanceof WorkspaceBrokerError ? error.code : "runner_unavailable";
+        return { computer, reconciled };
+      };
+
+      // EXEC-PICKER-ASYNC — the same fix as the helper choose route: a
+      // clone-destination pick can take minutes, so it is initiated (returns a
+      // request id immediately) and collected by the poll route below, rather
+      // than holding one HTTP request open past the edge-proxy timeout.
+      app.post("/api/v2/computers/:id/clone-destination", async (req, reply) => {
+        const { id } = req.params as { id: string };
+        const resolved = await resolveCloneComputer(req, reply, id);
+        if (!resolved) return;
+        const { request_id } = workspaceBroker.initiate(
+          resolved.computer.device_id,
+          resolved.reconciled.generation,
+          { operation: "choose_clone_parent" },
+        );
+        return reply.send({ request_id });
+      });
+
+      app.get("/api/v2/computers/:id/clone-destination/:requestId", async (req, reply) => {
+        const { id, requestId } = req.params as { id: string; requestId: string };
+        const resolved = await resolveCloneComputer(req, reply, id);
+        if (!resolved) return;
+        const result = workspaceBroker.poll(requestId);
+        if (result.state === "pending") return reply.code(202).send({ status: "pending" });
+        if (result.state === "unknown") {
+          return reply.code(404).send({
+            error: "not_found",
+            message: "That folder request is no longer active. Try again.",
+          });
+        }
+        if (result.state === "error") {
+          const code = result.code;
           return reply.code(code === "timeout" ? 504 : code === "request_limit" ? 429 : 409).send({
             error: code,
             message:
@@ -4887,6 +4906,15 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
                 : "The Local Agent is not available. Open it and try again.",
           });
         }
+        const response = result.response;
+        if (response.status === "cancelled") return reply.send({ cancelled: true });
+        if (response.status !== "ok" || !response.clone_destination) {
+          return reply.code(409).send({
+            error: "folder_selection_failed",
+            message: "The folder chooser could not save that location. Try again.",
+          });
+        }
+        return reply.send(response.clone_destination);
       });
 
       app.post("/api/v2/projects/onboarding", async (req, reply) => {

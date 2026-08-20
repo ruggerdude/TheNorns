@@ -138,7 +138,12 @@ describe("O1: GitHub and local Git repository onboarding", () => {
         },
       },
     });
+    // EXEC-PICKER-ASYNC: the pick is initiated (returns a request id) then
+    // polled for its outcome.
     mock.post("/api/v2/computers/device-1/clone-destination", {
+      body: { request_id: "workspace:test-1" },
+    });
+    mock.get("/api/v2/computers/device-1/clone-destination/workspace%3Atest-1", {
       body: { clone_destination_id: "local:destination-1", label: "Projects" },
     });
     mock.post("/api/v2/projects/local", (_url, init) => {
@@ -354,7 +359,11 @@ describe("O1: GitHub and local Git repository onboarding", () => {
     await user.type(screen.getByTestId("project-name"), "Fresh application");
     await user.click(screen.getByRole("button", { name: "Select folder" }));
 
-    expect((await screen.findByText("Project folder")).parentElement).toHaveTextContent("Projects");
+    // The pick resolves over a poll, so wait for the chosen label to land.
+    await waitFor(
+      () => expect(screen.getByText("Project folder").parentElement).toHaveTextContent("Projects"),
+      { timeout: 5_000 },
+    );
     expect(screen.getByRole("button", { name: "Select folder" })).toBeInTheDocument();
     expect(screen.queryByTestId("setup-confirmation")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /create project/i }));
