@@ -1238,6 +1238,7 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
               .join("")}
           </ol>
         </div>
+        <button class="conversation-development-stop-all" aria-label="Stop all work">Stop</button>
       </section>
       <section class="conversation-agent-dialogue" aria-label="Agent dialogue">
         <header><div><h3>Agent dialogue</h3></div><span class="badge">Blocked</span></header>
@@ -1286,6 +1287,7 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
     "aria-pressed",
     "true",
   );
+  await expect(page.getByRole("button", { name: "Stop all work" })).toHaveText("Stop");
   const overallCard = page.getByRole("region", { name: "Development phases" }).locator("> header");
   await expect(overallCard).toHaveCSS("color", "rgb(255, 255, 255)");
   const [overallTitleBox, overallEtaBox, overallPauseBox] = await Promise.all([
@@ -1317,7 +1319,7 @@ test("Development rail, phases, dialogue, and recovery controls never overlap", 
     const transcript = page.locator(".conversation-thread-viewport");
     const composerFooter = page.locator(".conversation-composer-footer");
     const phaseControlBoxes = await phases
-      .locator("header > *, li button")
+      .locator("header > *, li button, .conversation-development-stop-all")
       .evaluateAll((controls) =>
         controls.map((control) => {
           const box = control.getBoundingClientRect();

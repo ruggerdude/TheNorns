@@ -4200,15 +4200,19 @@ function DevelopmentPhaseStrip({
   execution,
   selectedId,
   pauseBusyIds,
+  stopBusy,
   onSelect,
   onTogglePausePoints,
+  onStopAll,
 }: {
   phases: DevelopmentPhaseItem[];
   execution: V2PhaseExecutionT | null;
   selectedId: string | null;
   pauseBusyIds: ReadonlySet<string>;
+  stopBusy: boolean;
   onSelect: (phaseId: string) => void;
   onTogglePausePoints: (taskIds: string[], pauseAfterCompletion: boolean) => void;
+  onStopAll: () => void;
 }): React.ReactElement {
   const completed = phases.filter((phase) => phase.state === "complete").length;
   // The execution projection exposes durable milestones rather than a
@@ -4318,6 +4322,17 @@ function DevelopmentPhaseStrip({
       ) : (
         <p className="conversation-list-empty">Preparing the approved phases…</p>
       )}
+      <button
+        type="button"
+        className="conversation-development-stop-all"
+        aria-label={stopBusy ? "Stopping all work" : "Stop all work"}
+        aria-busy={stopBusy}
+        title="Stop all development processes"
+        disabled={stopBusy || phases.length === 0 || completed === phases.length}
+        onClick={onStopAll}
+      >
+        Stop
+      </button>
     </section>
   );
 }
@@ -4559,6 +4574,8 @@ function ConversationThread({
   const [developmentStartError, setDevelopmentStartError] = useState<string | null>(null);
   const [developmentPauseBusyIds, setDevelopmentPauseBusyIds] = useState(() => new Set<string>());
   const [developmentPausePointError, setDevelopmentPausePointError] = useState<string | null>(null);
+  const [developmentStopAllBusy, setDevelopmentStopAllBusy] = useState(false);
+  const [developmentStopAllError, setDevelopmentStopAllError] = useState<string | null>(null);
   const [executionRetryBusy, setExecutionRetryBusy] = useState(false);
   const [executionRetryError, setExecutionRetryError] = useState<string | null>(null);
   const [executionRetryReport, setExecutionRetryReport] = useState<{
@@ -4579,6 +4596,7 @@ function ConversationThread({
   const executionActionKeys = useRef(new Map<string, string>());
   const waitAnswerKeys = useRef(new Map<string, string>());
   const reviewRecoveryKeys = useRef(new Map<string, string>());
+  const developmentStopAllKeys = useRef(new Map<string, string>());
   const developmentStartInFlight = useRef(false);
   const base = conversationPath(
     detail.work_item.project_id,
@@ -5776,6 +5794,48 @@ function ConversationThread({
     ],
   );
 
+  const stopAllDevelopmentWork = useCallback(async (): Promise<void> => {
+    if (developmentStopAllBusy) return;
+    setDevelopmentStopAllBusy(true);
+    setDevelopmentStopAllError(null);
+    const projectId = detail.work_item.project_id;
+    const key = durableRequestKey(
+      "stop-all-development",
+      projectId,
+      developmentStopAllKeys.current,
+    );
+    try {
+      const result = await cancelAllProjectRuns(projectId, {
+        reason: "Stopped all development work by the user.",
+        idempotency_key: key,
+      });
+      for (const cancellation of result.cancellations) applyRunCancellation(cancellation);
+      if (result.failed_run_ids.length > 0) {
+        throw new Error(
+          `${result.failed_run_ids.length} agent process${result.failed_run_ids.length === 1 ? "" : "es"} could not be stopped.`,
+        );
+      }
+      clearDurableRequestKey("stop-all-development", projectId, developmentStopAllKeys.current);
+      await onRefreshSoft();
+    } catch (caught) {
+      if (caught instanceof UnauthorizedError) {
+        onUnauthorized();
+        return;
+      }
+      setDevelopmentStopAllError(
+        caught instanceof Error ? caught.message : "Development processes could not be stopped.",
+      );
+    } finally {
+      setDevelopmentStopAllBusy(false);
+    }
+  }, [
+    applyRunCancellation,
+    detail.work_item.project_id,
+    developmentStopAllBusy,
+    onRefreshSoft,
+    onUnauthorized,
+  ]);
+
   const startDevelopment = useCallback(async (): Promise<void> => {
     if (developmentStartInFlight.current) return;
     developmentStartInFlight.current = true;
@@ -6444,10 +6504,12 @@ function ConversationThread({
                         execution={phaseExecution}
                         selectedId={selectedDevelopmentPhase?.id ?? null}
                         pauseBusyIds={developmentPauseBusyIds}
+                        stopBusy={developmentStopAllBusy}
                         onSelect={setSelectedDevelopmentPhaseId}
                         onTogglePausePoints={(taskIds, pauseAfterCompletion) =>
                           void configureDevelopmentPausePoints(taskIds, pauseAfterCompletion)
                         }
+                        onStopAll={() => void stopAllDevelopmentWork()}
                       />
                     ) : null}
                     {isExecution && detail.work_item.status === "awaiting_approval" ? (
@@ -6488,7 +6550,11 @@ function ConversationThread({
                         loading={
                           phaseExecutionLoading || detail.work_item.status === "awaiting_approval"
                         }
-                        error={phaseExecutionError ?? developmentPausePointError}
+                        error={
+                          phaseExecutionError ??
+                          developmentPausePointError ??
+                          developmentStopAllError
+                        }
                         onRecovered={async () => {
                           const phaseId = detail.work_item.phase_id;
                           if (phaseId) {

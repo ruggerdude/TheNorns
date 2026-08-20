@@ -5079,6 +5079,7 @@ describe("conversation workspace", () => {
     const handoff = handoffFor(approvedVersion, execution.id);
     const taskId = "task:phase%3Aphase-1:task-core-api";
     const pauseBodies: Array<{ task_ids: string[]; pause_after_completion: boolean }> = [];
+    const stopAllBodies: Array<{ reason: string; idempotency_key: string }> = [];
     let pauseAfterCompletion = false;
     vi.stubGlobal(
       "fetch",
@@ -5149,6 +5150,10 @@ describe("conversation workspace", () => {
               },
             ],
           });
+        }
+        if (url.endsWith(`/api/projects/${projectId}/runs/cancel-all`) && init?.method === "POST") {
+          stopAllBodies.push(JSON.parse(String(init.body)));
+          return Response.json({ cancellations: [], failed_run_ids: [] });
         }
         if (url.endsWith("/phases/phase-1/execution")) {
           return Response.json({
@@ -5252,6 +5257,9 @@ describe("conversation workspace", () => {
     expect(screen.queryByRole("textbox", { name: "Stop reason" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Pause after every phase" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Pause after Foundation" })).toBeEnabled();
+    const stopAll = screen.getByRole("button", { name: "Stop all work" });
+    expect(stopAll).toBeEnabled();
+    expect(stopAll).toHaveTextContent("Stop");
     expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "Pause after Foundation" }));
     await waitFor(() =>
@@ -5265,6 +5273,12 @@ describe("conversation workspace", () => {
     await waitFor(() => expect(pauseBodies[2]?.pause_after_completion).toBe(true));
     await user.click(await screen.findByRole("button", { name: "Clear all phase pause points" }));
     await waitFor(() => expect(pauseBodies[3]?.pause_after_completion).toBe(false));
+    await user.click(stopAll);
+    await waitFor(() => expect(stopAllBodies).toHaveLength(1));
+    expect(stopAllBodies[0]).toEqual({
+      reason: "Stopped all development work by the user.",
+      idempotency_key: expect.stringContaining(`stop-all-development-${projectId}-`),
+    });
   });
 
   it("explains an automatic budget refusal once and retries the same task with a higher limit", async () => {
