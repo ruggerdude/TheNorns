@@ -75,6 +75,16 @@ export interface PlanningRunWorkerOptions {
   /** Delay before retrying a kickoff seam that threw before returning. */
   kickoffRetryMs?: number;
   /**
+   * Hard wall-clock cap on a single planning generation. The lease heartbeat
+   * renews independently of the awaited generation, so a stalled LLM round (a
+   * lost promise, a provider that never returns) would otherwise keep the run
+   * `drafting`/`reviewing` forever — the "Weaving the plan…" spinner that never
+   * resolves. When exceeded, the generation is abandoned and the run is failed
+   * truthfully so it becomes retryable. Defaults to NORNS_PLANNING_RUN_MAX_MS
+   * or 15 minutes.
+   */
+  planningRunMaxMs?: number;
+  /**
    * Durable quick-change execution seam. Quick plans are approved in the
    * same transaction as their terminal result, then claimed from the
    * persisted kickoff outbox and sent through this idempotent saga.
@@ -321,11 +331,21 @@ function safeJsonArray(value: string): unknown[] {
   }
 }
 
+export class PlanningRunDeadlineError extends Error {
+  constructor(maxMs: number) {
+    super(
+      `planning generation exceeded its ${Math.round(maxMs / 1_000)}s deadline and was abandoned; retry the run`,
+    );
+    this.name = "PlanningRunDeadlineError";
+  }
+}
+
 export class PlanningRunWorker {
   private readonly now: () => Date;
   private readonly leaseMs: number;
   private readonly reviewLeaseMs: number;
   private readonly kickoffRetryMs: number;
+  private readonly planningRunMaxMs: number;
   private readonly activeReviewControllers = new Map<
     string,
     { controller: AbortController; leaseToken: string }
@@ -341,6 +361,32 @@ export class PlanningRunWorker {
     this.leaseMs = options.leaseMs ?? 10 * 60_000;
     this.reviewLeaseMs = options.reviewLeaseMs ?? 45_000;
     this.kickoffRetryMs = options.kickoffRetryMs ?? 30_000;
+    this.planningRunMaxMs =
+      options.planningRunMaxMs ?? (Number(process.env.NORNS_PLANNING_RUN_MAX_MS) || 15 * 60_000);
+  }
+
+  /**
+   * Bounds one planning generation. If `work` outlives the deadline the race
+   * rejects with a PlanningRunDeadlineError (the caller's catch fails the run),
+   * and `onTimeout` runs so a wired AbortController can try to stop the
+   * in-flight call. The underlying promise may still be lost — that is fine:
+   * the run is already failed and retryable, and `fail()` has rotated the
+   * lease so a late resolution cannot overwrite the terminal record.
+   */
+  private async withDeadline<T>(work: Promise<T>, onTimeout?: () => void): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        onTimeout?.();
+        reject(new PlanningRunDeadlineError(this.planningRunMaxMs));
+      }, this.planningRunMaxMs);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([work, deadline]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   cancelReview(runId: string): boolean {
@@ -587,13 +633,15 @@ export class PlanningRunWorker {
 
     try {
       if (quick) {
-        const result = await runQuickPlanning({
-          pm,
-          objective: claim.objective,
-          projectId: claim.project_id,
-          ...(claim.requested_by ? { initiatedByUserId: claim.requested_by } : {}),
-          ...(roundOneImages.length > 0 ? { images: roundOneImages } : {}),
-        });
+        const result = await this.withDeadline(
+          runQuickPlanning({
+            pm,
+            objective: claim.objective,
+            projectId: claim.project_id,
+            ...(claim.requested_by ? { initiatedByUserId: claim.requested_by } : {}),
+            ...(roundOneImages.length > 0 ? { images: roundOneImages } : {}),
+          }),
+        );
         this.options.recordUsage?.(result.usage);
         const totalCostUsd = result.usage.reduce((sum, usage) => sum + usage.estimated_cost_usd, 0);
         transcript.push({
@@ -655,17 +703,19 @@ export class PlanningRunWorker {
       }
 
       if (!reviewer) throw new Error("planned run is missing its reviewer");
-      const result = await runPlanning({
-        pm,
-        reviewer,
-        objective: claim.objective,
-        projectId: claim.project_id,
-        ...(claim.requested_by ? { initiatedByUserId: claim.requested_by } : {}),
-        maxRounds: claim.max_rounds,
-        onRound,
-        ...(roundOneImages.length > 0 ? { roundOneImages } : {}),
-        ...(revisionSeed ? { revisionSeed } : {}),
-      });
+      const result = await this.withDeadline(
+        runPlanning({
+          pm,
+          reviewer,
+          objective: claim.objective,
+          projectId: claim.project_id,
+          ...(claim.requested_by ? { initiatedByUserId: claim.requested_by } : {}),
+          maxRounds: claim.max_rounds,
+          onRound,
+          ...(roundOneImages.length > 0 ? { roundOneImages } : {}),
+          ...(revisionSeed ? { revisionSeed } : {}),
+        }),
+      );
       this.options.recordUsage?.(result.usage);
       const totalCostUsd = result.usage.reduce((sum, usage) => sum + usage.estimated_cost_usd, 0);
       let staffingProposal: PlanningStaffingProposalDto | null = null;
@@ -735,6 +785,15 @@ export class PlanningRunWorker {
       Math.max(1_000, Math.floor(this.reviewLeaseMs / 3)),
     );
     heartbeat.unref?.();
+    // Same hard cap as the planned path: the heartbeat renews the lease
+    // independently of the generation, so a stalled review would hang forever.
+    // Aborting the controller propagates through `signal` to fail the run.
+    let deadlineHit = false;
+    const deadlineTimer = setTimeout(() => {
+      deadlineHit = true;
+      controller.abort();
+    }, this.planningRunMaxMs);
+    deadlineTimer.unref?.();
     try {
       if (
         !reviewer ||
@@ -858,9 +917,14 @@ export class PlanningRunWorker {
       });
     } catch (error) {
       if (!(this.draining && controller.signal.aborted)) {
-        await this.options.failReviewOnly?.(claim.id, error, claim.lease_token);
+        await this.options.failReviewOnly?.(
+          claim.id,
+          deadlineHit ? new PlanningRunDeadlineError(this.planningRunMaxMs) : error,
+          claim.lease_token,
+        );
       }
     } finally {
+      clearTimeout(deadlineTimer);
       clearInterval(heartbeat);
       this.activeReviewControllers.delete(claim.id);
     }

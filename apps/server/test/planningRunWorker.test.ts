@@ -148,6 +148,32 @@ describe.sequential("durable planning run worker", () => {
     expect(run.error).toContain("ANTHROPIC_API_KEY");
   });
 
+  it("fails a run whose generation stalls past the deadline instead of hanging forever", async () => {
+    // A generation that never resolves — the lost-promise / stalled-provider
+    // case the lease heartbeat would otherwise mask, leaving "Weaving the
+    // plan…" spinning forever.
+    const hanging = (provider: ProviderName): LlmAdapter =>
+      ({
+        provider,
+        model: `hang-${provider}`,
+        complete: () => new Promise<never>(() => {}),
+        completeStructured: () => new Promise<never>(() => {}),
+        streamStructured: () => new Promise<never>(() => {}),
+      }) as unknown as LlmAdapter;
+
+    const created = await service.create("project-1", { objective: "objective stall" });
+    const worker = new PlanningRunWorker(new PGliteTransactionRunner(pg), hanging, {
+      resolveModels: async () => models,
+      planningRunMaxMs: 80,
+    });
+
+    await worker.runNow(created.id);
+
+    const run = await service.get("project-1", created.id);
+    expect(run.status).toBe("failed");
+    expect(run.error).toMatch(/deadline/i);
+  });
+
   it("runNow no-ops when the run is no longer queued", async () => {
     pm.enqueue(plan(["api"]));
     reviewer.enqueue({ findings: [] });
