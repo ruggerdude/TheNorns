@@ -109,6 +109,13 @@ export class RunnerDaemon {
     >;
   /** ONBOARDING O4: launch_run commands awaiting a terminal ack. */
   private readonly launchCommands = new Set<string>();
+  /**
+   * Command ids currently executing in THIS process. Empty on a fresh start,
+   * so it distinguishes an orphaned durable `executing` entry (process died
+   * mid-run, nothing will settle it) from a genuinely live run seen across a
+   * mere reconnect. See the orphan reap in handleReconcileResponse.
+   */
+  private readonly inFlightCommands = new Set<string>();
   private settledReported = false;
   private stateFile: RunnerStateFile | null = null;
   private readonly deviceStateFile: RunnerStateFile | null;
@@ -652,6 +659,22 @@ export class RunnerDaemon {
         "recovered terminal acknowledgement from durable execution state",
       );
     }
+    // Reap orphaned runs. A durable `executing` entry not live in THIS process
+    // is orphaned: the subprocess that owned it died (a restart) and its
+    // settling promise will never fire, so it would stay `executing` forever —
+    // pinning the server's single concurrency slot and blocking every future
+    // dispatch. Fail each one once so the run leaves the occupying state and the
+    // slot frees. inFlightCommands is empty on a fresh process, so a live run
+    // seen across a mere reconnect is skipped, never reaped.
+    for (const commandId of state.orphanedExecutingIds(this.inFlightCommands)) {
+      state.recordExecution(commandId, "failed");
+      this.terminalAck(
+        commandId,
+        "failed",
+        { causation: commandId },
+        "runner restarted; the execution process was lost before it reported a result",
+      );
+    }
     for (const command of response.resend_commands) this.handleCommand(command);
     this.startHeartbeat();
   }
@@ -839,6 +862,7 @@ export class RunnerDaemon {
       return;
     }
     state.recordExecution(command.command_id, "executing");
+    this.inFlightCommands.add(command.command_id);
     this.ack(command.command_id, "accepted", meta);
     // EXECUTION E11 — `executing` is deliberately NOT acked yet.
     //
@@ -882,10 +906,12 @@ export class RunnerDaemon {
             },
           )
           .then((outcome) => {
+            this.inFlightCommands.delete(command.command_id);
             state.recordExecution(command.command_id, outcome);
             this.ack(command.command_id, outcome, meta);
           })
           .catch((error) => {
+            this.inFlightCommands.delete(command.command_id);
             this.emit(
               {
                 kind: "run_log",

@@ -99,6 +99,20 @@ export class RunnerStateFile {
   }
 
   /**
+   * Command ids stuck `executing` in the durable map that are not live in the
+   * given set. After a restart the owning subprocess is gone and its settling
+   * promise will never fire, so the entry would remain `executing` forever;
+   * these are the orphans the daemon fails at reconcile to free the server's
+   * concurrency slot. `executing` is the only non-terminal state with a legal
+   * `-> failed` edge (see COMMAND_TRANSITIONS), so the reap is scoped to it.
+   */
+  orphanedExecutingIds(liveCommandIds: ReadonlySet<string>): string[] {
+    return Object.entries(this.state.executed)
+      .filter(([id, state]) => state === "executing" && !liveCommandIds.has(id))
+      .map(([id]) => id);
+  }
+
+  /**
    * Ensure one durable terminal acknowledgement for a command.
    *
    * `recordExecution()` and the historical `emit()` path used separate file
