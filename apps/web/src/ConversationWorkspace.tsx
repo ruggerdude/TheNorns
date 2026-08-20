@@ -3382,14 +3382,11 @@ function ConversationComposer({
           <span className="conversation-keyboard-help">
             Enter to send · Shift+Enter for a new line
           </span>
-          {responseRunning ? (
-            <ComposerPrimitive.Cancel
-              className="conversation-stop-button"
-              aria-label="Stop response"
-            >
-              Stop
-            </ComposerPrimitive.Cancel>
-          ) : null}
+          {/* Order is load-bearing: secondary plan actions first, then the
+              send/stop control last so the rightmost slot never changes hands.
+              Stop and Send are one slot -- rendering them as siblings let the
+              Plan button become rightmost whenever Send was hidden mid-stream,
+              then jump left when it returned. */}
           {isPlanning && !planVersion ? (
             <button
               type="button"
@@ -3416,11 +3413,18 @@ function ConversationComposer({
               {planIntentBusy ? "Updating…" : "Update plan"}
             </button>
           ) : null}
-          {!responseRunning ? (
+          {responseRunning ? (
+            <ComposerPrimitive.Cancel
+              className="conversation-stop-button"
+              aria-label="Stop response"
+            >
+              Stop
+            </ComposerPrimitive.Cancel>
+          ) : (
             <ComposerPrimitive.Send className="conversation-send-button" aria-label="Send message">
               {planVersion ? "Ask PM" : "Send"}
             </ComposerPrimitive.Send>
-          ) : null}
+          )}
         </div>
         {handoffOpen ? (
           <PlanHandoffDialog

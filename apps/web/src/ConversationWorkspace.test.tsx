@@ -654,6 +654,19 @@ describe("conversation workspace", () => {
     expect(screen.getByRole("button", { name: "Add file" })).toHaveTextContent("+");
     expect(screen.getByRole("button", { name: "Send message" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Stop response" })).not.toBeInTheDocument();
+    // Send owns the rightmost slot; plan actions sit to its left. Rendering
+    // Stop and Send as siblings previously let Plan become rightmost whenever
+    // Send was hidden mid-stream, then jump left when it came back.
+    const composerActionButtons = [
+      ...(document.querySelector(".conversation-composer-actions")?.querySelectorAll("button") ??
+        []),
+    ];
+    expect(composerActionButtons.at(-1)).toBe(screen.getByRole("button", { name: "Send message" }));
+    expect(
+      composerActionButtons.indexOf(
+        screen.getByRole("button", { name: "Use conversation as plan" }),
+      ),
+    ).toBeLessThan(composerActionButtons.length - 1);
     await user.click(screen.getByRole("button", { name: "Copy last response" }));
     expect(clipboardWrite).toHaveBeenCalledWith(
       "I found **one risk**.\n\n```ts\nconst durable = true;\n```",
