@@ -1745,6 +1745,11 @@ export class V2RunnerExecutor {
           task_id: command.task_id,
           verification_passed: verification.passed,
           verification_summary: verification.reason ?? verification.output.slice(0, 4_000),
+          // EXEC-INTEGRATE-1: only a verified run's work advances the base
+          // branch. A red run publishes for the reviewer but never integrates.
+          ...(verification.passed && command.integrate_base_branch
+            ? { integrate_base_branch: command.integrate_base_branch }
+            : {}),
           signal: publicationFence.signal,
         });
         if (controller.signal.aborted && publicationIsFenced()) {
@@ -1955,6 +1960,9 @@ export class V2RunnerExecutor {
       remote: publication.remote,
       pull_request_url: publication.pull_request_url,
       pull_request_note: publication.pull_request_note,
+      integration_outcome: publication.integration?.outcome ?? null,
+      integrated_base_branch: publication.integration?.base_branch ?? null,
+      integrated_base_commit: publication.integration?.base_commit ?? null,
     };
   }
 

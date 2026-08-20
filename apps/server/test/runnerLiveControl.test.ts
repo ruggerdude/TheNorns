@@ -954,6 +954,10 @@ describe("EXECUTION E11 — the three emits E10 was waiting on", () => {
       remote: "origin",
       pull_request_url: "https://github.test/pull/1",
       pull_request_note: null,
+      // No integrate_base_branch on this dispatch, so no base advance.
+      integration_outcome: null,
+      integrated_base_branch: null,
+      integrated_base_commit: null,
     });
     // It describes the REMOTE, not the runner's opinion of it.
     expect(await git(h.remote, "rev-parse", "refs/heads/norns/task-task-1")).toBe(

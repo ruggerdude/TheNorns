@@ -344,6 +344,20 @@ export const EventPayload = z.discriminatedUnion("kind", [
     pull_request_url: z.string().url().nullable().default(null),
     /** Why there is no pull request, when there is none. Never silent. */
     pull_request_note: z.string().nullable().default(null),
+    /**
+     * EXEC-INTEGRATE-1 — the base branch the runner advanced to this commit,
+     * and how it went. Present only for local-runner direct-to-base execution;
+     * defaulted null so the PR-based flow and every legacy producer keep
+     * parsing unchanged. `integrated`/`already_integrated` carry the new base
+     * head in `integrated_base_commit`; `conflict` leaves it as the base's
+     * actual tip and signals a human must reconcile.
+     */
+    integration_outcome: z
+      .enum(["integrated", "already_integrated", "conflict"])
+      .nullable()
+      .optional(),
+    integrated_base_branch: z.string().nullable().optional(),
+    integrated_base_commit: z.string().nullable().optional(),
   }),
   z.object({
     kind: z.literal("usage_report"),

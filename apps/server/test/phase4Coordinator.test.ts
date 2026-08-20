@@ -212,6 +212,9 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
 
     expect(result.command.command_id).toBe(`dispatch:${result.dispatch_job_id}`);
     expect(result.command.runner_repository_id).toBe("repository-1");
+    // EXEC-INTEGRATE-1: a local_runner binding integrates into its default
+    // branch directly, so the dispatch carries the base to advance.
+    expect(result.command.integrate_base_branch).toBe("main");
     expect(result.command.execution_mode).toBe("planned");
     expect(result.command.reasoning_effort).toBe("high");
     expect(result.command.max_charge_usd).toBe(10);
@@ -270,6 +273,69 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
         WHERE task.id='task-1'`,
     );
     expect(state.rows[0]).toEqual({ run_state: "expired", task_state: "blocked" });
+  });
+
+  it("EXEC-INTEGRATE-1: advances the binding's observed_head when the runner integrates the base branch", async () => {
+    const scheduled = await schedule();
+    const transactions = new PGliteTransactionRunner(pg);
+    const dispatch = new Phase4DispatchRepository(transactions);
+    await dispatch.claim("dispatcher-a", 30_000);
+    await dispatch.markDelivered(
+      scheduled.dispatch_job_id,
+      "dispatcher-a",
+      "2026-07-16T20:01:00.000Z",
+    );
+    const events = new Phase4EventProcessor(transactions);
+    const publish = (integration: Record<string, unknown>, seq: number) =>
+      events.apply({
+        protocol: 1,
+        event_seq: seq,
+        runner_id: "runner-1",
+        generation: 3,
+        correlation_id: "correlation-1",
+        causation_id: scheduled.command_id,
+        occurred_at: "2026-07-16T20:05:00.000Z",
+        payload: {
+          kind: "run_published",
+          run_id: scheduled.run_id,
+          outcome: "pushed",
+          branch: "norns/task-1",
+          commit_sha: "task-commit-abc",
+          remote: "origin",
+          pull_request_url: null,
+          pull_request_note: null,
+          ...integration,
+        },
+      });
+    const head = async () =>
+      (
+        await pg.query<{ observed_head: string }>(
+          "SELECT observed_head FROM repository_bindings WHERE id='binding-1'",
+        )
+      ).rows[0]?.observed_head;
+
+    // A successful base advance moves observed_head — the base the next phase
+    // will branch from.
+    await publish(
+      {
+        integration_outcome: "integrated",
+        integrated_base_branch: "main",
+        integrated_base_commit: "integrated-commit-99",
+      },
+      1,
+    );
+    expect(await head()).toBe("integrated-commit-99");
+
+    // A conflict never advances it — the other phase's work is not overwritten.
+    await publish(
+      {
+        integration_outcome: "conflict",
+        integrated_base_branch: "main",
+        integrated_base_commit: "someone-elses-commit",
+      },
+      2,
+    );
+    expect(await head()).toBe("integrated-commit-99");
   });
 
   it("keeps exact runner matching for legacy local bindings under typed authorization", async () => {

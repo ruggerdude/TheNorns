@@ -676,6 +676,27 @@ export class Phase4EventProcessor {
             event.occurred_at,
           ],
         );
+        // EXEC-INTEGRATE-1 — when the runner advanced the base branch to this
+        // commit, move the binding's observed_head with it. That head is the
+        // base every subsequent dispatch branches from (phase4Coordinator), so
+        // this is what lets the next phase build on the completed phase's work
+        // instead of a stale base. A `conflict` outcome carries the base's
+        // actual (unmoved) tip and must NOT advance anything.
+        if (
+          (event.payload.integration_outcome === "integrated" ||
+            event.payload.integration_outcome === "already_integrated") &&
+          event.payload.integrated_base_commit
+        ) {
+          await sql.query(
+            `UPDATE repository_bindings
+                SET observed_head = $2, updated_at = now()
+               FROM projects
+              WHERE projects.id = $1
+                AND repository_bindings.id = projects.primary_repository_binding_id
+                AND repository_bindings.project_id = projects.id`,
+            [scope.project_id, event.payload.integrated_base_commit],
+          );
+        }
         // EXECUTION E12 — detect an in-phase integration conflict IN THE SAME
         // TRANSACTION as the publication that creates it.
         //

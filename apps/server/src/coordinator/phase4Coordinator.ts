@@ -163,6 +163,7 @@ interface SchedulingRow {
   repository_binding_id: string | null;
   runner_repository_id: string | null;
   repository_binding_type: "local_runner" | "github" | null;
+  repository_default_branch: string | null;
   repository_runner_id: string | null;
   project_device_repository_grant_id: string | null;
   /**
@@ -247,6 +248,7 @@ export class Phase4Coordinator {
                 binding.observed_head AS expected_revision,
                 binding.repository_id AS runner_repository_id,
                 binding.binding_type AS repository_binding_type,
+                binding.default_branch AS repository_default_branch,
                 binding.runner_id AS repository_runner_id,
                 binding.project_device_repository_grant_id,
                 binding.status AS repository_binding_status
@@ -812,6 +814,13 @@ export class Phase4Coordinator {
           : {}),
         expected_revision: recoveryBaseRevision ?? row.expected_revision,
         target_branch: input.target_branch,
+        // EXEC-INTEGRATE-1: a local runner integrates a verified run into the
+        // binding's default branch directly (no PR review path), so the next
+        // phase branches from it. GitHub-Actions bindings integrate through a
+        // pull request instead, so the field stays absent for them.
+        ...(row.repository_binding_type === "local_runner" && row.repository_default_branch
+          ? { integrate_base_branch: row.repository_default_branch }
+          : {}),
         worktree_policy_ref: input.worktree_policy_ref,
         // EXECUTION E10 (E9-9) — dispatch a runtime the runner can construct.
         // `agent_profiles.runtime` has historically been written as the

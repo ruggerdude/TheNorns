@@ -519,6 +519,14 @@ export const V2DispatchCommand = z
     runner_repository_id: V2EntityId.optional(),
     expected_revision: V2NonEmptyString,
     target_branch: V2NonEmptyString,
+    /**
+     * EXEC-INTEGRATE-1 — when present, after publishing `target_branch` the
+     * runner also fast-forwards this base branch to the run's commit, so the
+     * next phase branches from the integrated work. Set only for local-runner
+     * direct-to-base execution; omitted for the PR-based GitHub Actions flow,
+     * which integrates through review. Optional preserves legacy dispatch bytes.
+     */
+    integrate_base_branch: V2NonEmptyString.optional(),
     worktree_policy_ref: V2EntityId,
     runtime: V2NonEmptyString,
     provider: V2NonEmptyString,

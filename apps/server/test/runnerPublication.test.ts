@@ -800,4 +800,97 @@ describe("EXECUTION E4 — a run's work is published, and verification is real",
     expect(result.verification_passed).toBe(true);
     expect(result.outcome).toBe("succeeded");
   });
+
+  it("EXEC-INTEGRATE-1: fast-forwards the base branch to the task commit, converging under redelivery", async () => {
+    const h = await harness(cleanup);
+    // A real commit on a task branch off main, in a clone with `origin`.
+    const work = resolve(h.root, "work");
+    await execFileAsync("git", ["clone", h.remote, work], { env: GIT_ENV });
+    await git(work, "checkout", "-b", "norns/task-1");
+    await execFileAsync("node", ["-e", "require('fs').writeFileSync('feature.txt','feat\\n')"], {
+      cwd: work,
+    });
+    await git(work, "add", "-A");
+    await git(work, "commit", "-m", "feature");
+    const commit = await git(work, "rev-parse", "HEAD");
+
+    const publisher = new GitPublisher({
+      repositorySlug: "acme/widgets",
+      token: "test-token",
+      fetchImpl: githubApi().fetchImpl,
+    });
+    const input = {
+      worktree_path: work,
+      branch: "norns/task-1",
+      commit,
+      run_id: "run-1",
+      task_id: "task-1",
+      verification_passed: true,
+      verification_summary: "ok",
+      integrate_base_branch: "main",
+    };
+
+    const result = await publisher.publish(input);
+
+    // The branch is published AND main on the remote now IS the task commit —
+    // the next phase branching from main gets this work.
+    expect(result.integration).toEqual({
+      outcome: "integrated",
+      base_branch: "main",
+      base_commit: commit,
+      detail: null,
+    });
+    expect(await git(h.remote, "rev-parse", "refs/heads/main")).toBe(commit);
+    expect(await git(h.remote, "rev-parse", "refs/heads/norns/task-1")).toBe(commit);
+
+    // Redelivery converges: pushing the same commit to a base already at it is
+    // an up-to-date no-op — idempotent success, main unchanged, never a force.
+    const again = await publisher.publish(input);
+    expect(again.integration?.outcome).toBe("integrated");
+    expect(await git(h.remote, "rev-parse", "refs/heads/main")).toBe(commit);
+  });
+
+  it("EXEC-INTEGRATE-1: reports a conflict rather than force-moving a base that advanced independently", async () => {
+    const h = await harness(cleanup);
+    const work = resolve(h.root, "work");
+    await execFileAsync("git", ["clone", h.remote, work], { env: GIT_ENV });
+    await git(work, "checkout", "-b", "norns/task-1");
+    await execFileAsync("node", ["-e", "require('fs').writeFileSync('feature.txt','feat\\n')"], {
+      cwd: work,
+    });
+    await git(work, "add", "-A");
+    await git(work, "commit", "-m", "feature");
+    const commit = await git(work, "rev-parse", "HEAD");
+
+    // Someone else advanced main to an unrelated commit after this task branched.
+    const other = resolve(h.root, "other");
+    await execFileAsync("git", ["clone", h.remote, other], { env: GIT_ENV });
+    await execFileAsync("node", ["-e", "require('fs').writeFileSync('unrelated.txt','x\\n')"], {
+      cwd: other,
+    });
+    await git(other, "add", "-A");
+    await git(other, "commit", "-m", "unrelated main advance");
+    await git(other, "push", "origin", "main");
+    const advancedMain = await git(h.remote, "rev-parse", "refs/heads/main");
+
+    const result = await new GitPublisher({
+      repositorySlug: "acme/widgets",
+      token: "test-token",
+      fetchImpl: githubApi().fetchImpl,
+    }).publish({
+      worktree_path: work,
+      branch: "norns/task-1",
+      commit,
+      run_id: "run-1",
+      task_id: "task-1",
+      verification_passed: true,
+      verification_summary: "ok",
+      integrate_base_branch: "main",
+    });
+
+    // Not a fast-forward: reported as conflict, and main is left UNTOUCHED —
+    // the other phase's work is never overwritten.
+    expect(result.integration?.outcome).toBe("conflict");
+    expect(await git(h.remote, "rev-parse", "refs/heads/main")).toBe(advancedMain);
+  });
 });

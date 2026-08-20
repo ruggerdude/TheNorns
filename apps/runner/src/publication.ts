@@ -82,6 +82,34 @@ export type PublicationOutcome =
    */
   | "local_only";
 
+/**
+ * EXEC-INTEGRATE-1 — advancing the base branch to include a completed phase's
+ * work, so the next phase branches from it instead of from a stale base. This
+ * is the runner half of the fix; the local runner is the one place that both
+ * holds the work and has push credentials for a personal repo the Norns
+ * GitHub App does not broker.
+ */
+export type IntegrationOutcome =
+  /** The base branch now contains this commit (fast-forwarded to it). */
+  | "integrated"
+  /** The base branch was already at this commit — a redelivery converged. */
+  | "already_integrated"
+  /**
+   * The base branch moved independently of this commit, so a fast-forward is
+   * impossible and a real 3-way merge would be required. Never forced: losing
+   * another phase's work is worse than a visible blocker. The serial
+   * one-phase-at-a-time model does not reach this.
+   */
+  | "conflict";
+
+export interface IntegrationResult {
+  outcome: IntegrationOutcome;
+  base_branch: string;
+  /** The base branch head after integration — the task commit on success. */
+  base_commit: string | null;
+  detail: string | null;
+}
+
 export interface PublicationResult {
   outcome: PublicationOutcome;
   branch: string;
@@ -96,6 +124,13 @@ export interface PublicationResult {
    * different facts to a human waiting on a review.
    */
   pull_request_note: string | null;
+  /**
+   * Present only when the dispatch asked for base-branch integration
+   * (`integrate_base_branch`). Null/absent for the PR-based GitHub Actions flow,
+   * which integrates through review, not a direct base advance. Optional so the
+   * many publishers that never integrate stay source-compatible.
+   */
+  integration?: IntegrationResult | null;
 }
 
 /**
@@ -121,6 +156,13 @@ export interface RunnerPublicationInput {
   task_id: string;
   verification_passed: boolean;
   verification_summary: string;
+  /**
+   * When set, after publishing the task branch the runner also advances this
+   * base branch to the task commit (a fast-forward push), so the next phase
+   * branches from the integrated work. Set only for local-runner direct-to-base
+   * execution; omitted for the PR-based GitHub Actions flow.
+   */
+  integrate_base_branch?: string;
   /** Device/generation fencing aborts publication independently of run stop. */
   signal?: AbortSignal;
 }
@@ -180,10 +222,17 @@ export class GitPublisher implements RunnerPublisher {
         pull_request_url: null,
         pull_request_note:
           "repository has no configured remote; the work is retained as a local branch",
+        integration: null,
       };
     }
     input.signal?.throwIfAborted();
     const outcome = await this.push(input, remote);
+    input.signal?.throwIfAborted();
+    // The base advance only makes sense once the branch itself reached the
+    // remote; a `local_only` outcome never gets here (it returned above).
+    const integration = input.integrate_base_branch
+      ? await this.integrateIntoBase(input, remote, input.integrate_base_branch)
+      : null;
     input.signal?.throwIfAborted();
     const pullRequest = await this.ensurePullRequest(input);
     return {
@@ -193,7 +242,52 @@ export class GitPublisher implements RunnerPublisher {
       remote,
       pull_request_url: pullRequest.url,
       pull_request_note: pullRequest.note,
+      integration,
     };
+  }
+
+  /**
+   * Advance `base` to the task commit by a fast-forward push, converging under
+   * redelivery exactly like the branch push: a base already at our commit is a
+   * converged redelivery, not a failure; a base that holds some other commit is
+   * NOT force-moved — that means another phase advanced it and only a real
+   * merge is safe, which the serial model never needs, so it is reported as a
+   * `conflict` for a human rather than silently overwritten.
+   */
+  private async integrateIntoBase(
+    input: RunnerPublicationInput,
+    remote: string,
+    base: string,
+  ): Promise<IntegrationResult> {
+    const ref = `refs/heads/${base}`;
+    input.signal?.throwIfAborted();
+    // A fresh one-use permit for this push, same as the branch push above.
+    await this.beforePush?.(input);
+    input.signal?.throwIfAborted();
+    try {
+      await execFileAsync(
+        "git",
+        ["-C", input.worktree_path, "push", remote, `${input.commit}:${ref}`],
+        { signal: input.signal },
+      );
+      return { outcome: "integrated", base_branch: base, base_commit: input.commit, detail: null };
+    } catch (error) {
+      input.signal?.throwIfAborted();
+      const tip = await this.remoteTip(input.worktree_path, remote, ref, input.signal);
+      if (tip === input.commit) {
+        return { outcome: "already_integrated", base_branch: base, base_commit: tip, detail: null };
+      }
+      // ponytail: fast-forward-only integration; add a 3-way merge here if
+      // concurrent phases into one base ever become a supported mode.
+      return {
+        outcome: "conflict",
+        base_branch: base,
+        base_commit: tip,
+        detail: `base branch ${base} is not a fast-forward of ${input.commit}${
+          error instanceof Error ? `: ${error.message}` : ""
+        }`,
+      };
+    }
   }
 
   /** The configured remote, or null when this repository has none at all. */
