@@ -327,6 +327,13 @@ type ActorPresentation = {
   actorId: string | null;
 };
 
+/** The assistant speaks with one voice in conversation. Internal role
+ *  splits (planning manager, reviewer, coordinator) are implementation
+ *  detail and reading them as separate speakers made the thread confusing.
+ *  The QC transcript still distinguishes reviewer from planner, because
+ *  which side said what is the entire point of an adjudication. */
+const THE_NORNS = "The Norns";
+
 function actorPresentation(
   actor: V2WorkMessageT["actor"] | undefined,
   fallback: "user" | "assistant" | "system",
@@ -334,7 +341,7 @@ function actorPresentation(
   if (!actor) {
     if (fallback === "user") return { className: "human", label: "You", actorId: null };
     if (fallback === "system") return { className: "system", label: "System", actorId: null };
-    return { className: "pm", label: "PM", actorId: null };
+    return { className: "pm", label: THE_NORNS, actorId: null };
   }
   const actorId = actor.actor_id;
   const normalizedId = actorId?.toLocaleLowerCase() ?? "";
@@ -351,7 +358,7 @@ function actorPresentation(
       actorId,
     };
   }
-  if (normalizedId.includes("pm")) return { className: "pm", label: "PM", actorId };
+  if (normalizedId.includes("pm")) return { className: "pm", label: THE_NORNS, actorId };
   if (actor.actor_type === "agent" || actor.actor_type === "runner") {
     return {
       className: "agent",
@@ -359,7 +366,7 @@ function actorPresentation(
       actorId,
     };
   }
-  return { className: "pm", label: "PM", actorId };
+  return { className: "pm", label: THE_NORNS, actorId };
 }
 
 function useCurrentActorPresentation(fallback: "user" | "assistant" | "system"): ActorPresentation {
@@ -2299,7 +2306,7 @@ function PlanningExcerptControl({
                           {message.role === "user"
                             ? "You"
                             : message.role === "assistant"
-                              ? "PM"
+                              ? THE_NORNS
                               : "System"}{" "}
                           · message {message.sequence}
                         </strong>
@@ -7305,9 +7312,14 @@ export function ConversationWorkspace({
   }, [groups, groupsLoadFailed, handleError, initialConversationId, projectId, selected, showNew]);
 
   const loadDetail = useCallback(
-    async (forceRemount = false) => {
+    // `silent` keeps a background poll invisible. loadingDetail drives the
+    // Refresh control's disabled state and its "Refreshing…" label, so a
+    // 2.5s soft-refresh poll made that button flicker continuously while the
+    // user just sat there. A soft refresh is by definition not something the
+    // user asked for, so it must not move any visible chrome.
+    async (forceRemount = false, silent = false) => {
       if (!selected) return;
-      setLoadingDetail(true);
+      if (!silent) setLoadingDetail(true);
       try {
         const next = await getConversation(projectId, selected.workItemId, selected.conversationId);
         setDetail(next);
@@ -7316,7 +7328,7 @@ export function ConversationWorkspace({
       } catch (caught) {
         handleError(caught);
       } finally {
-        setLoadingDetail(false);
+        if (!silent) setLoadingDetail(false);
       }
     },
     [handleError, projectId, selected],
@@ -7562,7 +7574,7 @@ export function ConversationWorkspace({
   }, [loadDetail, loadGroups, loadNavigation]);
 
   const refreshSoft = useCallback(async () => {
-    await loadDetail(false);
+    await loadDetail(false, true);
   }, [loadDetail]);
 
   const sidebarFamilies = useMemo<SidebarConversationFamily[]>(() => {
