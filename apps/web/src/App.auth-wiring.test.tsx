@@ -110,6 +110,22 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     expect(mock.calls.some((call) => /^\/api\/projects\/[^/]+$/.test(call.url))).toBe(false);
   });
 
+  test("restores the cookie session after an inactive tab loses session storage", async () => {
+    document.cookie = "norns_csrf=test-csrf; Path=/; SameSite=Strict";
+    sessionStorage.clear();
+    mock.get("/api/auth/me", {
+      body: { id: "u1", email: "member@x.com", name: null, role: "member", status: "active" },
+    });
+    mock.install();
+
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", { level: 1, name: /^Portfolio$/ }),
+    ).toBeInTheDocument();
+    expect(getToken()).toBe("present");
+  });
+
   test("shows Computers in Settings for members while keeping Admin hidden", async () => {
     mock.get("/api/auth/me", {
       body: { id: "u1", email: "member@x.com", name: null, role: "member", status: "active" },

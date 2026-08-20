@@ -1,6 +1,8 @@
 // Browser authentication uses a Secure, HttpOnly, SameSite cookie. JavaScript
 // retains only a non-secret presence marker so refresh can attempt /auth/me;
-// the raw session credential is never placed in web storage.
+// the raw session credential is never placed in web storage. A persistent,
+// non-secret CSRF cookie also lets a recreated tab discover the HttpOnly
+// session and ask the server to validate it.
 const KEY = "norns_cookie_session";
 
 export interface CurrentUser {
@@ -39,7 +41,10 @@ export class ApiError extends Error {
 }
 
 export function getToken(): string | null {
-  return sessionStorage.getItem(KEY);
+  if (sessionStorage.getItem(KEY)) return "present";
+  return document.cookie.split(";").some((part) => part.trim().startsWith("norns_csrf="))
+    ? "present"
+    : null;
 }
 
 export function setToken(_token?: string): void {
@@ -49,6 +54,7 @@ export function setToken(_token?: string): void {
 
 export function clearToken(): void {
   sessionStorage.removeItem(KEY);
+  document.cookie = "norns_csrf=; Max-Age=0; Path=/; SameSite=Strict";
 }
 
 export function authHeaders(hasBody = false): Record<string, string> {

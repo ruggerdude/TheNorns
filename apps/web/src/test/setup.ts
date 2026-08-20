@@ -35,4 +35,5 @@ if (typeof HTMLElement.prototype.scrollTo === "undefined") {
 afterEach(() => {
   cleanup();
   sessionStorage.clear();
+  document.cookie = "norns_csrf=; Max-Age=0; Path=/";
 });

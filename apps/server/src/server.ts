@@ -444,7 +444,10 @@ import type {
   IdentityUser,
   IdentityUserSummary,
 } from "./users/identityService.js";
-import { IdentityAlreadyBootstrappedError } from "./users/identityService.js";
+import {
+  DEFAULT_SESSION_TTL_MS,
+  IdentityAlreadyBootstrappedError,
+} from "./users/identityService.js";
 import { LegacyIdentityService } from "./users/legacyIdentityService.js";
 import { LoginAttemptThrottle } from "./users/loginThrottle.js";
 import { detectPasswordHashScheme } from "./users/passwords.js";
@@ -1059,6 +1062,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const CSRF_COOKIE = "norns_csrf";
   const GITHUB_MANIFEST_STATE_COOKIE = "norns_github_manifest_state";
   const RECENT_AUTH_MS = 15 * 60_000;
+  const SESSION_COOKIE_MAX_AGE_SECONDS = Math.floor(DEFAULT_SESSION_TTL_MS / 1_000);
 
   const cookies = (req: FastifyRequest): Map<string, string> => {
     const result = new Map<string, string>();
@@ -1078,10 +1082,11 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
   const credentialFor = (req: FastifyRequest): string | undefined =>
     bearerToken(req.headers.authorization) ?? cookies(req).get(SESSION_COOKIE);
   const cookieAttributes = `Path=/; SameSite=Strict${secureCookies ? "; Secure" : ""}`;
+  const persistentCookieAttributes = `Max-Age=${SESSION_COOKIE_MAX_AGE_SECONDS}; ${cookieAttributes}`;
   const setBrowserSession = (reply: FastifyReply, token: string, csrf: string): void => {
     reply.header("Set-Cookie", [
-      `${SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; ${cookieAttributes}`,
-      `${CSRF_COOKIE}=${encodeURIComponent(csrf)}; ${cookieAttributes}`,
+      `${SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; ${persistentCookieAttributes}`,
+      `${CSRF_COOKIE}=${encodeURIComponent(csrf)}; ${persistentCookieAttributes}`,
     ]);
     reply.header("Cache-Control", "no-store");
   };

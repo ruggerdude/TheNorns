@@ -1,5 +1,7 @@
 import type { UserRole } from "./store.js";
 
+export const DEFAULT_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
+
 export type IdentityUserStatus = "active" | "invited" | "disabled";
 
 /**

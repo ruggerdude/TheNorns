@@ -19,7 +19,7 @@ import type {
   IdentityUserStatus,
   IdentityUserSummary,
 } from "./identityService.js";
-import { IdentityAlreadyBootstrappedError } from "./identityService.js";
+import { DEFAULT_SESSION_TTL_MS, IdentityAlreadyBootstrappedError } from "./identityService.js";
 import {
   CURRENT_PASSWORD_HASH_SCHEME,
   LEGACY_PASSWORD_HASH_SCHEME,
@@ -40,7 +40,6 @@ type RandomBytes = (size: number) => Uint8Array;
 type Clock = () => Date;
 type IdFactory = (kind: "user") => string;
 
-const DEFAULT_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const DEFAULT_SESSION_TOUCH_INTERVAL_MS = 60_000;
 const DEFAULT_INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const DEFAULT_RECOVERY_TTL_MS = 60 * 60 * 1_000;

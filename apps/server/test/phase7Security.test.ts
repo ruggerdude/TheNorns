@@ -69,7 +69,9 @@ describe.sequential("Phase 7 browser and account security", () => {
     expect(sessionCookie).toContain("HttpOnly");
     expect(sessionCookie).toContain("Secure");
     expect(sessionCookie).toContain("SameSite=Strict");
+    expect(sessionCookie).toContain("Max-Age=2592000");
     expect(csrfCookie).not.toContain("HttpOnly");
+    expect(csrfCookie).toContain("Max-Age=2592000");
     const cookieHeader = cookieLines.map((line) => line.split(";")[0]).join("; ");
 
     const me = await server.app.inject({
