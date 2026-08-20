@@ -93,4 +93,44 @@ describe("runner workspace broker", () => {
     time += 5 * 60_000;
     expect(tokens.reserve("user-1", issued.selection_token)).toBeUndefined();
   });
+
+  it("initiate + poll collects a folder pick out of band, once, without holding a request open", async () => {
+    let sent: RunnerWorkspaceRequestT | undefined;
+    const broker = new RunnerWorkspaceBroker((_runner, _generation, request) => {
+      sent = request;
+      return true;
+    });
+    const { request_id } = broker.initiate("runner-1", 3, { operation: "choose" });
+    expect(sent?.request_id).toBe(request_id);
+    // Still choosing, and a bogus id is unknown — neither blocks the caller.
+    expect(broker.poll(request_id)).toEqual({ state: "pending" });
+    expect(broker.poll("workspace:nope")).toEqual({ state: "unknown" });
+
+    broker.receive("runner-1", 3, {
+      request_id,
+      operation: "choose",
+      status: "ok",
+      repository: {
+        workspace_id: "local:workspace",
+        repository_id: "local:repository",
+        repository_display_name: "Project",
+        default_branch: "main",
+        observed_head: "a".repeat(40),
+      },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0)); // let the settle land
+
+    const collected = broker.poll(request_id);
+    expect(collected.state).toBe("ok");
+    // Single consumption: a second poll no longer finds it.
+    expect(broker.poll(request_id)).toEqual({ state: "unknown" });
+  });
+
+  it("poll surfaces a runner disconnect during a pick as an error, not a hang", async () => {
+    const broker = new RunnerWorkspaceBroker(() => true);
+    const { request_id } = broker.initiate("runner-1", 3, { operation: "choose" });
+    broker.disconnect("runner-1");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(broker.poll(request_id)).toEqual({ state: "error", code: "runner_unavailable" });
+  });
 });

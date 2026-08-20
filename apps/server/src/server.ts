@@ -5458,18 +5458,26 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         });
       };
 
-      const chooseLocalRepository = async (
+      // Resolve the connected helper runner for a folder pick, sending the
+      // appropriate error and returning null when it is not usable.
+      const resolveChooseRunner = async (
         req: FastifyRequest,
         reply: FastifyReply,
         requestedRunnerId?: string,
       ) => {
         const user = await resolveUser(req);
-        if (!user) return reply.code(401).send({ error: "unauthorized" });
-        if (!requireLegacyGlobalCompatibility(user, reply, "global workspace selection")) return;
+        if (!user) {
+          reply.code(401).send({ error: "unauthorized" });
+          return null;
+        }
+        if (!requireLegacyGlobalCompatibility(user, reply, "global workspace selection")) {
+          return null;
+        }
         const status = helperStatus(helperRunnerSnapshots());
         const runnerId = requestedRunnerId ?? status.runner_id;
         if (status.state !== "connected" || !runnerId) {
-          return workspaceFailure(reply, new WorkspaceBrokerError("runner_unavailable"));
+          workspaceFailure(reply, new WorkspaceBrokerError("runner_unavailable"));
+          return null;
         }
         const runner = stores.runner(runnerId);
         const reconciled = reconciledRunners.get(runnerId);
@@ -5479,60 +5487,105 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           reconciled.socket !== runnerSockets.get(runnerId) ||
           reconciled.generation !== runner.generation
         ) {
-          return workspaceFailure(reply, new WorkspaceBrokerError("runner_unavailable"));
+          workspaceFailure(reply, new WorkspaceBrokerError("runner_unavailable"));
+          return null;
         }
         if (!reconciled.workspacePicker || !reconciled.workspaceRepositoryInventory) {
-          return workspaceFailure(reply, new WorkspaceBrokerError("runner_upgrade_required"));
+          workspaceFailure(reply, new WorkspaceBrokerError("runner_upgrade_required"));
+          return null;
         }
-        try {
-          const generation = runner.generation;
-          const response = await workspaceBroker.request(runnerId, generation, {
-            operation: "choose",
+        return { user, runnerId, generation: runner.generation, socket: reconciled.socket };
+      };
+
+      // EXEC-PICKER-ASYNC — a folder pick can take minutes, which no edge proxy
+      // will hold one HTTP request open for; a synchronous await gets a 502 or
+      // dies in a redeploy (the recurring folder-picker failure). So the pick is
+      // initiated here (returns immediately with a request id) and its outcome
+      // is collected by the poll route below over a short series of fast GETs.
+      const initiateChoose = async (
+        req: FastifyRequest,
+        reply: FastifyReply,
+        requestedRunnerId?: string,
+      ) => {
+        const resolved = await resolveChooseRunner(req, reply, requestedRunnerId);
+        if (!resolved) return;
+        const { request_id } = workspaceBroker.initiate(resolved.runnerId, resolved.generation, {
+          operation: "choose",
+        });
+        return reply.send({ request_id });
+      };
+
+      const pollChoose = async (
+        req: FastifyRequest,
+        reply: FastifyReply,
+        requestId: string,
+        requestedRunnerId?: string,
+      ) => {
+        const resolved = await resolveChooseRunner(req, reply, requestedRunnerId);
+        if (!resolved) return;
+        const { user, runnerId, generation, socket } = resolved;
+        const result = workspaceBroker.poll(requestId);
+        if (result.state === "pending") return reply.code(202).send({ status: "pending" });
+        if (result.state === "unknown") {
+          return reply.code(404).send({
+            error: "not_found",
+            message: "That folder request is no longer active. Try again.",
           });
-          if (response.status === "cancelled") return reply.send({ cancelled: true });
-          if (response.status !== "ok" || !response.repository) {
-            return reply.code(response.status === "invalid_request" ? 422 : 409).send({
-              error: response.status,
-              message:
-                response.status === "invalid_request"
-                  ? "Choose the root folder of a Git repository with at least one commit."
-                  : "The system folder chooser is unavailable.",
-            });
-          }
-          const current = reconciledRunners.get(runnerId);
-          if (
-            runnerSockets.get(runnerId) !== reconciled.socket ||
-            current?.socket !== reconciled.socket ||
-            current.generation !== generation
-          ) {
-            return reply.code(409).send({ error: "runner_unavailable" });
-          }
-          const grant = workspaceSelections.issue(
-            user.id,
-            runnerId,
-            generation,
-            response.repository,
+        }
+        if (result.state === "error") {
+          return workspaceFailure(
+            reply,
+            new WorkspaceBrokerError(result.code),
+            "The folder chooser timed out. Try again.",
           );
-          return reply.send({
-            ...grant,
-            repository: { runner_id: runnerId, ...response.repository },
-          });
-        } catch (error) {
-          return workspaceFailure(reply, error, "The folder chooser timed out. Try again.");
         }
+        const response = result.response;
+        if (response.status === "cancelled") return reply.send({ cancelled: true });
+        if (response.status !== "ok" || !response.repository) {
+          return reply.code(response.status === "invalid_request" ? 422 : 409).send({
+            error: response.status,
+            message:
+              response.status === "invalid_request"
+                ? "Choose the root folder of a Git repository with at least one commit."
+                : "The system folder chooser is unavailable.",
+          });
+        }
+        const current = reconciledRunners.get(runnerId);
+        if (
+          runnerSockets.get(runnerId) !== socket ||
+          current?.socket !== socket ||
+          current.generation !== generation
+        ) {
+          return reply.code(409).send({ error: "runner_unavailable" });
+        }
+        const grant = workspaceSelections.issue(user.id, runnerId, generation, response.repository);
+        return reply.send({
+          ...grant,
+          repository: { runner_id: runnerId, ...response.repository },
+        });
       };
 
       app.post("/api/runners/:runnerId/workspaces/choose", async (req, reply) => {
         if (!requireLegacyHelperRoutes(reply)) return;
         const { runnerId } = req.params as { runnerId: string };
-        return chooseLocalRepository(req, reply, runnerId);
+        return initiateChoose(req, reply, runnerId);
+      });
+      app.get("/api/runners/:runnerId/workspaces/choose/:requestId", async (req, reply) => {
+        if (!requireLegacyHelperRoutes(reply)) return;
+        const { runnerId, requestId } = req.params as { runnerId: string; requestId: string };
+        return pollChoose(req, reply, requestId, runnerId);
       });
 
       // Account-level local source setup. Projects consume this reusable
       // inventory and never install/pair helpers or open native pickers.
       app.post("/api/runners/helper/repositories/choose", async (req, reply) => {
         if (!requireLegacyHelperRoutes(reply)) return;
-        return chooseLocalRepository(req, reply);
+        return initiateChoose(req, reply);
+      });
+      app.get("/api/runners/helper/repositories/choose/:requestId", async (req, reply) => {
+        if (!requireLegacyHelperRoutes(reply)) return;
+        const { requestId } = req.params as { requestId: string };
+        return pollChoose(req, reply, requestId);
       });
 
       app.get("/api/runners/helper/repositories", async (req, reply) => {

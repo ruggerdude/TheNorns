@@ -24,12 +24,35 @@ interface Pending {
   timer: ReturnType<typeof setTimeout>;
 }
 
+/** A finished request, held briefly so an out-of-band poller can collect it. */
+type SettledOutcome =
+  | { kind: "ok"; response: RunnerWorkspaceResponseT }
+  | { kind: "error"; code: WorkspaceBrokerError["code"] };
+
+export type WorkspacePoll =
+  | { state: "pending" }
+  | { state: "ok"; response: RunnerWorkspaceResponseT }
+  | { state: "error"; code: WorkspaceBrokerError["code"] }
+  | { state: "unknown" };
+
 /**
  * Correlates the browser's folder request with the authenticated local helper.
  * Handles are intentionally transient: reconnecting safely forces a fresh pick.
+ *
+ * A folder pick can take minutes (the human is choosing a directory), which is
+ * far longer than an edge proxy will hold one HTTP request open — a synchronous
+ * `await` on the result gets killed by the proxy (502 "upstream error") or a
+ * mid-flight redeploy, which is exactly the recurring folder-picker failure.
+ * So the pick is decoupled from any single request: `initiate` fires it and
+ * returns immediately with a request id, and `poll` collects the outcome from a
+ * short series of fast requests. `request` (the awaited form) is kept for the
+ * short in-process callers that never leave the server.
  */
 export class RunnerWorkspaceBroker {
   private readonly pending = new Map<string, Pending>();
+  /** Settled outcomes awaiting collection by a poll, with the time they landed. */
+  private readonly outcomes = new Map<string, { at: number; outcome: SettledOutcome }>();
+  private readonly outcomeTtlMs: number;
 
   constructor(
     private readonly send: (
@@ -37,22 +60,88 @@ export class RunnerWorkspaceBroker {
       generation: number,
       request: RunnerWorkspaceRequestT,
     ) => boolean,
-    private readonly options: { timeoutMs?: number; maxPerRunner?: number } = {},
-  ) {}
+    private readonly options: {
+      timeoutMs?: number;
+      maxPerRunner?: number;
+      outcomeTtlMs?: number;
+    } = {},
+  ) {
+    this.outcomeTtlMs = options.outcomeTtlMs ?? 5 * 60_000;
+  }
+
+  /**
+   * Fire a request without holding the caller's connection open. Returns the
+   * request id immediately; the result is collected later with `poll`.
+   */
+  initiate(
+    runnerId: string,
+    generation: number,
+    input: Omit<RunnerWorkspaceRequestT, "request_id">,
+  ): { request_id: string } {
+    const request: RunnerWorkspaceRequestT = {
+      request_id: `workspace:${randomUUID().replaceAll("-", "")}`,
+      ...input,
+    };
+    this.startPending(runnerId, generation, request).then(
+      (response) => this.settle(request.request_id, { kind: "ok", response }),
+      (error) =>
+        this.settle(request.request_id, {
+          kind: "error",
+          code: error instanceof WorkspaceBrokerError ? error.code : "invalid_response",
+        }),
+    );
+    return { request_id: request.request_id };
+  }
+
+  /**
+   * Collect an initiated request's outcome. `pending` while the human is still
+   * choosing; a settled outcome is returned once and then discarded; `unknown`
+   * for an id this broker never held or has already handed back.
+   */
+  poll(request_id: string): WorkspacePoll {
+    this.pruneOutcomes();
+    const settled = this.outcomes.get(request_id);
+    if (settled) {
+      this.outcomes.delete(request_id);
+      return settled.outcome.kind === "ok"
+        ? { state: "ok", response: settled.outcome.response }
+        : { state: "error", code: settled.outcome.code };
+    }
+    return this.pending.has(request_id) ? { state: "pending" } : { state: "unknown" };
+  }
+
+  private settle(request_id: string, outcome: SettledOutcome): void {
+    this.outcomes.set(request_id, { at: Date.now(), outcome });
+  }
+
+  private pruneOutcomes(): void {
+    const cutoff = Date.now() - this.outcomeTtlMs;
+    for (const [id, entry] of this.outcomes) {
+      if (entry.at <= cutoff) this.outcomes.delete(id);
+    }
+  }
 
   request(
     runnerId: string,
     generation: number,
     input: Omit<RunnerWorkspaceRequestT, "request_id">,
   ): Promise<RunnerWorkspaceResponseT> {
-    const max = this.options.maxPerRunner ?? 4;
-    if ([...this.pending.values()].filter((entry) => entry.runnerId === runnerId).length >= max) {
-      return Promise.reject(new WorkspaceBrokerError("request_limit"));
-    }
     const request: RunnerWorkspaceRequestT = {
       request_id: `workspace:${randomUUID().replaceAll("-", "")}`,
       ...input,
     };
+    return this.startPending(runnerId, generation, request);
+  }
+
+  private startPending(
+    runnerId: string,
+    generation: number,
+    request: RunnerWorkspaceRequestT,
+  ): Promise<RunnerWorkspaceResponseT> {
+    const max = this.options.maxPerRunner ?? 4;
+    if ([...this.pending.values()].filter((entry) => entry.runnerId === runnerId).length >= max) {
+      return Promise.reject(new WorkspaceBrokerError("request_limit"));
+    }
     return new Promise<RunnerWorkspaceResponseT>((resolve, reject) => {
       const timeoutMs =
         request.operation === "choose" ||

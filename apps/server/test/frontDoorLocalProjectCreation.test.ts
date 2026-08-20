@@ -138,15 +138,28 @@ describe.sequential("Front Door secure local-folder creation", () => {
       runner_id: "runner-local",
     });
 
-    const chosen = await api("/api/runners/helper/repositories/choose", {
+    // The pick is initiated (returns an id immediately, never held open) and
+    // its outcome is collected by polling — the async flow that survives a long
+    // pick without a proxy killing one long-lived request.
+    const initiated = await api("/api/runners/helper/repositories/choose", {
       method: "POST",
       body: JSON.stringify({}),
     });
-    expect(chosen.status).toBe(200);
-    const selection = (await chosen.json()) as {
-      selection_token: string;
-      repository: { repository_display_name: string };
+    expect(initiated.status).toBe(200);
+    const { request_id } = (await initiated.json()) as { request_id: string };
+    expect(request_id).toMatch(/^workspace:/);
+
+    let selection: { selection_token: string; repository: { repository_display_name: string } } = {
+      selection_token: "",
+      repository: { repository_display_name: "" },
     };
+    await waitFor(async () => {
+      const poll = await api(`/api/runners/helper/repositories/choose/${request_id}`);
+      if (poll.status === 202) return false;
+      expect(poll.status).toBe(200);
+      selection = (await poll.json()) as typeof selection;
+      return true;
+    }, "local folder pick");
     expect(selection.repository.repository_display_name).toBe("secret-app");
     expect(JSON.stringify(selection)).not.toContain(repository);
 
