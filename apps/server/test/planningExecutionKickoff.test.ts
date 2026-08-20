@@ -798,6 +798,7 @@ describe.sequential("phase tab P4: approve auto-starts execution (HTTP, real cha
     ).resolves.toEqual({
       decision_points: 1,
       repaired_reservations: [],
+      expired_dispatches: 0,
     });
     expect(
       (

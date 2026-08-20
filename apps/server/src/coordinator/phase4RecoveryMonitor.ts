@@ -4,6 +4,11 @@ import { upsertV2DecisionPoint } from "../persistence/v2/application.js";
 import { sweepV2OrphanReservations } from "../persistence/v2/budget.js";
 import type { V2TransactionRunner } from "../persistence/v2/database.js";
 import {
+  transitionV2AgentRunLifecycle,
+  transitionV2TaskLifecycle,
+} from "../persistence/v2/lifecycleMutation.js";
+import {
+  SqlV2ApplicationTransaction,
   sqlV2BudgetSweepRepositoryFactory,
   sqlV2BudgetTransactionFactory,
   sqlV2DecisionPointTransactionFactory,
@@ -34,8 +39,12 @@ export class Phase4RecoveryMonitor {
   ): Promise<{
     decision_points: number;
     repaired_reservations: string[];
+    expired_dispatches: number;
   }> {
     const reconciledAt = now.toISOString();
+    // Expire delivered-but-never-started commands past their deadline first, so
+    // the runs they free land in the stuck-run sweep below as recoverable.
+    const expiredDispatches = await this.expireStaleDispatches(now);
     await this.transactions.transaction(async (sql) => {
       await reconcileObsoleteRecoveryDecisions(sql, reconciledAt);
       const completedQuickRuns = await sql.query<{
@@ -197,6 +206,102 @@ export class Phase4RecoveryMonitor {
       now: () => now,
       actorId: "system:phase4-recovery",
     });
-    return { decision_points: points, repaired_reservations: swept.repaired };
+    return {
+      decision_points: points,
+      repaired_reservations: swept.repaired,
+      expired_dispatches: expiredDispatches,
+    };
+  }
+
+  /**
+   * EXEC-CANCEL-2 — a command that was delivered but never started, once its
+   * own envelope `expires_at` has passed, can never run: the runner did not
+   * pick it up before its deadline, and expiry was only ever enforced BEFORE
+   * delivery. Such a run would otherwise sit `created`/`dispatched` until a
+   * human noticed and hit Stop (the EXEC-CANCEL-1 incident). A run in those
+   * states has provably never emitted `run_status started` (that is the
+   * dispatched -> running edge), so expiring it is unambiguous and needs no
+   * human. The run goes terminal `expired` and its task cascades to `blocked`,
+   * which is exactly the state the existing recovery surfaces offer retry
+   * from — so the task self-heals into a recoverable state.
+   */
+  private async expireStaleDispatches(now: Date): Promise<number> {
+    const occurredAt = now.toISOString();
+    const candidates = await this.transactions.transaction(async (sql) => {
+      const result = await sql.query<{
+        id: string;
+        project_id: string;
+        phase_id: string;
+        task_id: string;
+      }>(
+        `SELECT run.id, run.project_id, run.phase_id, run.task_id
+           FROM agent_runs run
+           JOIN phases phase ON phase.id=run.phase_id
+           JOIN dispatch_jobs job ON job.run_id=run.id
+           JOIN commands command ON command.command_id=job.command_id
+          WHERE phase.status='active'
+            AND run.is_designated=true
+            AND run.state IN ('created','dispatched')
+          GROUP BY run.id, run.project_id, run.phase_id, run.task_id
+          HAVING max((command.envelope->>'expires_at')::timestamptz) <= $1::timestamptz
+          ORDER BY run.id
+          LIMIT 100`,
+        [occurredAt],
+      );
+      return result.rows;
+    });
+    let expired = 0;
+    for (const run of candidates) {
+      try {
+        await this.transactions.transaction(async (tx) => {
+          const lifecycle = new SqlV2ApplicationTransaction(tx);
+          const lockedRun = await lifecycle.lockAgentRunLifecycle(run.id);
+          if (!lockedRun || !["created", "dispatched"].includes(lockedRun.state)) return;
+          const task = await tx.query<{ aggregate_version: number; state: string }>(
+            "SELECT aggregate_version, state FROM tasks WHERE id=$1 FOR UPDATE",
+            [run.task_id],
+          );
+          const taskRow = task.rows[0];
+          await transitionV2AgentRunLifecycle(lifecycle, {
+            project_id: run.project_id,
+            phase_id: run.phase_id,
+            task_id: run.task_id,
+            run_id: run.id,
+            expected_aggregate_version: lockedRun.aggregate_version,
+            to: "expired",
+            reason: "dispatch expired: the runner did not start the command before its deadline",
+            actor_type: "coordinator",
+            actor_id: "system:dispatch-expiry",
+            correlation_id: run.id,
+            causation_id: run.id,
+            occurred_at: occurredAt,
+          });
+          // Cascade only from `assigned` (the state a task holds while its run
+          // is created/dispatched). Any other state means something else moved
+          // the task concurrently; leave it and let the next tick re-evaluate.
+          if (taskRow?.state === "assigned") {
+            await transitionV2TaskLifecycle(lifecycle, {
+              project_id: run.project_id,
+              phase_id: run.phase_id,
+              task_id: run.task_id,
+              expected_aggregate_version: taskRow.aggregate_version,
+              to: "blocked",
+              reason: "dispatch expired before execution started",
+              actor_type: "coordinator",
+              actor_id: "system:dispatch-expiry",
+              correlation_id: run.id,
+              causation_id: run.id,
+              occurred_at: occurredAt,
+            });
+          }
+        });
+        expired += 1;
+      } catch {
+        // Best-effort sweep: a concurrent transition (the runner started, a
+        // human cancelled, a version bumped) just means this run is no longer
+        // ours to expire. Never let one row abort the whole scan.
+      }
+    }
+    return expired;
   }
 }

@@ -249,6 +249,29 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     });
   });
 
+  it("EXEC-CANCEL-2: expires a delivered-but-never-started command past its deadline and blocks the task", async () => {
+    await schedule();
+    const transactions = new PGliteTransactionRunner(pg);
+    const monitor = new Phase4RecoveryMonitor(transactions);
+
+    // Before the command's own expires_at (20:15Z): nothing is stale.
+    const early = await monitor.scan(new Date("2026-07-16T20:10:00.000Z"));
+    expect(early.expired_dispatches).toBe(0);
+
+    // After the deadline the created run never started, so it expires and its
+    // task drops to blocked — the state the recovery panel offers retry from,
+    // with no user Stop required.
+    const outcome = await monitor.scan(new Date("2026-07-16T20:30:00.000Z"));
+    expect(outcome.expired_dispatches).toBe(1);
+
+    const state = await pg.query<{ run_state: string; task_state: string }>(
+      `SELECT run.state AS run_state, task.state AS task_state
+         FROM tasks task JOIN agent_runs run ON run.id=task.designated_run_id
+        WHERE task.id='task-1'`,
+    );
+    expect(state.rows[0]).toEqual({ run_state: "expired", task_state: "blocked" });
+  });
+
   it("keeps exact runner matching for legacy local bindings under typed authorization", async () => {
     await pg.exec("UPDATE projects SET owner_user_id='admin-1' WHERE id='project-1'");
     coordinator = new Phase4Coordinator(new PGliteTransactionRunner(pg), {
@@ -1031,6 +1054,7 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     await expect(monitor.scan(new Date("2026-07-16T20:04:00.000Z"))).resolves.toEqual({
       decision_points: 1,
       repaired_reservations: [],
+      expired_dispatches: 0,
     });
     const decision = await pg.query<{ reason_class: string; status: string }>(
       "SELECT reason_class, status FROM decision_points WHERE scope_entity_id=$1",
@@ -1397,10 +1421,12 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     await expect(monitor.scan(new Date("2026-07-16T20:10:00.000Z"), 60_000)).resolves.toEqual({
       decision_points: 1,
       repaired_reservations: [],
+      expired_dispatches: 0,
     });
     await expect(monitor.scan(new Date("2026-07-16T20:11:00.000Z"), 60_000)).resolves.toEqual({
       decision_points: 0,
       repaired_reservations: [],
+      expired_dispatches: 0,
     });
     const points = await pg.query<{ count: number; status: string }>(
       `SELECT count(*)::int AS count, min(status) AS status
@@ -1421,6 +1447,7 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     await expect(monitor.scan(new Date("2026-07-16T20:13:00.000Z"), 60_000)).resolves.toEqual({
       decision_points: 0,
       repaired_reservations: [],
+      expired_dispatches: 0,
     });
     const reconciled = await pg.query<{ status: string; audits: number }>(
       `SELECT decision.status,
