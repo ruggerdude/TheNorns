@@ -161,11 +161,14 @@ interface SchedulableTaskRow {
   designated_terminal_run_id: string | null;
 }
 
+// Budget and wall-clock are the real bounds; this only stops a runaway loop.
+// Scaffolding a repo routinely takes 50-100+ tool turns, and the first live
+// caps (12/20/30/45) cut every Foundation attempt off mid-file.
 export const MAX_AGENT_TURNS_BY_COMPLEXITY = {
-  S: 12,
-  M: 20,
-  L: 30,
-  XL: 45,
+  S: 40,
+  M: 80,
+  L: 150,
+  XL: 200,
 } as const;
 
 function numeric(value: string | number): number {

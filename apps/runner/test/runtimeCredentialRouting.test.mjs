@@ -288,6 +288,8 @@ test("agentic runtimes confine autonomous filesystem access to runner-approved p
     "/Users/example/.norns/approved-inputs",
     "/Users/example/repository/.git",
   ]);
+  assert.equal(claudeOptions.settings.sandbox.network.allowLocalBinding, true);
+  assert.ok(claudeOptions.settings.sandbox.network.allowedDomains.includes("registry.npmjs.org"));
   assert.deepEqual(claudeOptions.managedSettings.sandbox.filesystem.allowWrite, [
     "/Users/example/repository-worktree",
     "/Users/example/.norns/runtime-state",

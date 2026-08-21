@@ -233,6 +233,20 @@ class UserMessageQueue {
   }
 }
 
+export const CLAUDE_CODE_SANDBOX_ALLOWED_DOMAINS = [
+  "registry.npmjs.org",
+  "registry.yarnpkg.com",
+  "github.com",
+  "*.github.com",
+  "*.githubusercontent.com",
+  "pypi.org",
+  "files.pythonhosted.org",
+  "crates.io",
+  "*.crates.io",
+  "proxy.golang.org",
+  "sum.golang.org",
+] as const;
+
 export class ClaudeCodeRuntime implements CodingRuntime {
   readonly name = "claude-code";
   readonly capabilities = {
@@ -396,6 +410,20 @@ export class ClaudeCodeRuntime implements CodingRuntime {
           tools: [...CLAUDE_CODE_AUTONOMOUS_TOOLS],
           allowedTools: [...CLAUDE_CODE_AUTONOMOUS_TOOLS],
           settingSources: [],
+          // Egress is allowlisted, not open: package registries and GitHub are
+          // what a coding agent needs to install and test; everything else
+          // stays closed (the sandbox proxy answered npm with 403 before this).
+          // Lives in the flag-settings layer: `managedSettings` is filtered
+          // restrictive-only and drops permissive arrays like allowedDomains.
+          // Local binding lets test servers take a port.
+          settings: {
+            sandbox: {
+              network: {
+                allowedDomains: [...CLAUDE_CODE_SANDBOX_ALLOWED_DOMAINS],
+                allowLocalBinding: true,
+              },
+            },
+          },
           additionalDirectories: [
             ...(request.additionalReadDirectories ?? []),
             ...(request.additionalWriteDirectories ?? []),

@@ -1418,6 +1418,19 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
 
 ## Runner/execution follow-ups surfaced during live test (2026-08-21)
 
+- [x] ✅ EXEC-TURNCAP-SANDBOX — Live (strumsheetx1 attempts 3+4, after the wedge
+  fix): dispatch accepted, agent coded ~3 min, then "verification failed".
+  Session transcripts show both attempts ended MID-FILE at 20 and 29 tool
+  calls — the new per-complexity turn cap (12/20/30/45, fdcd7bf) cut a
+  Foundation scaffold off long before it could finish, so verification ran
+  on a half-built repo. Separately, inside the sandbox `npm install` got 403
+  from the sandbox proxy (no egress allowlist), so the agent could neither
+  install nor test. Fix: caps raised to 40/80/150/200 (budget + wall-clock
+  remain the real bounds); sandbox egress allowlist (npm/yarn/GitHub/PyPI/
+  crates/Go proxy) + allowLocalBinding in the flag-settings layer; a
+  verification failure after an early runtime stop now leads with the stop.
+  Agent 0.4.13 packaged — install it, then retry Foundation. The allowlist
+  could not be verified outside the real runner; the live retry is the test.
 - [x] ✅ EXEC-CANCEL-WEDGE — Live (strumsheetx1 Foundation, attempt 1): the
   runner REJECTED the dispatch ("local emergency stop is engaged") and the UI
   showed a bare "This attempt failed". Root cause: any server-delivered device

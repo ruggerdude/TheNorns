@@ -42,7 +42,7 @@ function module(id: string, path: string, dependencies: string[] = []) {
 
 describe("execution speed policies", () => {
   it("uses bounded complexity-aware agent loops", () => {
-    expect(MAX_AGENT_TURNS_BY_COMPLEXITY).toEqual({ S: 12, M: 20, L: 30, XL: 45 });
+    expect(MAX_AGENT_TURNS_BY_COMPLEXITY).toEqual({ S: 40, M: 80, L: 150, XL: 200 });
   });
 
   it("never recommends looping a deterministic permission failure", () => {

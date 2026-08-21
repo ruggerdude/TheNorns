@@ -1781,6 +1781,13 @@ export class V2RunnerExecutor {
       if (controller.signal.aborted) {
         return await cancelledWithWorktree(runtimeResult.usage);
       }
+      // A runtime that stopped early (turn cap, timeout) almost always fails
+      // verification on half-finished work; lead with THAT cause, not the
+      // symptom, so the headline says what to fix.
+      const failureReason =
+        runtimeResult.outcome === "completed"
+          ? (verification.reason ?? "verification failed")
+          : `coding runtime ${runtimeResult.outcome} before finishing (${runtimeResult.detail.slice(0, 200)}); verification of the checkpointed work then failed: ${verification.reason ?? "verification failed"}`;
       // The failing output is the single most useful thing a human can be
       // handed, and the event contract carries only a digest of it. Stream the
       // real text as run logs so the failure is diagnosable from the UI.
@@ -1977,11 +1984,7 @@ export class V2RunnerExecutor {
         );
         emit({ kind: "run_status", run_id: command.run_id, status: "completed" });
       } else {
-        emitFailure(
-          "verification",
-          "runner_verification_failed",
-          verification.reason ?? "verification failed",
-        );
+        emitFailure("verification", "runner_verification_failed", failureReason);
       }
       return finish({
         outcome: verification.passed ? "succeeded" : "failed",
@@ -1991,7 +1994,7 @@ export class V2RunnerExecutor {
         empty: false,
         publication,
         session_id: sessionId,
-        reason: verification.passed ? null : (verification.reason ?? "verification failed"),
+        reason: verification.passed ? null : failureReason,
       });
     } catch (error) {
       // EXECUTION E11 — an abort mid-stage typically surfaces as a thrown
