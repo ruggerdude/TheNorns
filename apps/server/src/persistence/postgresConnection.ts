@@ -141,6 +141,7 @@ interface RuntimeSchemaPosture {
   qc_finding_decisions_column: boolean;
   conversation_kickoff_status_supports_held: boolean;
   conversation_kickoff_lifecycle_supports_held: boolean;
+  ponytail_settings_columns: boolean;
 }
 
 /**
@@ -438,7 +439,18 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
                  AND constraint_record.conname='conversation_kickoff_intents_lifecycle_check'
                  AND constraint_record.contype='c'
                  AND pg_get_constraintdef(constraint_record.oid) LIKE '%''held''%'
-            ) AS conversation_kickoff_lifecycle_supports_held`,
+            ) AS conversation_kickoff_lifecycle_supports_held,
+            (
+              SELECT count(*) = 3
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND column_name='ponytail_mode'
+                 AND table_name IN (
+                   'global_rule_settings',
+                   'planning_reviewer_settings',
+                   'conversation_kickoff_intents'
+                 )
+            ) AS ponytail_settings_columns`,
   );
   const posture = result.rows[0];
   const missing = [
@@ -528,6 +540,7 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
     ...(!posture?.conversation_kickoff_lifecycle_supports_held
       ? ["conversation_kickoff_intents_lifecycle_check (must allow held)"]
       : []),
+    ...(!posture?.ponytail_settings_columns ? ["Ponytail settings columns"] : []),
   ];
   if (missing.length > 0) {
     throw new PostgresConnectionConfigurationError(

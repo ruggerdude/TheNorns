@@ -146,6 +146,7 @@ const currentRuntimeSchemaPosture = {
   qc_finding_decisions_column: true,
   conversation_kickoff_status_supports_held: true,
   conversation_kickoff_lifecycle_supports_held: true,
+  ponytail_settings_columns: true,
 } as const;
 
 describe("PostgreSQL runtime schema compatibility", () => {
@@ -180,6 +181,23 @@ describe("PostgreSQL runtime schema compatibility", () => {
     );
     await expect(assertCurrentRuntimeSchema(oldKickoffConstraints as never)).rejects.toThrow(
       /conversation_kickoff_intents_lifecycle_check \(must allow held\)/,
+    );
+  });
+
+  it("refuses to start before Ponytail settings have been migrated", async () => {
+    const missingPonytailSettings = {
+      query: async () => ({
+        rows: [{ ...currentRuntimeSchemaPosture, ponytail_settings_columns: false }],
+      }),
+    };
+
+    await expect(
+      assertCurrentRuntimeSchema(missingPonytailSettings as never),
+    ).rejects.toMatchObject({
+      code: "runtime_schema_outdated",
+    });
+    await expect(assertCurrentRuntimeSchema(missingPonytailSettings as never)).rejects.toThrow(
+      /Ponytail settings columns/,
     );
   });
 
@@ -262,6 +280,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             device_agent_capabilities: false,
             device_last_seen_at: false,
             device_publication_permits: null,
+            ponytail_settings_columns: true,
           },
         ],
       }),
@@ -353,6 +372,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             device_agent_capabilities: true,
             device_last_seen_at: true,
             device_publication_permits: "device_publication_permits",
+            ponytail_settings_columns: true,
           },
         ],
       }),
@@ -432,6 +452,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             device_agent_capabilities: false,
             device_last_seen_at: false,
             device_publication_permits: null,
+            ponytail_settings_columns: true,
           },
         ],
       }),
