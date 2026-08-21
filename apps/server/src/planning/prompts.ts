@@ -14,7 +14,7 @@ const PLAN_SHAPE_HINT = `The plan is a JSON object: { objective, assumptions[], 
 Each module: { id (lowercase-slug), title, description, deliverables[] (min 1),
 acceptance[] (min 1, each { id, statement, verification_type: test|command|inspection|human, verification }),
 dependencies[] (module ids, acyclic), estimated_complexity: S|M|L|XL, risk: low|medium|high|critical,
-execution { likely_paths[], owned_components[], test_commands[] (ADDITIVE to required verification only),
+execution { likely_paths[], owned_components[], test_commands[] (ADDITIVE to required verification only; each must be a terminating check — a test, build, or lint command — never a dev server, watcher, or anything that keeps running),
 environment_requirements[], migration_required }, parallelization { safe, candidate_work_units[],
 shared_files[], integration_owner_required }, inputs[], outputs[], open_decisions[] }.
 Dependencies are only real data/build-order requirements; disjoint parallel-safe modules stay independent.`;

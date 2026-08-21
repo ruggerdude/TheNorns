@@ -32,7 +32,10 @@ import { Phase4Coordinator } from "../src/coordinator/phase4Coordinator.js";
 import { Phase4DispatchRepository } from "../src/coordinator/phase4Dispatcher.js";
 import { Phase4EventProcessor } from "../src/coordinator/phase4EventProcessor.js";
 import { tokenizeVerificationCommand } from "../src/coordinator/verificationCommandSource.js";
-import { verificationCommandsFromTaskPackage } from "../src/execution/verificationPolicy.js";
+import {
+  isLongRunningCommand,
+  verificationCommandsFromTaskPackage,
+} from "../src/execution/verificationPolicy.js";
 import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import { type V2MigrationDatabase, runCurrentV2Migrations } from "../src/persistence/v2/migrate.js";
 import { AttentionService } from "../src/projects/attentionService.js";
@@ -335,6 +338,44 @@ describe.sequential("EXECUTION E10 — verification commands reach the runner", 
       { name: "e2e", command: ["npx", "playwright", "test"] },
       { name: "script", command: ["./test.sh"] },
     ]);
+  });
+
+  it("drops dev servers and watchers from the task package: a command that never exits is not a check", () => {
+    // Live failure: `npm run dev` in test_commands ran until the verifier killed
+    // it, so every attempt failed verification after its real tests had passed.
+    for (const command of [
+      "npm run dev",
+      "npm run dev --workspace=server",
+      "npm start",
+      "pnpm dev",
+      "yarn dev",
+      "npx next dev",
+      "npx vite",
+      "tsx watch src/index.ts",
+      "vitest --watch",
+      "npm run test:watch",
+      "nodemon src/index.ts",
+    ]) {
+      expect(isLongRunningCommand(command.split(" ")), command).toBe(true);
+    }
+    for (const command of [
+      "npm test --workspace=server",
+      "npm run build",
+      "vitest run",
+      "npx playwright test",
+      "npx vite build",
+      "pnpm lint",
+    ]) {
+      expect(isLongRunningCommand(command.split(" ")), command).toBe(false);
+    }
+    expect(
+      verificationCommandsFromTaskPackage({
+        module: {
+          execution: { test_commands: ["npm test --workspace=server", "npm run dev"] },
+          acceptance: [],
+        },
+      }),
+    ).toEqual([{ name: "task-package-test-1", command: ["npm", "test", "--workspace=server"] }]);
   });
 });
 

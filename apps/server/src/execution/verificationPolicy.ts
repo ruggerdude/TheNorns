@@ -93,6 +93,43 @@ const TEST_EXECUTABLES = new Set([
   "eslint",
 ]);
 
+const PACKAGE_RUNNERS = new Set(["npm", "pnpm", "yarn", "bun", "npx"]);
+const LONG_RUNNING_SCRIPTS = new Set(["dev", "start", "serve", "preview", "watch", "storybook"]);
+/** Binaries that are a dev server / watcher when invoked bare (not `vite build`). */
+const DEV_SERVER_BINARIES = new Set([
+  "vite",
+  "nodemon",
+  "webpack-dev-server",
+  "serve",
+  "http-server",
+]);
+
+/**
+ * A command that never exits on its own cannot be a verification command: it
+ * runs until the verifier kills it, and the kill reads as a failure. Live
+ * case: a PM put `npm run dev` (concurrently + tsx watch) in a plan's
+ * test_commands, so every attempt failed verification after its tests had
+ * passed, and three commits of good work were discarded. The PM is also told
+ * not to do this; this is the deterministic guard behind that advice.
+ *
+ * ponytail: a token heuristic (script names, --watch, bare dev-server
+ * binaries), not a process model. Widen the sets when a new shape bites.
+ */
+export function isLongRunningCommand(command: readonly string[]): boolean {
+  const [file, ...args] = command;
+  if (!file) return false;
+  const tokens = args.filter((arg) => !arg.startsWith("-"));
+  if (args.includes("--watch") || tokens.includes("watch")) return true;
+  if (file === "nodemon") return true;
+  const executable = file === "npx" ? tokens[0] : PACKAGE_RUNNERS.has(file) ? null : file;
+  if (executable && DEV_SERVER_BINARIES.has(executable)) return !tokens.includes("build");
+  if (!PACKAGE_RUNNERS.has(file)) return false;
+  if (file === "npx" && tokens[0] && DEV_SERVER_BINARIES.has(tokens[0])) {
+    return !tokens.includes("build");
+  }
+  return tokens.some((token) => token.split(":").some((part) => LONG_RUNNING_SCRIPTS.has(part)));
+}
+
 function explicitVerificationExecutable(value: string): boolean {
   if (TEST_EXECUTABLES.has(value)) return true;
   if (value.startsWith("/") || value.startsWith("../") || value.includes("/../")) return false;
@@ -158,6 +195,9 @@ export function verificationCommandsFromTaskPackage(value: unknown): V2Verificat
     // explicit repository-relative executable path; only the dedicated
     // execution.test_commands field is already command-shaped by contract.
     if (!candidate.trustedAsCommand && !explicitVerificationExecutable(command[0])) continue;
+    // A dev server or watcher is not a check: it never exits, so the verifier
+    // would kill it and fail the run regardless of the work's quality.
+    if (isLongRunningCommand(command)) continue;
     const identity = JSON.stringify(command);
     if (seen.has(identity)) continue;
     seen.add(identity);
