@@ -924,6 +924,17 @@ test("Workspace uses a compact top menu and one phase-chat sidebar", async ({ pa
   expect(projectContextBox).not.toBeNull();
   expect(workspaceNavigationBox).not.toBeNull();
   expect(projectContextBox?.width ?? 0).toBeGreaterThanOrEqual(192);
+  expect(await workspaceNavigation.evaluate((element) => getComputedStyle(element).position)).toBe(
+    "static",
+  );
+  expect(
+    await workspaceNavigation.evaluate((element) => getComputedStyle(element).backgroundColor),
+  ).toBe("rgba(0, 0, 0, 0)");
+  expect(workspaceNavigationBox?.y ?? -1).toBeGreaterThanOrEqual(topMenuBox?.y ?? 0);
+  expect(
+    (workspaceNavigationBox?.y ?? Number.POSITIVE_INFINITY) +
+      (workspaceNavigationBox?.height ?? Number.POSITIVE_INFINITY),
+  ).toBeLessThanOrEqual((topMenuBox?.y ?? 0) + (topMenuBox?.height ?? 0));
   expect(await projectContext.evaluate((element) => getComputedStyle(element).maxWidth)).toBe(
     "none",
   );
@@ -1135,7 +1146,9 @@ test("Workspace uses a compact top menu and one phase-chat sidebar", async ({ pa
 
   await page.setViewportSize({ width: 1280, height: 720 });
   const compactTopMenuBox = await topMenu.boundingBox();
-  const userMenuBox = await page.locator(".user-chip").boundingBox();
+  const userMenuBox = await page
+    .getByRole("button", { name: "Open application settings" })
+    .boundingBox();
   expect(compactTopMenuBox?.height ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(64);
   expect((userMenuBox?.y ?? 0) + (userMenuBox?.height ?? 0)).toBeLessThanOrEqual(64);
 
