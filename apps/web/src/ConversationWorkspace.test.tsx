@@ -2392,6 +2392,8 @@ describe("conversation workspace", () => {
             qc_mode: "automatic",
             allow_unadjudicated_rebuttals: false,
             default_max_rounds: 1,
+            development_concurrency_mode: "automatic",
+            max_parallel_agents: 6,
           });
         }
         if (
@@ -2659,6 +2661,8 @@ describe("conversation workspace", () => {
               qc_mode: "automatic",
               allow_unadjudicated_rebuttals: false,
               default_max_rounds: 2,
+              development_concurrency_mode: "automatic",
+              max_parallel_agents: 6,
             });
           }
           if (
@@ -4230,6 +4234,8 @@ describe("conversation workspace", () => {
             mode: "automatic",
             qc_mode: "gated_when_contested",
             allow_unadjudicated_rebuttals: false,
+            development_concurrency_mode: "automatic",
+            max_parallel_agents: 6,
           });
         }
         if (
@@ -6103,6 +6109,8 @@ describe("conversation workspace", () => {
             default_max_rounds: 1,
             ponytail_mode: "inherit",
             effective_ponytail_mode: "full",
+            development_concurrency_mode: "automatic",
+            max_parallel_agents: 6,
           });
         }
         if (url.endsWith(`/conversations/${execution.id}/start-development`)) {
@@ -6148,7 +6156,13 @@ describe("conversation workspace", () => {
     );
     await user.click(within(dialog).getByRole("button", { name: "Start development" }));
 
-    await waitFor(() => expect(launchBody).toEqual({ ponytail_mode: "ultra" }));
+    await waitFor(() =>
+      expect(launchBody).toEqual({
+        ponytail_mode: "ultra",
+        development_concurrency_mode: "automatic",
+        max_parallel_agents: 6,
+      }),
+    );
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 

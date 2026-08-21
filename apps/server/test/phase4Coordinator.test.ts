@@ -1121,6 +1121,7 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       decision_points: 1,
       repaired_reservations: [],
       expired_dispatches: 0,
+      watchdog_stop_requests: 0,
     });
     const decision = await pg.query<{ reason_class: string; status: string }>(
       "SELECT reason_class, status FROM decision_points WHERE scope_entity_id=$1",
@@ -1483,17 +1484,34 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     await pg.query("UPDATE agent_runs SET updated_at='2026-07-16T19:00:00.000Z' WHERE id=$1", [
       scheduled.run_id,
     ]);
-    const monitor = new Phase4RecoveryMonitor(transactions);
+    const watchdogStops: Array<{ runId: string; reason: string; detectedAt: string }> = [];
+    const stoppedRuns = new Set<string>();
+    const monitor = new Phase4RecoveryMonitor(transactions, undefined, {
+      onInactiveRun: async (runId, reason, detectedAt) => {
+        if (stoppedRuns.has(runId)) throw new Error("watchdog stop already requested");
+        stoppedRuns.add(runId);
+        watchdogStops.push({ runId, reason, detectedAt });
+      },
+    });
     await expect(monitor.scan(new Date("2026-07-16T20:10:00.000Z"), 60_000)).resolves.toEqual({
       decision_points: 1,
       repaired_reservations: [],
       expired_dispatches: 0,
+      watchdog_stop_requests: 1,
     });
     await expect(monitor.scan(new Date("2026-07-16T20:11:00.000Z"), 60_000)).resolves.toEqual({
       decision_points: 0,
       repaired_reservations: [],
       expired_dispatches: 0,
+      watchdog_stop_requests: 0,
     });
+    expect(watchdogStops).toEqual([
+      {
+        runId: scheduled.run_id,
+        reason: "run emitted no activity for 1 minute",
+        detectedAt: "2026-07-16T20:10:00.000Z",
+      },
+    ]);
     const points = await pg.query<{ count: number; status: string }>(
       `SELECT count(*)::int AS count, min(status) AS status
        FROM decision_points WHERE scope_entity_id=$1`,
@@ -1514,6 +1532,7 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       decision_points: 0,
       repaired_reservations: [],
       expired_dispatches: 0,
+      watchdog_stop_requests: 0,
     });
     const reconciled = await pg.query<{ status: string; audits: number }>(
       `SELECT decision.status,

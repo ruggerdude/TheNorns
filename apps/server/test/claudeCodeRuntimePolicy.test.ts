@@ -6,7 +6,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 
 describe("Claude Code unattended execution policy", () => {
-  it("allows scoped coding tools without prompting, preserves the budget, and omits a turn ceiling", async () => {
+  it("allows scoped coding tools without prompting and enforces budget and turn ceilings", async () => {
     let received:
       | {
           prompt: AsyncIterable<unknown>;
@@ -38,6 +38,7 @@ describe("Claude Code unattended execution policy", () => {
       worktreePath: "/isolated/worktree",
       prompt: "Correct the README heading, verify it, and commit the result.",
       maxBudgetUsd: 1.25,
+      maxTurns: 12,
       executionMode: "quick",
     });
 
@@ -52,8 +53,8 @@ describe("Claude Code unattended execution policy", () => {
       tools: [...CLAUDE_CODE_AUTONOMOUS_TOOLS],
       allowedTools: [...CLAUDE_CODE_AUTONOMOUS_TOOLS],
       maxBudgetUsd: 1.25,
+      maxTurns: 12,
     });
-    expect(received?.options).not.toHaveProperty("maxTurns");
   });
 
   it("emits concrete file and command activity without exposing the worktree root", async () => {

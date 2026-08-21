@@ -56,6 +56,11 @@ export interface PonytailSettings {
   effectiveMode: PonytailModeT;
 }
 
+export interface DevelopmentConcurrencySettings {
+  mode: "automatic" | "manual";
+  maxParallelAgents: number;
+}
+
 export interface PlanningParticipantSelection {
   provider: ProviderName;
   model: string;
@@ -644,6 +649,50 @@ export class PlanningRunService {
            SET ponytail_mode=EXCLUDED.ponytail_mode, updated_at=now()`,
         [projectId, mode === "inherit" ? null : mode],
       );
+    });
+  }
+
+  async developmentConcurrencySettingsOf(
+    projectId: string,
+  ): Promise<DevelopmentConcurrencySettings> {
+    return this.transactions.transaction(async (tx) => {
+      const row = (
+        await tx.query<{
+          development_concurrency_mode: "automatic" | "manual";
+          max_concurrent_tasks: number;
+        }>(
+          `SELECT development_concurrency_mode, max_concurrent_tasks
+             FROM projects WHERE id=$1`,
+          [projectId],
+        )
+      ).rows[0];
+      if (!row) {
+        throw new PlanningRunConflictError("project_not_found", `unknown project "${projectId}"`);
+      }
+      return {
+        mode: row.development_concurrency_mode,
+        maxParallelAgents: Number(row.max_concurrent_tasks),
+      };
+    });
+  }
+
+  async setDevelopmentConcurrency(
+    projectId: string,
+    settings: DevelopmentConcurrencySettings,
+  ): Promise<void> {
+    await this.transactions.transaction(async (tx) => {
+      const cap = settings.mode === "automatic" ? 6 : settings.maxParallelAgents;
+      const updated = await tx.query<{ id: string }>(
+        `UPDATE projects
+            SET development_concurrency_mode=$2, max_concurrent_tasks=$3,
+                aggregate_version=aggregate_version+1, updated_at=now()
+          WHERE id=$1
+          RETURNING id`,
+        [projectId, settings.mode, cap],
+      );
+      if (!updated.rows[0]) {
+        throw new PlanningRunConflictError("project_not_found", `unknown project "${projectId}"`);
+      }
     });
   }
 

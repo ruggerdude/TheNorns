@@ -38,6 +38,7 @@ const PLAN_PROPOSAL_SYSTEM = [
   "When later messages revise or reject earlier ideas, keep only the latest accepted direction. Put genuinely unresolved choices in open_decisions instead of silently treating them as commitments.",
   "Preserve established human decisions, surface unresolved decisions, choose the best available execution agent independently for each module, and include concrete verification requirements and budget.",
   "Keep the plan compact. Use the fewest independently executable modules that cover the agreed work (normally 2–5). Do not split one coherent workstream into multiple modules for thoroughness.",
+  "Dependencies are data/build-order constraints, never a way to serialize work for convenience. If two modules are marked parallelization.safe, have disjoint file/component scopes, and neither consumes the other's outputs, leave them independent so they can run concurrently.",
   "For each module, use a one-sentence description, at most 3 non-overlapping deliverables, and at most 3 objectively checkable acceptance criteria. Keep inputs, outputs, open decisions, likely paths, owned components, test commands, environment requirements, candidate work units, and shared files to at most 3 items each unless the conversation explicitly requires more.",
   "Do not repeat the same requirement across descriptions, deliverables, acceptance criteria, inputs, outputs, or verification requirements. Concision must not remove concrete repository paths, commands, dependencies, risk, staffing, verification, open decisions, or budget that are material to execution.",
 ].join("\n\n");
@@ -185,6 +186,51 @@ export function reconcilePlanStaffing(
         model: selected?.model ?? proposed?.model,
       };
     }),
+  });
+}
+
+function normalizedSet(values: readonly string[]): Set<string> {
+  return new Set(values.map((value) => value.trim().toLowerCase()).filter(Boolean));
+}
+
+function intersects(left: Set<string>, right: Set<string>): boolean {
+  for (const value of left) if (right.has(value)) return true;
+  return false;
+}
+
+/** Remove only edges contradicted by the plan's own explicit safety facts. */
+export function removeFalsePlanDependencies(plan: V2WorkPlanContractT): V2WorkPlanContractT {
+  const byId = new Map(plan.plan.modules.map((module) => [module.id, module] as const));
+  return V2WorkPlanContract.parse({
+    ...plan,
+    plan: {
+      ...plan.plan,
+      modules: plan.plan.modules.map((module) => ({
+        ...module,
+        dependencies: module.dependencies.filter((dependencyId) => {
+          const predecessor = byId.get(dependencyId);
+          if (!predecessor) return true;
+          if (!module.parallelization.safe || !predecessor.parallelization.safe) return true;
+          const predecessorScope = normalizedSet([
+            ...predecessor.execution.likely_paths,
+            ...predecessor.execution.owned_components,
+            ...predecessor.parallelization.shared_files,
+          ]);
+          const successorScope = normalizedSet([
+            ...module.execution.likely_paths,
+            ...module.execution.owned_components,
+            ...module.parallelization.shared_files,
+          ]);
+          if (intersects(predecessorScope, successorScope)) return true;
+          const predecessorOutputs = normalizedSet([
+            ...predecessor.outputs,
+            ...predecessor.deliverables,
+          ]);
+          const successorInputs = normalizedSet(module.inputs);
+          return intersects(predecessorOutputs, successorInputs);
+        }),
+      })),
+    },
   });
 }
 
@@ -564,7 +610,7 @@ export class ConversationPlanProposalService {
         this.proposalProgress("validating", adapter.provider, adapter.model),
       );
       const plan = reconcilePlanStaffing(
-        V2WorkPlanContract.parse(generated.value),
+        removeFalsePlanDependencies(V2WorkPlanContract.parse(generated.value)),
         input.handoff?.execution_agent,
         executionModels,
       );

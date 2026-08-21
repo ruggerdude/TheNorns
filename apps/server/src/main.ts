@@ -549,7 +549,15 @@ if (databaseUrl) {
       completion: new Phase4CompletionService(runtimeTransactions),
       dispatch: new Phase4DispatchRepository(runtimeTransactions, deviceActionAuthorization),
       events: new Phase4EventProcessor(runtimeTransactions, undefined, deviceActionAuthorization),
-      recovery: new Phase4RecoveryMonitor(runtimeTransactions),
+      recovery: new Phase4RecoveryMonitor(runtimeTransactions, undefined, {
+        onInactiveRun: async (runId, reason, detectedAt) => {
+          await deviceCancellations.requestWatchdogStop({
+            run_id: runId,
+            reason,
+            requested_at: detectedAt,
+          });
+        },
+      }),
     };
     // ONBOARDING O4: Actions-hosted execution. Only constructible when GitHub
     // is configured — without it the whole path is absent and laptop runners

@@ -1,9 +1,9 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { lstatSync, realpathSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { constants, lstatSync, realpathSync } from "node:fs";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { delimiter, isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import {
   type CodexReasoningEffortT,
@@ -221,6 +221,7 @@ type RunnerExecutionStage =
   | "context_load"
   | "scratch_prepare"
   | "worktree_prepare"
+  | "preflight"
   | "runtime"
   | "worktree_inspection"
   | "verification"
@@ -230,11 +231,82 @@ const FAILURE_CODE_BY_STAGE: Record<RunnerExecutionStage, string> = {
   context_load: "runner_context_load_failed",
   scratch_prepare: "runner_scratch_prepare_failed",
   worktree_prepare: "runner_worktree_prepare_failed",
+  preflight: "runner_preflight_failed",
   runtime: "runner_runtime_failed",
   worktree_inspection: "runner_worktree_inspection_failed",
   verification: "runner_verification_failed",
   publication: "runner_publication_failed",
 };
+
+export interface RunnerExecutionPreflightInput {
+  worktreePath: string;
+  runtimeStateDirectory: string;
+  requiredCommands: readonly string[];
+  path: string;
+}
+
+export interface RunnerExecutionPreflightResult {
+  gitCommonDirectory: string;
+}
+
+async function executableAvailable(
+  command: string,
+  worktreePath: string,
+  path: string,
+): Promise<boolean> {
+  const candidates = command.includes("/")
+    ? [isAbsolute(command) ? command : resolve(worktreePath, command)]
+    : path
+        .split(delimiter)
+        .filter(Boolean)
+        .map((directory) => resolve(directory, command));
+  for (const candidate of candidates) {
+    try {
+      await access(candidate, constants.X_OK);
+      return true;
+    } catch {
+      // Continue through PATH candidates.
+    }
+  }
+  return false;
+}
+
+/**
+ * Cheap runner-side proof that the expensive model call can actually edit and
+ * commit. It runs after worktree creation but before credentials are minted.
+ */
+export async function preflightRunnerExecution(
+  input: RunnerExecutionPreflightInput,
+): Promise<RunnerExecutionPreflightResult> {
+  const inside = (
+    await execFileAsync("git", ["-C", input.worktreePath, "rev-parse", "--is-inside-work-tree"])
+  ).stdout.trim();
+  if (inside !== "true") throw new Error("prepared workspace is not a Git worktree");
+
+  const rawCommonDirectory = (
+    await execFileAsync("git", ["-C", input.worktreePath, "rev-parse", "--git-common-dir"])
+  ).stdout.trim();
+  const gitCommonDirectory = isAbsolute(rawCommonDirectory)
+    ? resolve(rawCommonDirectory)
+    : resolve(input.worktreePath, rawCommonDirectory);
+  await access(gitCommonDirectory, constants.R_OK | constants.W_OK);
+  await access(input.runtimeStateDirectory, constants.R_OK | constants.W_OK);
+
+  const probe = resolve(input.worktreePath, `.norns-preflight-${randomUUID()}`);
+  try {
+    await writeFile(probe, "preflight\n", { mode: 0o600 });
+    await access(probe, constants.R_OK | constants.W_OK);
+  } finally {
+    await rm(probe, { force: true });
+  }
+
+  for (const command of new Set(["git", ...input.requiredCommands])) {
+    if (!(await executableAvailable(command, input.worktreePath, input.path))) {
+      throw new Error(`required executable is unavailable: ${command}`);
+    }
+  }
+  return { gitCommonDirectory };
+}
 
 export class GitWorktreeManager implements RunnerWorktreeManager {
   constructor(private readonly worktreeRoot: string) {}
@@ -1239,6 +1311,21 @@ export class V2RunnerExecutor {
         target_branch: command.target_branch,
       });
       if (controller.signal.aborted) return cancelledBefore("preparing the worktree");
+      stage = "preflight";
+      const preflight = await preflightRunnerExecution({
+        worktreePath: worktree.path,
+        runtimeStateDirectory,
+        requiredCommands: (command.verification_commands ?? [])
+          .map((entry) => entry.command[0])
+          .filter((entry): entry is string => Boolean(entry)),
+        path: executionPath(process.env.PATH),
+      });
+      emit({
+        kind: "run_log",
+        run_id: command.run_id,
+        chunk:
+          "Runner preflight passed: the worktree and Git metadata are writable and required tools are available.",
+      });
       emit({ kind: "run_status", run_id: command.run_id, status: "started" });
       if (command.continuation) {
         emit({
@@ -1286,9 +1373,11 @@ export class V2RunnerExecutor {
         prompt: runtimePrompt,
         ...(resumeSessionId ? { resumeFallbackPrompt } : {}),
         additionalReadDirectories: approvedInputDirectory ? [approvedInputDirectory] : [],
+        additionalWriteDirectories: [preflight.gitCommonDirectory],
         runtimeStateDirectory,
         humanWaitPath,
         timeoutMs: command.max_duration_seconds * 1_000,
+        ...(command.max_turns ? { maxTurns: command.max_turns } : {}),
         executionMode: command.execution_mode ?? "planned",
         ...(command.max_charge_usd > 0 ? { maxBudgetUsd: command.max_charge_usd } : {}),
         // EXECUTION E11 — THE line that was missing. Every adapter accepted a

@@ -147,6 +147,7 @@ const currentRuntimeSchemaPosture = {
   conversation_kickoff_status_supports_held: true,
   conversation_kickoff_lifecycle_supports_held: true,
   ponytail_settings_columns: true,
+  execution_speed_controls_columns: true,
 } as const;
 
 describe("PostgreSQL runtime schema compatibility", () => {
@@ -281,6 +282,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             device_last_seen_at: false,
             device_publication_permits: null,
             ponytail_settings_columns: true,
+            execution_speed_controls_columns: true,
           },
         ],
       }),
@@ -373,6 +375,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             device_last_seen_at: true,
             device_publication_permits: "device_publication_permits",
             ponytail_settings_columns: true,
+            execution_speed_controls_columns: true,
           },
         ],
       }),
@@ -453,6 +456,7 @@ describe("PostgreSQL runtime schema compatibility", () => {
             device_last_seen_at: false,
             device_publication_permits: null,
             ponytail_settings_columns: true,
+            execution_speed_controls_columns: true,
           },
         ],
       }),

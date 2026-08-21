@@ -114,6 +114,7 @@ export interface Phase4ScheduleInput {
   max_input_tokens: number;
   max_output_tokens: number;
   max_duration_seconds: number;
+  max_turns?: number;
   issued_at: string;
   expires_at: string;
   /**
@@ -857,6 +858,7 @@ export class Phase4Coordinator {
         max_input_tokens: input.max_input_tokens,
         max_output_tokens: input.max_output_tokens,
         max_duration_seconds: input.max_duration_seconds,
+        ...(input.max_turns !== undefined ? { max_turns: input.max_turns } : {}),
         execution_mode: row.execution_mode,
         verification_policy_ref: row.verification_policy_ref,
         ...(verificationCommands.length > 0 ? { verification_commands: verificationCommands } : {}),

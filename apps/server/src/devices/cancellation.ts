@@ -336,6 +336,58 @@ export class DeviceRunCancellationService {
     return outcome;
   }
 
+  /** System watchdog stop for a run that has emitted no activity past the
+   * recovery threshold. Uses the run's already-authorized device identity and
+   * records `emergency_stop` so it cannot be confused with a human project
+   * stop. The existing schema still requires the owning user's FK attribution. */
+  async requestWatchdogStop(input: {
+    run_id: string;
+    reason: string;
+    requested_at: string;
+  }): Promise<DeviceRunCancellationRequestOutcome> {
+    const scope = await this.transactions.transaction(async (sql) => {
+      return (
+        await sql.query<{
+          device_id: string;
+          credential_id: string;
+          device_generation: number;
+          owner_user_id: string;
+        }>(
+          `SELECT device.id AS device_id, credential.id AS credential_id,
+                  credential.generation AS device_generation,
+                  project.owner_user_id
+             FROM agent_runs run
+             JOIN projects project ON project.id=run.project_id
+             JOIN commands command ON command.command_id=(
+               SELECT latest.command_id FROM commands latest
+                WHERE latest.run_id=run.id
+                ORDER BY latest.created_at DESC, latest.command_id DESC LIMIT 1
+             )
+             JOIN devices device
+               ON device.id=command.runner_id AND device.lifecycle='active'
+             JOIN device_credentials credential
+               ON credential.device_id=device.id
+              AND credential.generation=command.runner_generation
+              AND credential.state='active'
+            WHERE run.id=$1
+              AND run.state IN ('dispatched','running','verifying')`,
+          [input.run_id],
+        )
+      ).rows[0];
+    });
+    if (!scope) throw new ProjectRunCancellationError("project_run_not_stoppable");
+    return this.request({
+      run_id: input.run_id,
+      device_id: scope.device_id,
+      credential_id: scope.credential_id,
+      device_generation: Number(scope.device_generation),
+      cause: "emergency_stop",
+      requested_by_user_id: scope.owner_user_id,
+      reason: input.reason,
+      requested_at: input.requested_at,
+    });
+  }
+
   async requestProjectStop(input: {
     actor_user_id: string;
     project_id: string;

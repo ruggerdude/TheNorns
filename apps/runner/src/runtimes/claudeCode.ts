@@ -1,4 +1,4 @@
-import { basename, isAbsolute, relative } from "node:path";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 // Claude Code runtime via the official Claude Agent SDK.
 //
 // EXECUTION E9 — this runtime is credential-free when a gateway is supplied.
@@ -363,6 +363,16 @@ export class ClaudeCodeRuntime implements CodingRuntime {
             ...(request.humanWaitPath ? { NORNS_HUMAN_WAIT_PATH: request.humanWaitPath } : {}),
             PATH: executionPath((this.options.baseEnv ?? process.env).PATH),
           });
+      const runnerHome = String(this.options.baseEnv?.HOME ?? process.env.HOME ?? "").trim();
+      // Do not deny the whole HOME tree: managed worktrees and their Git
+      // common directory commonly live beneath it, and Claude's deny rule
+      // wins over a narrower allow rule. Deny credential-rich locations
+      // explicitly while the sandbox's cwd/allowWrite policy confines edits.
+      const deniedSensitivePaths = runnerHome
+        ? [".ssh", ".aws", ".gnupg", ".kube", ".netrc", ".npmrc"].map((entry) =>
+            resolve(runnerHome, entry),
+          )
+        : [];
       // The first message IS the prompt that used to be passed as a string.
       input.push(request.prompt);
       const stream = (this.options.queryImpl ?? query)({
@@ -372,6 +382,9 @@ export class ClaudeCodeRuntime implements CodingRuntime {
           abortController: controller,
           ...(request.maxBudgetUsd !== undefined && request.maxBudgetUsd > 0
             ? { maxBudgetUsd: request.maxBudgetUsd }
+            : {}),
+          ...(request.maxTurns !== undefined && request.maxTurns > 0
+            ? { maxTurns: request.maxTurns }
             : {}),
           // `default` asks a person to approve edits and shell commands, but
           // this headless runtime has no permission-prompt transport. The live
@@ -383,7 +396,10 @@ export class ClaudeCodeRuntime implements CodingRuntime {
           tools: [...CLAUDE_CODE_AUTONOMOUS_TOOLS],
           allowedTools: [...CLAUDE_CODE_AUTONOMOUS_TOOLS],
           settingSources: [],
-          additionalDirectories: [...(request.additionalReadDirectories ?? [])],
+          additionalDirectories: [
+            ...(request.additionalReadDirectories ?? []),
+            ...(request.additionalWriteDirectories ?? []),
+          ],
           managedSettings: {
             sandbox: {
               enabled: true,
@@ -391,22 +407,19 @@ export class ClaudeCodeRuntime implements CodingRuntime {
               autoAllowBashIfSandboxed: true,
               allowUnsandboxedCommands: false,
               filesystem: {
-                ...(env.HOME && env.HOME !== request.runtimeStateDirectory
-                  ? { denyRead: [env.HOME], denyWrite: [env.HOME] }
-                  : this.options.baseEnv?.HOME || process.env.HOME
-                    ? {
-                        denyRead: [String(this.options.baseEnv?.HOME ?? process.env.HOME)],
-                        denyWrite: [String(this.options.baseEnv?.HOME ?? process.env.HOME)],
-                      }
-                    : {}),
+                ...(deniedSensitivePaths.length > 0
+                  ? { denyRead: deniedSensitivePaths, denyWrite: deniedSensitivePaths }
+                  : {}),
                 allowRead: [
                   request.worktreePath,
                   ...(request.runtimeStateDirectory ? [request.runtimeStateDirectory] : []),
                   ...(request.additionalReadDirectories ?? []),
+                  ...(request.additionalWriteDirectories ?? []),
                 ],
                 allowWrite: [
                   request.worktreePath,
                   ...(request.runtimeStateDirectory ? [request.runtimeStateDirectory] : []),
+                  ...(request.additionalWriteDirectories ?? []),
                 ],
               },
             },

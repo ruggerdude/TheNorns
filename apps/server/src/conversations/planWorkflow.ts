@@ -3535,6 +3535,8 @@ export class ConversationPlanWorkflowService {
     userId: string,
     scope: { projectId: string; workItemId: string; conversationId: string },
     ponytailMode?: ProjectPonytailModeT,
+    developmentConcurrencyMode?: "automatic" | "manual",
+    maxParallelAgents?: number,
   ): Promise<ConversationDevelopmentStart> {
     const intentId = await this.transactions.transaction(async (tx) => {
       await this.assertAccess(tx, scope.projectId, userId);
@@ -3580,6 +3582,19 @@ export class ConversationPlanWorkflowService {
              ON CONFLICT (project_id) DO UPDATE
                SET ponytail_mode=EXCLUDED.ponytail_mode, updated_at=now()`,
             [scope.projectId, ponytailMode === "inherit" ? null : ponytailMode],
+          );
+        }
+        if (developmentConcurrencyMode !== undefined) {
+          await tx.query(
+            `UPDATE projects
+                SET development_concurrency_mode=$2, max_concurrent_tasks=$3,
+                    aggregate_version=aggregate_version+1, updated_at=now()
+              WHERE id=$1`,
+            [
+              scope.projectId,
+              developmentConcurrencyMode,
+              developmentConcurrencyMode === "automatic" ? 6 : (maxParallelAgents ?? 6),
+            ],
           );
         }
         const savedModes = (

@@ -46,7 +46,13 @@ const DevelopmentPausePointsBody = z
   })
   .strict();
 
-const DevelopmentStartBody = z.object({ ponytail_mode: ProjectPonytailMode.optional() }).strict();
+const DevelopmentStartBody = z
+  .object({
+    ponytail_mode: ProjectPonytailMode.optional(),
+    development_concurrency_mode: z.enum(["automatic", "manual"]).optional(),
+    max_parallel_agents: z.number().int().min(1).max(6).optional(),
+  })
+  .strict();
 
 const CancelReviewBody = z
   .object({
@@ -415,6 +421,8 @@ export function registerConversationPlanRoutes(
             conversationId,
           },
           body.ponytail_mode,
+          body.development_concurrency_mode,
+          body.max_parallel_agents,
         ),
       );
     } catch (error) {

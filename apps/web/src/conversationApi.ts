@@ -460,12 +460,25 @@ export function startConversationDevelopment(
   workItemId: string,
   conversationId: string,
   ponytailMode?: ProjectPonytailModeT,
+  concurrency?: { mode: "automatic" | "manual"; maxParallelAgents: number },
 ): Promise<ConversationDevelopmentStart> {
   return requestJson(
     `${messageEndpoint(projectId, workItemId, conversationId)}/start-development`,
     {
       method: "POST",
-      ...(ponytailMode ? { body: JSON.stringify({ ponytail_mode: ponytailMode }) } : {}),
+      ...(ponytailMode || concurrency
+        ? {
+            body: JSON.stringify({
+              ...(ponytailMode ? { ponytail_mode: ponytailMode } : {}),
+              ...(concurrency
+                ? {
+                    development_concurrency_mode: concurrency.mode,
+                    max_parallel_agents: concurrency.maxParallelAgents,
+                  }
+                : {}),
+            }),
+          }
+        : {}),
     },
   );
 }
@@ -578,6 +591,8 @@ export interface PlanningReviewerSettings {
   default_max_rounds: number;
   ponytail_mode: ProjectPonytailModeT;
   effective_ponytail_mode: PonytailModeT;
+  development_concurrency_mode: "automatic" | "manual";
+  max_parallel_agents: number;
 }
 
 /** The project-layer QC defaults (QC-PAUSE-POINTS.md "Settings: three

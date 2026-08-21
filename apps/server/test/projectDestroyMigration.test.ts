@@ -4,6 +4,7 @@ import { PGliteTransactionRunner } from "../src/persistence/v2/database.js";
 import {
   BUILD_FAILURE_EMAIL_NOTIFICATIONS_MIGRATION_NAME,
   DEVELOPMENT_PAUSE_POINTS_MIGRATION_NAME,
+  EXECUTION_SPEED_CONTROLS_MIGRATION_NAME,
   HELD_EXECUTION_KICKOFF_MIGRATION_NAME,
   PONYTAIL_SETTINGS_MIGRATION_NAME,
   QC_SALVAGED_PLAN_MIGRATION_NAME,
@@ -44,7 +45,7 @@ describe.sequential("permanent project deletion", () => {
 
   it("registers the latest additive migrations after project deletion", async () => {
     const names = (await currentV2MigrationSources()).map(({ name }) => name);
-    expect(names.slice(-8)).toEqual([
+    expect(names.slice(-9)).toEqual([
       HELD_EXECUTION_KICKOFF_MIGRATION_NAME,
       QC_TERMINAL_FOLLOWUP_CHAT_MIGRATION_NAME,
       SONNET_CACHE_PRICING_CORRECTION_MIGRATION_NAME,
@@ -53,6 +54,7 @@ describe.sequential("permanent project deletion", () => {
       BUILD_FAILURE_EMAIL_NOTIFICATIONS_MIGRATION_NAME,
       WORK_ITEM_WORKFLOW_MIGRATION_NAME,
       PONYTAIL_SETTINGS_MIGRATION_NAME,
+      EXECUTION_SPEED_CONTROLS_MIGRATION_NAME,
     ]);
   });
 

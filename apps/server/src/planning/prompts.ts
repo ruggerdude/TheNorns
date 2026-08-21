@@ -16,7 +16,11 @@ acceptance[] (min 1, each { id, statement, verification_type: test|command|inspe
 dependencies[] (module ids, acyclic), estimated_complexity: S|M|L|XL, risk: low|medium|high|critical,
 execution { likely_paths[], owned_components[], test_commands[] (ADDITIVE to required verification only),
 environment_requirements[], migration_required }, parallelization { safe, candidate_work_units[],
-shared_files[], integration_owner_required }, inputs[], outputs[], open_decisions[] }.`;
+shared_files[], integration_owner_required }, inputs[], outputs[], open_decisions[] }.
+Dependencies are only real data/build-order requirements; disjoint parallel-safe modules stay independent.`;
+
+const DEPENDENCY_DISCIPLINE =
+  "Dependencies are only for real data/build-order requirements. Never add one merely to serialize work. Mark disjoint modules parallelization.safe and leave them independent when neither consumes the other's outputs.";
 
 /** Reused verbatim from quickChangePrompt, which never inflated. Revisions
  * re-read the system+prompt every round, so an expansion instruction compounds:
@@ -62,11 +66,11 @@ export function reviewerSystem(memory: readonly ProjectMemoryEntryT[]): string {
 }
 
 export function draftPlanPrompt(objective: string): string {
-  return `Objective:\n${objective}\n\n${PLAN_SHAPE_HINT}\n\nProduce the Plan Contract JSON for this objective.`;
+  return `Objective:\n${objective}\n\n${PLAN_SHAPE_HINT}\n\n${DEPENDENCY_DISCIPLINE}\n\nProduce the Plan Contract JSON for this objective.`;
 }
 
 export function quickChangePrompt(objective: string): string {
-  return `Quick change:\n${objective}\n\n${PLAN_SHAPE_HINT}\n\nReturn the smallest executable Plan Contract for this change. Use exactly one module. Keep the module focused on the requested edit, include proportionate verification, and do not add speculative work or unrelated cleanup.`;
+  return `Quick change:\n${objective}\n\n${PLAN_SHAPE_HINT}\n\n${DEPENDENCY_DISCIPLINE}\n\nReturn the smallest executable Plan Contract for this change. Use exactly one module. Keep the module focused on the requested edit, include proportionate verification, and do not add speculative work or unrelated cleanup.`;
 }
 
 export function validationRetryPrompt(errors: readonly PlanValidationError[]): string {

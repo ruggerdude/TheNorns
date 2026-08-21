@@ -77,6 +77,7 @@ export interface PhaseConcurrencySnapshot {
  */
 export const SCHEDULABLE_TASKS_SQL = `
   SELECT t.id AS task_id, t.title AS task_title,
+         COALESCE(to_jsonb(t)->>'complexity', 'M') AS task_complexity,
          t.designated_assignment_id AS assignment_id,
          a.budget_limit_usd AS budget_limit_usd,
          (SELECT run.id FROM agent_runs run

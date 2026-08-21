@@ -13,6 +13,7 @@ import {
   sqlV2BudgetTransactionFactory,
   sqlV2DecisionPointTransactionFactory,
 } from "../persistence/v2/sqlRepositories.js";
+import { classifyFailureRetry } from "./failureRetryPolicy.js";
 import { Phase4KnowledgeEventAdapter } from "./phase4KnowledgeEventAdapter.js";
 import { reconcileObsoleteRecoveryDecisions } from "./phase4TerminalReconciliation.js";
 
@@ -23,14 +24,22 @@ interface StuckRun {
   task_id: string;
   state: string;
   aggregate_version: number;
+  attempt: number;
+  failure_code: string | null;
+  failure_detail: string | null;
 }
 
 export const QUICK_COMPLETION_RECOVERY_BATCH_SIZE = 25;
+
+export interface Phase4RecoveryMonitorOptions {
+  onInactiveRun?: (runId: string, reason: string, detectedAt: string) => Promise<void>;
+}
 
 export class Phase4RecoveryMonitor {
   constructor(
     private readonly transactions: V2TransactionRunner,
     private readonly knowledge = new Phase4KnowledgeEventAdapter(),
+    private readonly options: Phase4RecoveryMonitorOptions = {},
   ) {}
 
   async scan(
@@ -40,6 +49,7 @@ export class Phase4RecoveryMonitor {
     decision_points: number;
     repaired_reservations: string[];
     expired_dispatches: number;
+    watchdog_stop_requests: number;
   }> {
     const reconciledAt = now.toISOString();
     // Expire delivered-but-never-started commands past their deadline first, so
@@ -128,7 +138,8 @@ export class Phase4RecoveryMonitor {
     const stuck = await this.transactions.transaction(async (sql) => {
       const result = await sql.query<StuckRun>(
         `SELECT run.id, run.project_id, run.phase_id, run.task_id,
-                run.state, run.aggregate_version
+                run.state, run.aggregate_version, run.attempt,
+                run.failure_code, run.failure_detail
            FROM agent_runs run
            JOIN tasks task ON task.id=run.task_id
            JOIN phases phase ON phase.id=run.phase_id
@@ -145,8 +156,24 @@ export class Phase4RecoveryMonitor {
       return result.rows;
     });
     let points = 0;
+    let watchdogStopRequests = 0;
     for (const run of stuck) {
       const terminal = ["failed", "expired"].includes(run.state);
+      const retryPolicy = classifyFailureRetry(run.failure_code, run.failure_detail, run.attempt);
+      if (!terminal && this.options.onInactiveRun) {
+        try {
+          const inactiveMinutes = Math.max(1, Math.round(stuckAfterMs / 60_000));
+          await this.options.onInactiveRun(
+            run.id,
+            `run emitted no activity for ${inactiveMinutes} minute${inactiveMinutes === 1 ? "" : "s"}`,
+            reconciledAt,
+          );
+          watchdogStopRequests += 1;
+        } catch {
+          // The durable recovery decision below remains the fallback for
+          // offline/legacy runners that cannot accept a watchdog stop.
+        }
+      }
       const reasonClass = terminal ? "failed_run" : "stuck_run";
       const conditionKey = ["decision", run.project_id, "agent_run", run.id, reasonClass, run.id]
         .map(encodeURIComponent)
@@ -172,12 +199,15 @@ export class Phase4RecoveryMonitor {
             ? "How should The Norns recover this failed run?"
             : "How should The Norns recover this stuck run?",
           context: terminal
-            ? `Run ${run.id} ended ${run.state} and its task cannot advance.`
+            ? `Run ${run.id} ended ${run.state} and its task cannot advance. ${retryPolicy.explanation}`
             : `Run ${run.id} remains ${run.state} beyond the recovery threshold.`,
           options: [
             {
               id: "retry",
-              label: "Retry safely",
+              label:
+                retryPolicy.retryClass === "configuration"
+                  ? "Retry after fixing runner"
+                  : "Retry safely",
               impact: "Start a new fenced attempt after inspecting current evidence.",
               risk: "May repeat external work if the previous outcome is ambiguous.",
             },
@@ -188,7 +218,7 @@ export class Phase4RecoveryMonitor {
               risk: "The phase remains incomplete until replanned.",
             },
           ],
-          recommendation_option_id: "retry",
+          recommendation_option_id: terminal ? retryPolicy.recommendation : "cancel",
           urgency: "high",
           blocking_scope: { entity_type: "task", entity_id: run.task_id },
           occurred_at: now.toISOString(),
@@ -210,6 +240,7 @@ export class Phase4RecoveryMonitor {
       decision_points: points,
       repaired_reservations: swept.repaired,
       expired_dispatches: expiredDispatches,
+      watchdog_stop_requests: watchdogStopRequests,
     };
   }
 

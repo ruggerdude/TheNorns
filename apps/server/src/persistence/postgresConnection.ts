@@ -142,6 +142,7 @@ interface RuntimeSchemaPosture {
   conversation_kickoff_status_supports_held: boolean;
   conversation_kickoff_lifecycle_supports_held: boolean;
   ponytail_settings_columns: boolean;
+  execution_speed_controls_columns: boolean;
 }
 
 /**
@@ -450,7 +451,17 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
                    'planning_reviewer_settings',
                    'conversation_kickoff_intents'
                  )
-            ) AS ponytail_settings_columns`,
+            ) AS ponytail_settings_columns,
+            (
+              SELECT count(*) = 2
+                FROM information_schema.columns
+               WHERE table_schema='public'
+                 AND (
+                   (table_name='projects' AND column_name='development_concurrency_mode')
+                   OR
+                   (table_name='agent_profiles' AND column_name='max_concurrent_runs')
+                 )
+            ) AS execution_speed_controls_columns`,
   );
   const posture = result.rows[0];
   const missing = [
@@ -541,6 +552,7 @@ export async function assertCurrentRuntimeSchema(pool: Pick<Pool, "query">): Pro
       ? ["conversation_kickoff_intents_lifecycle_check (must allow held)"]
       : []),
     ...(!posture?.ponytail_settings_columns ? ["Ponytail settings columns"] : []),
+    ...(!posture?.execution_speed_controls_columns ? ["execution speed controls columns"] : []),
   ];
   if (missing.length > 0) {
     throw new PostgresConnectionConfigurationError(

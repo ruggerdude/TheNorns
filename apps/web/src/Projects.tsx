@@ -497,6 +497,7 @@ export function Projects({
   const [qcMode, setQcMode] = useState<QcModeT>("automatic");
   const [allowUnadjudicatedRebuttals, setAllowUnadjudicatedRebuttals] = useState(false);
   const [ponytailMode, setPonytailMode] = useState<ProjectPonytailModeT>("inherit");
+  const [developmentConcurrency, setDevelopmentConcurrency] = useState("automatic");
   const [projectUpdatePreferences, setProjectUpdatePreferences] = useState(
     loadGlobalUpdatePreferences,
   );
@@ -942,6 +943,7 @@ export function Projects({
       setQcMode("automatic");
       setAllowUnadjudicatedRebuttals(false);
       setPonytailMode("inherit");
+      setDevelopmentConcurrency("automatic");
       setProjectUpdatePreferences(loadGlobalUpdatePreferences());
       setIdempotencyKey(globalThis.crypto.randomUUID());
       onOpenProject(stableProject, {
@@ -985,6 +987,10 @@ export function Projects({
             allow_unadjudicated_rebuttals: allowUnadjudicatedRebuttals,
             default_max_rounds: roundsCount,
             ponytail_mode: ponytailMode,
+            development_concurrency_mode:
+              developmentConcurrency === "automatic" ? "automatic" : "manual",
+            max_parallel_agents:
+              developmentConcurrency === "automatic" ? 6 : Number(developmentConcurrency),
           });
         } else {
           await requestVerb(`/api/v2/projects/${projectId}/planning-reviewer`, "DELETE");
@@ -996,13 +1002,24 @@ export function Projects({
             allow_unadjudicated_rebuttals: allowUnadjudicatedRebuttals,
             default_max_rounds: roundsCount,
             ponytail_mode: ponytailMode,
+            development_concurrency_mode:
+              developmentConcurrency === "automatic" ? "automatic" : "manual",
+            max_parallel_agents:
+              developmentConcurrency === "automatic" ? 6 : Number(developmentConcurrency),
           });
         }
       } catch {
         // Best-effort: planning safely falls back to the account default.
       }
     },
-    [reviewerSelection, qcMode, allowUnadjudicatedRebuttals, roundsCount, ponytailMode],
+    [
+      reviewerSelection,
+      qcMode,
+      allowUnadjudicatedRebuttals,
+      roundsCount,
+      ponytailMode,
+      developmentConcurrency,
+    ],
   );
 
   const chooseCloneDestination = useCallback(async (): Promise<void> => {
@@ -2395,6 +2412,20 @@ export function Projects({
                             {PROJECT_PONYTAIL_OPTIONS.map((option) => (
                               <option key={option.value} value={option.value}>
                                 {option.label}
+                              </option>
+                            ))}
+                          </Select>
+                        </Field>
+                        <Field label="Maximum parallel agents">
+                          <Select
+                            data-testid="development-concurrency"
+                            value={developmentConcurrency}
+                            onChange={(event) => setDevelopmentConcurrency(event.target.value)}
+                          >
+                            <option value="automatic">Automatic (recommended)</option>
+                            {[1, 2, 3, 4, 5, 6].map((count) => (
+                              <option key={count} value={String(count)}>
+                                {count} agent{count === 1 ? "" : "s"}
                               </option>
                             ))}
                           </Select>

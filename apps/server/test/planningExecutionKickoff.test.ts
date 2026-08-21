@@ -365,11 +365,12 @@ describe.sequential("phase tab P4: approve auto-starts execution (HTTP, real cha
     expect(dispatch.rows).toEqual([{ status: "queued", runner_id: RUNNER }]);
 
     // Real assembled context reached the dispatch command.
-    const command = await pg.query<{ envelope: { context_refs: unknown[] } }>(
+    const command = await pg.query<{ envelope: { context_refs: unknown[]; max_turns: number } }>(
       "SELECT envelope FROM commands WHERE dispatch_job_id IS NOT NULL",
     );
     expect(command.rows).toHaveLength(1);
     expect((command.rows[0]?.envelope.context_refs ?? []).length).toBeGreaterThan(0);
+    expect(command.rows[0]?.envelope.max_turns).toBe(20);
 
     // The strategy approval originates from the planning-run decision: its
     // actor is the deciding human and its approved_at is the decision's
@@ -799,6 +800,7 @@ describe.sequential("phase tab P4: approve auto-starts execution (HTTP, real cha
       decision_points: 1,
       repaired_reservations: [],
       expired_dispatches: 0,
+      watchdog_stop_requests: 0,
     });
     expect(
       (

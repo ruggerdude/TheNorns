@@ -139,6 +139,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       default_max_rounds: 1,
       ponytail_mode: "inherit",
       effective_ponytail_mode: "full",
+      development_concurrency_mode: "automatic",
+      max_parallel_agents: 6,
     });
   });
 
@@ -206,6 +208,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       default_max_rounds: 1,
       ponytail_mode: "inherit",
       effective_ponytail_mode: "full",
+      development_concurrency_mode: "automatic",
+      max_parallel_agents: 6,
     });
 
     // The existing resolution path (PlanningRunService.reviewerSelectionOf,
@@ -242,6 +246,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       default_max_rounds: 1,
       ponytail_mode: "inherit",
       effective_ponytail_mode: "full",
+      development_concurrency_mode: "automatic",
+      max_parallel_agents: 6,
     });
     await expect(planningRunService.reviewerSelectionOf(projectId)).resolves.toBeNull();
   });
@@ -274,6 +280,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       default_max_rounds: 1,
       ponytail_mode: "inherit",
       effective_ponytail_mode: "full",
+      development_concurrency_mode: "automatic",
+      max_parallel_agents: 6,
     });
   });
 
@@ -307,6 +315,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       default_max_rounds: 1,
       ponytail_mode: "inherit",
       effective_ponytail_mode: "full",
+      development_concurrency_mode: "automatic",
+      max_parallel_agents: 6,
     });
   });
 
@@ -333,6 +343,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       qc_mode: "automatic",
       ponytail_mode: "ultra",
       effective_ponytail_mode: "ultra",
+      development_concurrency_mode: "automatic",
+      max_parallel_agents: 6,
     });
   });
 
@@ -361,6 +373,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       default_max_rounds: 1,
       ponytail_mode: "inherit",
       effective_ponytail_mode: "full",
+      development_concurrency_mode: "automatic",
+      max_parallel_agents: 6,
     });
 
     // Setting the escape hatch alone must not disturb the qc_mode just set,
@@ -389,6 +403,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       default_max_rounds: 1,
       ponytail_mode: "inherit",
       effective_ponytail_mode: "full",
+      development_concurrency_mode: "automatic",
+      max_parallel_agents: 6,
     });
 
     // And setting the reviewer override alone must not reset qc_mode back to
@@ -417,6 +433,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       default_max_rounds: 1,
       ponytail_mode: "inherit",
       effective_ponytail_mode: "full",
+      development_concurrency_mode: "automatic",
+      max_parallel_agents: 6,
     });
   });
 
@@ -482,6 +500,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       default_max_rounds: 5,
       ponytail_mode: "inherit",
       effective_ponytail_mode: "full",
+      development_concurrency_mode: "automatic",
+      max_parallel_agents: 6,
     });
 
     // Setting qc_mode alone afterward must not reset default_max_rounds.
@@ -509,6 +529,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       default_max_rounds: 5,
       ponytail_mode: "inherit",
       effective_ponytail_mode: "full",
+      development_concurrency_mode: "automatic",
+      max_parallel_agents: 6,
     });
 
     // And setting the reviewer override alone must leave default_max_rounds
@@ -537,6 +559,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       default_max_rounds: 5,
       ponytail_mode: "inherit",
       effective_ponytail_mode: "full",
+      development_concurrency_mode: "automatic",
+      max_parallel_agents: 6,
     });
   });
 
@@ -629,5 +653,45 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       "SELECT qc_mode, qc_mode_source FROM conversation_plan_reviews WHERE id = 'review-pin-1'",
     );
     expect(pinned.rows[0]).toEqual({ qc_mode: "gated_each_step", qc_mode_source: "work_item" });
+  });
+
+  it("round-trips automatic and manual 1-6 development concurrency", async () => {
+    const manual = await inject(
+      server,
+      "PATCH",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+      { development_concurrency_mode: "manual", max_parallel_agents: 4 },
+    );
+    expect(manual.statusCode).toBe(204);
+    const manualRead = await inject(
+      server,
+      "GET",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+    );
+    expect(manualRead.json()).toMatchObject({
+      development_concurrency_mode: "manual",
+      max_parallel_agents: 4,
+    });
+
+    const automatic = await inject(
+      server,
+      "PATCH",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+      { development_concurrency_mode: "automatic" },
+    );
+    expect(automatic.statusCode).toBe(204);
+    const automaticRead = await inject(
+      server,
+      "GET",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+    );
+    expect(automaticRead.json()).toMatchObject({
+      development_concurrency_mode: "automatic",
+      max_parallel_agents: 6,
+    });
   });
 });

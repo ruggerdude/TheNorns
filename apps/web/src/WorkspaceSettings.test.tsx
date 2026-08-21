@@ -40,6 +40,8 @@ describe("WorkspaceSettings project archiving", () => {
         qc_mode: "automatic",
         allow_unadjudicated_rebuttals: false,
         default_max_rounds: 3,
+        development_concurrency_mode: "automatic",
+        max_parallel_agents: 6,
       },
     });
     mock.get(`/api/v2/projects/${projectId}/build-failure-email`, {
@@ -314,6 +316,8 @@ describe("WorkspaceSettings QC settings", () => {
         qc_mode: "gated_when_contested",
         allow_unadjudicated_rebuttals: false,
         default_max_rounds: 3,
+        development_concurrency_mode: "automatic",
+        max_parallel_agents: 6,
       },
     });
     mock.get(`/api/v2/projects/${projectId}/build-failure-email`, {
@@ -378,6 +382,29 @@ describe("WorkspaceSettings QC settings", () => {
       }),
     );
     expect(await screen.findByText("Saved")).toBeVisible();
+  });
+
+  it("lets a project pin development concurrency from 1 through 6", async () => {
+    const user = userEvent.setup();
+    setup();
+
+    await user.selectOptions(await screen.findByTestId("development-concurrency-setting"), "4");
+    await user.click(screen.getByTestId("qc-settings-save"));
+
+    await waitFor(() =>
+      expect(
+        mock.calls.find(
+          (call) =>
+            call.method === "PATCH" &&
+            call.url === `/api/v2/projects/${projectId}/planning-reviewer`,
+        ),
+      ).toMatchObject({
+        body: {
+          development_concurrency_mode: "manual",
+          max_parallel_agents: 4,
+        },
+      }),
+    );
   });
 
   it("QCP-14: allows the rounds stepper down to 0 and disables pause controls", async () => {

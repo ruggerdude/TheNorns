@@ -152,6 +152,7 @@ interface PhaseBindingRow {
 interface SchedulableTaskRow {
   task_id: string;
   task_title: string;
+  task_complexity: "S" | "M" | "L" | "XL";
   assignment_id: string;
   budget_limit_usd: string | number;
   /** Current designated run when it is terminal-unsuccessful; scheduling this
@@ -159,6 +160,13 @@ interface SchedulableTaskRow {
    *  refuses the insert (the drainer hit exactly that, silently, forever). */
   designated_terminal_run_id: string | null;
 }
+
+export const MAX_AGENT_TURNS_BY_COMPLEXITY = {
+  S: 12,
+  M: 20,
+  L: 30,
+  XL: 45,
+} as const;
 
 function numeric(value: string | number): number {
   return typeof value === "number" ? value : Number(value);
@@ -484,6 +492,7 @@ export class PhaseLaunchService {
         max_input_tokens: this.policy.maxInputTokens,
         max_output_tokens: this.policy.maxOutputTokens,
         max_duration_seconds: this.policy.maxDurationSeconds,
+        max_turns: MAX_AGENT_TURNS_BY_COMPLEXITY[task.task_complexity] ?? 20,
         issued_at: input.issued_at,
         expires_at: expiresAt,
         ...(input.retry

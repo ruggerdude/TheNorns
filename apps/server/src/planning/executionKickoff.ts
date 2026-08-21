@@ -173,6 +173,14 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
       await this.bindConversationTaskPackages(input.projectId, input.handoffId, phaseId);
     }
 
+    // Automatic concurrency follows the approved plan's explicit
+    // parallel-safety declaration. The hard ceiling remains six, and the
+    // coordinator's dependency/profile/repository gates can still use fewer.
+    await this.applyAutomaticConcurrency(
+      input.projectId,
+      review.strategy?.proposed_concurrency ?? 1,
+    );
+
     // ---- 4. start the phase through the real gate --------------------------
     const result = await this.phaseLaunch.startPhase({
       project_id: input.projectId,
@@ -182,6 +190,21 @@ export class ExecutionKickoffService implements ApprovedPlanExecutionKickoff {
       issued_at: this.now().toISOString(),
     });
     return describeLaunch(phaseId, phaseName, result);
+  }
+
+  private async applyAutomaticConcurrency(projectId: string, proposed: number): Promise<void> {
+    const effective = Math.max(1, Math.min(6, Math.trunc(proposed)));
+    await this.transactions.transaction(async (tx) => {
+      await tx.query(
+        `UPDATE projects
+            SET max_concurrent_tasks=$2,
+                aggregate_version=aggregate_version+1,
+                updated_at=now()
+          WHERE id=$1 AND development_concurrency_mode='automatic'
+            AND max_concurrent_tasks<>$2`,
+        [projectId, effective],
+      );
+    });
   }
 
   private async bindConversationTaskPackages(

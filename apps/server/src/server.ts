@@ -7664,6 +7664,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           qc_mode: z.enum(QC_MODES).optional(),
           allow_unadjudicated_rebuttals: z.boolean().optional(),
           ponytail_mode: ProjectPonytailMode.optional(),
+          development_concurrency_mode: z.enum(["automatic", "manual"]).optional(),
+          max_parallel_agents: z.number().int().min(1).max(6).optional(),
           // QCP-14: 0 means review is off; drizzle/0071_qc_zero_rounds.sql
           // widened planning_reviewer_settings_default_max_rounds_check to
           // BETWEEN 0 AND 5 to match.
@@ -7678,14 +7680,21 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         if (!(await requireSession(req, reply))) return;
         const { id } = req.params as { id: string };
         try {
-          const [pmSelection, persisted, qcModeSettings, defaultMaxRounds, ponytailSettings] =
-            await Promise.all([
-              projects.pmSelectionOf(id),
-              planningRunService.reviewerSelectionOf(id),
-              planningRunService.qcModeSettingsOf(id),
-              planningRunService.defaultMaxRoundsOf(id),
-              planningRunService.ponytailSettingsOf(id),
-            ]);
+          const [
+            pmSelection,
+            persisted,
+            qcModeSettings,
+            defaultMaxRounds,
+            ponytailSettings,
+            concurrencySettings,
+          ] = await Promise.all([
+            projects.pmSelectionOf(id),
+            planningRunService.reviewerSelectionOf(id),
+            planningRunService.qcModeSettingsOf(id),
+            planningRunService.defaultMaxRoundsOf(id),
+            planningRunService.ponytailSettingsOf(id),
+            planningRunService.developmentConcurrencySettingsOf(id),
+          ]);
           reply.send({
             ...(persisted
               ? { provider: persisted.provider, model: persisted.model, mode: "explicit" as const }
@@ -7699,6 +7708,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             default_max_rounds: defaultMaxRounds,
             ponytail_mode: ponytailSettings.projectMode,
             effective_ponytail_mode: ponytailSettings.effectiveMode,
+            development_concurrency_mode: concurrencySettings.mode,
+            max_parallel_agents: concurrencySettings.maxParallelAgents,
           });
         } catch (error) {
           projectError(reply, error);
@@ -7731,6 +7742,17 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           }
           if (body.data.ponytail_mode !== undefined) {
             await planningRunService.setPonytailMode(id, body.data.ponytail_mode);
+          }
+          if (body.data.development_concurrency_mode !== undefined) {
+            await planningRunService.setDevelopmentConcurrency(id, {
+              mode: body.data.development_concurrency_mode,
+              maxParallelAgents: body.data.max_parallel_agents ?? 6,
+            });
+          } else if (body.data.max_parallel_agents !== undefined) {
+            await planningRunService.setDevelopmentConcurrency(id, {
+              mode: "manual",
+              maxParallelAgents: body.data.max_parallel_agents,
+            });
           }
           reply.code(204).send();
         } catch (error) {

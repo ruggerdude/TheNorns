@@ -605,6 +605,8 @@ export const V2DispatchCommand = z
     max_input_tokens: z.number().int().nonnegative(),
     max_output_tokens: z.number().int().nonnegative(),
     max_duration_seconds: z.number().int().positive(),
+    /** Bounded agent loop selected from the approved task complexity. */
+    max_turns: z.number().int().positive().max(200).optional(),
     /**
      * Quick changes and planned phases have different bounded agent-loop
      * policies. Optional keeps older dispatch producers wire-compatible;

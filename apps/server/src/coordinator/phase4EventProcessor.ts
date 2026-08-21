@@ -183,6 +183,14 @@ export class Phase4EventProcessor {
       if (!inserted.rows[0]) return { duplicate: true };
 
       if (event.payload.kind === "heartbeat" || event.payload.kind === "run_log") {
+        if (event.payload.kind === "run_log") {
+          await sql.query(
+            `UPDATE agent_runs
+                SET updated_at=GREATEST(updated_at,$3::timestamptz)
+              WHERE id=$1 AND runner_id=$2`,
+            [event.payload.run_id, event.runner_id, event.occurred_at],
+          );
+        }
         await sql.query("UPDATE runner_events SET applied_at = now() WHERE id = $1", [eventId]);
         return { duplicate: false };
       }
@@ -473,6 +481,17 @@ export class Phase4EventProcessor {
         causation_id: event.causation_id,
         occurred_at: event.occurred_at,
       };
+
+      // Recovery uses agent_runs.updated_at as its inactivity clock. Every
+      // authenticated run-scoped event is evidence of life; without this,
+      // a healthy 20-minute build looked 20 minutes idle and the watchdog
+      // could stop it despite fresh logs/knowledge heartbeats.
+      await sql.query(
+        `UPDATE agent_runs
+            SET updated_at=GREATEST(updated_at,$2::timestamptz)
+          WHERE id=$1`,
+        [scope.id, event.occurred_at],
+      );
 
       if (
         event.payload.kind === "knowledge_registration" ||

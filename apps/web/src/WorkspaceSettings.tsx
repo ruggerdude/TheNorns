@@ -60,6 +60,8 @@ interface PlanningQcSettingsDto {
   qc_mode: QcModeT;
   allow_unadjudicated_rebuttals: boolean;
   default_max_rounds: number;
+  development_concurrency_mode: "automatic" | "manual";
+  max_parallel_agents: number;
 }
 
 interface BuildFailureEmailPreferenceDto {
@@ -289,6 +291,7 @@ export function WorkspaceSettings({
   const [qcMode, setQcMode] = useState<QcModeT>("automatic");
   const [qcRounds, setQcRounds] = useState(1);
   const [qcRebuttals, setQcRebuttals] = useState(false);
+  const [developmentConcurrency, setDevelopmentConcurrency] = useState("automatic");
   const [qcSaving, setQcSaving] = useState(false);
   const [qcSaved, setQcSaved] = useState(false);
   const [failureEmailPreference, setFailureEmailPreference] =
@@ -347,6 +350,11 @@ export function WorkspaceSettings({
         setQcMode(next.qc_mode);
         setQcRounds(next.default_max_rounds);
         setQcRebuttals(next.allow_unadjudicated_rebuttals);
+        setDevelopmentConcurrency(
+          next.development_concurrency_mode === "manual"
+            ? String(next.max_parallel_agents)
+            : "automatic",
+        );
       })
       .catch((caught) => {
         if (!current) return;
@@ -366,6 +374,9 @@ export function WorkspaceSettings({
       qc_mode: qcMode,
       allow_unadjudicated_rebuttals: qcRebuttals,
       default_max_rounds: qcRounds,
+      development_concurrency_mode: developmentConcurrency === "automatic" ? "automatic" : "manual",
+      max_parallel_agents:
+        developmentConcurrency === "automatic" ? 6 : Number(developmentConcurrency),
     };
     try {
       await planningQcSettingsRequest(projectId, "PATCH", body);
@@ -622,6 +633,27 @@ export function WorkspaceSettings({
                     Allow rebuttals
                   </label>
                 </div>
+              </Field>
+              <Field label="Maximum parallel agents">
+                <Select
+                  data-testid="development-concurrency-setting"
+                  value={developmentConcurrency}
+                  onChange={(event) => {
+                    setDevelopmentConcurrency(event.target.value);
+                    setQcSaved(false);
+                  }}
+                >
+                  <option value="automatic">Automatic (recommended)</option>
+                  {[1, 2, 3, 4, 5, 6].map((count) => (
+                    <option key={count} value={String(count)}>
+                      {count} agent{count === 1 ? "" : "s"}
+                    </option>
+                  ))}
+                </Select>
+                <span className="muted">
+                  Automatic follows parallel-safe plan work; dependency and file conflicts still
+                  queue.
+                </span>
               </Field>
             </div>
             <div className="settings-save-row">

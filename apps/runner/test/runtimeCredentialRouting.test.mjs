@@ -266,6 +266,7 @@ test("agentic runtimes confine autonomous filesystem access to runner-approved p
     worktreePath: "/Users/example/repository-worktree",
     runtimeStateDirectory: "/Users/example/.norns/runtime-state",
     additionalReadDirectories: ["/Users/example/.norns/approved-inputs"],
+    additionalWriteDirectories: ["/Users/example/repository/.git"],
     prompt: "Do the work.",
   });
 
@@ -273,11 +274,24 @@ test("agentic runtimes confine autonomous filesystem access to runner-approved p
   assert.equal(claudeOptions.managedSettings.sandbox.enabled, true);
   assert.equal(claudeOptions.managedSettings.sandbox.failIfUnavailable, true);
   assert.equal(claudeOptions.managedSettings.sandbox.allowUnsandboxedCommands, false);
-  assert.deepEqual(claudeOptions.managedSettings.sandbox.filesystem.denyRead, ["/Users/example"]);
+  assert.deepEqual(claudeOptions.managedSettings.sandbox.filesystem.denyRead, [
+    "/Users/example/.ssh",
+    "/Users/example/.aws",
+    "/Users/example/.gnupg",
+    "/Users/example/.kube",
+    "/Users/example/.netrc",
+    "/Users/example/.npmrc",
+  ]);
   assert.deepEqual(claudeOptions.managedSettings.sandbox.filesystem.allowRead, [
     "/Users/example/repository-worktree",
     "/Users/example/.norns/runtime-state",
     "/Users/example/.norns/approved-inputs",
+    "/Users/example/repository/.git",
+  ]);
+  assert.deepEqual(claudeOptions.managedSettings.sandbox.filesystem.allowWrite, [
+    "/Users/example/repository-worktree",
+    "/Users/example/.norns/runtime-state",
+    "/Users/example/repository/.git",
   ]);
   assert.equal(claudeOptions.env.HOME, "/Users/example/.norns/runtime-state");
 
@@ -304,6 +318,7 @@ test("agentic runtimes confine autonomous filesystem access to runner-approved p
     worktreePath: "/Users/example/repository-worktree",
     runtimeStateDirectory: "/Users/example/.norns/runtime-state",
     additionalReadDirectories: ["/Users/example/.norns/approved-inputs"],
+    additionalWriteDirectories: ["/Users/example/repository/.git"],
     prompt: "Do the work.",
   });
 
@@ -312,6 +327,7 @@ test("agentic runtimes confine autonomous filesystem access to runner-approved p
   assert.deepEqual(codexThreadOptions.additionalDirectories, [
     "/Users/example/.norns/runtime-state",
     "/Users/example/.norns/approved-inputs",
+    "/Users/example/repository/.git",
   ]);
 });
 

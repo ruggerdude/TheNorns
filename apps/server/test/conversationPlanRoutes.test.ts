@@ -162,6 +162,8 @@ describe("conversation plan routes", () => {
           "route-user",
           { projectId: "project-1", workItemId: "work-1", conversationId: "execution-1" },
           "ultra",
+          undefined,
+          undefined,
         ],
       },
     ]);

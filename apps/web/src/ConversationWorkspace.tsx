@@ -3269,10 +3269,14 @@ function DevelopmentLaunchSettingsDialog({
   busy: boolean;
   detail: ConversationDetail;
   onCancel: () => void;
-  onStart: (ponytailMode: ProjectPonytailModeT) => void;
+  onStart: (
+    ponytailMode: ProjectPonytailModeT,
+    concurrency: { mode: "automatic" | "manual"; maxParallelAgents: number },
+  ) => void;
 }): React.ReactElement {
   const [settings, setSettings] = useState<PlanningReviewerSettings | null>(null);
   const [ponytailMode, setPonytailMode] = useState<ProjectPonytailModeT>("inherit");
+  const [developmentConcurrency, setDevelopmentConcurrency] = useState("automatic");
   const [error, setError] = useState<string | null>(null);
   const handoff = detail.handoff?.package ?? null;
   const modules = handoff?.approved_plan.plan.modules ?? [];
@@ -3284,6 +3288,11 @@ function DevelopmentLaunchSettingsDialog({
         if (!current) return;
         setSettings(result);
         setPonytailMode(result.ponytail_mode);
+        setDevelopmentConcurrency(
+          result.development_concurrency_mode === "automatic"
+            ? "automatic"
+            : String(result.max_parallel_agents),
+        );
       })
       .catch((caught) => {
         if (!current) return;
@@ -3391,16 +3400,42 @@ function DevelopmentLaunchSettingsDialog({
           </small>
         </Field>
 
+        <Field label="Maximum parallel agents">
+          <Select
+            aria-label="Maximum parallel agents"
+            value={developmentConcurrency}
+            disabled={busy || settings === null}
+            onChange={(event) => setDevelopmentConcurrency(event.target.value)}
+          >
+            <option value="automatic">Automatic (recommended)</option>
+            {[1, 2, 3, 4, 5, 6].map((count) => (
+              <option key={count} value={String(count)}>
+                {count} agent{count === 1 ? "" : "s"}
+              </option>
+            ))}
+          </Select>
+          <small className="development-launch-policy-help">
+            Automatic uses the approved plan’s parallel-safe work, up to six. Dependencies and
+            overlapping file scopes still queue safely.
+          </small>
+        </Field>
+
         {error ? <Alert>{error}</Alert> : null}
         <p className="development-launch-note">
-          Starting saves this Ponytail choice as the project default and pins it to this launch.
-          Change agents or plan scope by revising the approved plan first.
+          Starting saves these choices as project defaults. Change agents or plan scope by revising
+          the approved plan first.
         </p>
         <Button
           type="button"
           variant="primary"
           disabled={busy || settings === null || handoff === null}
-          onClick={() => onStart(ponytailMode)}
+          onClick={() =>
+            onStart(ponytailMode, {
+              mode: developmentConcurrency === "automatic" ? "automatic" : "manual",
+              maxParallelAgents:
+                developmentConcurrency === "automatic" ? 6 : Number(developmentConcurrency),
+            })
+          }
         >
           {busy ? "Starting development…" : settings ? "Start development" : "Loading settings…"}
         </Button>
@@ -6035,7 +6070,10 @@ function ConversationThread({
   ]);
 
   const startDevelopment = useCallback(
-    async (ponytailMode?: ProjectPonytailModeT): Promise<void> => {
+    async (
+      ponytailMode?: ProjectPonytailModeT,
+      concurrency?: { mode: "automatic" | "manual"; maxParallelAgents: number },
+    ): Promise<void> => {
       if (developmentStartInFlight.current) return;
       developmentStartInFlight.current = true;
       setDevelopmentStartBusy(true);
@@ -6046,6 +6084,7 @@ function ConversationThread({
           detail.work_item.id,
           detail.conversation.id,
           ponytailMode,
+          concurrency,
         );
         let started = result.execution_started === true;
         let executionDetail = result.execution_detail;
@@ -6062,6 +6101,7 @@ function ConversationThread({
             detail.work_item.id,
             detail.conversation.id,
             ponytailMode,
+            concurrency,
           );
           started = result.execution_started === true;
           executionDetail = result.execution_detail;
@@ -7062,9 +7102,9 @@ function ConversationThread({
               busy={developmentStartBusy}
               detail={detail}
               onCancel={() => setDevelopmentSettingsOpen(false)}
-              onStart={(ponytailMode) => {
+              onStart={(ponytailMode, concurrency) => {
                 setDevelopmentSettingsOpen(false);
-                void startDevelopment(ponytailMode);
+                void startDevelopment(ponytailMode, concurrency);
               }}
             />
           ) : null}

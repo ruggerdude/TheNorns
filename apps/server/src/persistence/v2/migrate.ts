@@ -564,6 +564,11 @@ export const PONYTAIL_SETTINGS_MIGRATION_URL = new URL(
   "../../../drizzle/0089_ponytail_settings.sql",
   import.meta.url,
 );
+export const EXECUTION_SPEED_CONTROLS_MIGRATION_NAME = "0090_execution_speed_controls";
+export const EXECUTION_SPEED_CONTROLS_MIGRATION_URL = new URL(
+  "../../../drizzle/0090_execution_speed_controls.sql",
+  import.meta.url,
+);
 
 export interface V2MigrationQueryResult<TRow = Record<string, unknown>> {
   rows: TRow[];
@@ -951,6 +956,10 @@ export async function loadWorkItemWorkflowMigrationSql(): Promise<string> {
 
 export async function loadPonytailSettingsMigrationSql(): Promise<string> {
   return readFile(PONYTAIL_SETTINGS_MIGRATION_URL, "utf8");
+}
+
+export async function loadExecutionSpeedControlsMigrationSql(): Promise<string> {
+  return readFile(EXECUTION_SPEED_CONTROLS_MIGRATION_URL, "utf8");
 }
 
 export function v2MigrationChecksum(sql: string): string {
@@ -1480,6 +1489,10 @@ export async function currentV2MigrationSources(): Promise<V2MigrationSource[]> 
     {
       name: PONYTAIL_SETTINGS_MIGRATION_NAME,
       sql: await loadPonytailSettingsMigrationSql(),
+    },
+    {
+      name: EXECUTION_SPEED_CONTROLS_MIGRATION_NAME,
+      sql: await loadExecutionSpeedControlsMigrationSql(),
     },
   ];
 }

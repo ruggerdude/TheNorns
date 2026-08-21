@@ -139,6 +139,7 @@ export class CodexRuntime implements CodingRuntime {
         additionalDirectories: [
           ...(request.runtimeStateDirectory ? [request.runtimeStateDirectory] : []),
           ...(request.additionalReadDirectories ?? []),
+          ...(request.additionalWriteDirectories ?? []),
         ],
         ...(this.options.model !== undefined ? { model: this.options.model } : {}),
         ...(this.options.reasoningEffort !== undefined

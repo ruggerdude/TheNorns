@@ -42,9 +42,13 @@ export interface RuntimeRunRequest {
   resumeFallbackPrompt?: string;
   /** Runner-owned, hash-verified task inputs the runtime may read but not write. */
   additionalReadDirectories?: string[];
+  /** Runner-approved repository metadata directories required for Git commits. */
+  additionalWriteDirectories?: string[];
   /** Runner-owned state directory used as HOME/cache instead of the user's home. */
   runtimeStateDirectory?: string;
   timeoutMs?: number;
+  /** Hard SDK turn ceiling chosen from the approved task complexity. */
+  maxTurns?: number;
   /** Execution-loop policy selected by the approved planning path. */
   executionMode?: "quick" | "planned";
   /**
