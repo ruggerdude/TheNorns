@@ -34,6 +34,7 @@ import {
   MAX_REPOSITORY_TREE_PATHS,
   selectRepositoryKeyFiles,
 } from "@norns/contracts";
+import { RepositoryGraphService } from "./repositoryGraph.js";
 
 interface WorkspaceRecord {
   workspace_id: string;
@@ -173,16 +174,19 @@ export class WorkspaceRegistry {
   private state: PersistedRegistry;
   private readonly handles = new Map<string, Handle>();
   private readonly cloneDestinations = new Map<string, CloneDestination>();
+  private readonly repositoryGraphs: RepositoryGraphService;
 
   constructor(
     dataDir: string,
     private readonly directoryPicker: DirectoryPicker = chooseNativeDirectory,
     private readonly repositoryCloner: RepositoryCloner = cloneGitHubRepository,
+    repositoryGraphs?: RepositoryGraphService,
   ) {
     mkdirSync(dataDir, { recursive: true, mode: 0o700 });
     this.dataDirectory = dataDir;
     this.file = join(dataDir, "workspace-registry.json");
     this.lockDirectory = join(dataDir, "workspace-registry.lock");
+    this.repositoryGraphs = repositoryGraphs ?? new RepositoryGraphService(dataDir);
     this.state = { version: 1, workspaces: [], repositories: [] };
     this.withMutationLock(() => {
       if (existsSync(this.file)) this.reloadOrRecover();
@@ -193,6 +197,13 @@ export class WorkspaceRegistry {
 
   /** Handles native selection asynchronously so an open dialog never blocks the runner socket. */
   async handleAsync(request: RunnerWorkspaceRequestT): Promise<RunnerWorkspaceResponseT> {
+    if (
+      request.operation === "graphify_status" ||
+      request.operation === "graphify_index" ||
+      request.operation === "graphify_query"
+    ) {
+      return this.handleRepositoryGraph(request);
+    }
     if (
       request.operation !== "choose" &&
       request.operation !== "choose_clone_parent" &&
@@ -271,6 +282,40 @@ export class WorkspaceRegistry {
         operation: request.operation,
         status: request.operation === "clone" ? "clone_failed" : "unavailable",
       };
+    }
+  }
+
+  private async handleRepositoryGraph(
+    request: RunnerWorkspaceRequestT,
+  ): Promise<RunnerWorkspaceResponseT> {
+    try {
+      const repositoryId = request.repository_id ?? "";
+      const repositoryPath = this.repositoryPath(repositoryId);
+      if (!repositoryPath) {
+        return {
+          request_id: request.request_id,
+          operation: request.operation,
+          status: "not_found",
+        };
+      }
+      const repositoryGraph =
+        request.operation === "graphify_index"
+          ? await this.repositoryGraphs.index(repositoryId, repositoryPath)
+          : request.operation === "graphify_query"
+            ? await this.repositoryGraphs.query(
+                repositoryId,
+                repositoryPath,
+                request.graph_search ?? "",
+              )
+            : await this.repositoryGraphs.status(repositoryId, repositoryPath);
+      return {
+        request_id: request.request_id,
+        operation: request.operation,
+        status: "ok",
+        repository_graph: repositoryGraph,
+      };
+    } catch {
+      return { request_id: request.request_id, operation: request.operation, status: safeError() };
     }
   }
 

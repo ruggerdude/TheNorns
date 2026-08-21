@@ -8,13 +8,6 @@ import { pmModelOption } from "@norns/contracts";
 // synchronous `${base}/plan` + `/plan/load` + PlanReview.tsx flow has no
 // remaining caller here; PlanReview.tsx stays for its direct component tests.
 //
-// The graph editor below (React Flow rendering with editing — edges with
-// cycle rejection, node deletion with re-parent/cascade confirmation, Auto
-// Allocate, per-node overrides, cost preview, allocation approval) is the
-// pre-existing execution path for a project whose graph was already loaded
-// before this change; it renders once `graph` exists and is otherwise
-// dormant behind the "No plan yet" hint.
-import type { Connection, Edge, Node } from "@xyflow/react";
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { SettingsTab } from "./Account";
@@ -47,12 +40,12 @@ import {
   type RelationalGraphReadModel,
   buildRelationalGraphReadModel,
 } from "./relationalGraphReadModel";
-import { ThemeToggle, useTheme } from "./theme";
-import { Alert, Badge, Brand, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
+import { ThemeToggle } from "./theme";
+import { Alert, Badge, Brand, Button, Spinner, TextArea } from "./ui";
 import { type UpdatePreferences, resolveUpdatePreferences } from "./workspacePreferences";
 
-const GraphCanvas = lazy(() =>
-  import("./GraphCanvas").then(({ GraphCanvas }) => ({ default: GraphCanvas })),
+const RepositoryGraph = lazy(() =>
+  import("./RepositoryGraph").then(({ RepositoryGraph }) => ({ default: RepositoryGraph })),
 );
 const Account = lazy(() => import("./Account").then(({ Account }) => ({ default: Account })));
 const Admin = lazy(() => import("./Admin").then(({ Admin }) => ({ default: Admin })));
@@ -102,67 +95,6 @@ export function workConversationRouteFromLocation(): WorkConversationRoute | nul
 export function workConversationPath(projectId: string, conversationId?: string | null): string {
   const base = `/projects/${encodeURIComponent(projectId)}/work`;
   return conversationId ? `${base}/${encodeURIComponent(conversationId)}` : base;
-}
-
-interface Assignment {
-  provider: string;
-  model: string;
-  worker_count: number;
-  reviewer_model: string;
-  budget_usd: number;
-  rationale: string;
-  source: "auto" | "pm" | "override";
-}
-
-interface GraphNodeDto {
-  id: string;
-  title: string;
-  complexity: string;
-  risk: string;
-  dependencies: string[];
-  assignment: Assignment | null;
-}
-
-/** ADR-1: server-authoritative approval status attached to every graph
- *  response. `current` is computed server-side (graph.version +
- *  allocation_fingerprint match); the hash is displayed evidence only. */
-interface ApprovalResponse {
-  content_hash: string;
-  approved_at: string;
-  actor: string;
-  current: boolean;
-}
-
-interface GraphDto {
-  version: number;
-  nodes: GraphNodeDto[];
-  cost: { total_usd: number; unallocated: string[] };
-  approval?: ApprovalResponse | null;
-  allocation_advice?: {
-    summary: string;
-    pm_provider: string;
-    pm_model: string;
-  };
-}
-
-/** Client-side approval banner state. Distinct from "all nodes allocated" —
- *  those remain different states (a full allocation is not an approval). */
-type ApprovalState =
-  | { kind: "never" }
-  | { kind: "pending" }
-  | { kind: "current"; hash: string; approvedAt: string; actor: string }
-  | { kind: "stale"; hash: string };
-
-async function api(path: string, method = "GET", body?: unknown): Promise<GraphDto> {
-  const res = await fetch(path, {
-    method,
-    headers: authHeaders(body !== undefined),
-    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
-  });
-  if (res.status === 401) throw new UnauthorizedError();
-  const json = (await res.json()) as GraphDto & { message?: string };
-  if (!res.ok) throw new ApiError(json.message ?? `request failed: ${res.status}`, res.status);
-  return json;
 }
 
 interface ProjectResumeDto {
@@ -394,34 +326,6 @@ async function patchJson<T>(path: string, body: unknown): Promise<T> {
   return json;
 }
 
-/** Layered layout with clear horizontal and vertical connector corridors. */
-function layout(nodes: GraphNodeDto[]): Map<string, { x: number; y: number }> {
-  const depths = new Map<string, number>();
-  const depthOf = (id: string, seen: Set<string>): number => {
-    const cached = depths.get(id);
-    if (cached !== undefined) return cached;
-    if (seen.has(id)) return 0;
-    seen.add(id);
-    const node = nodes.find((n) => n.id === id);
-    const depth =
-      !node || node.dependencies.length === 0
-        ? 0
-        : Math.max(...node.dependencies.map((dep) => depthOf(dep, seen))) + 1;
-    depths.set(id, depth);
-    return depth;
-  };
-  for (const node of nodes) depthOf(node.id, new Set());
-  const perLayer = new Map<number, number>();
-  const positions = new Map<string, { x: number; y: number }>();
-  for (const node of nodes) {
-    const depth = depths.get(node.id) ?? 0;
-    const index = perLayer.get(depth) ?? 0;
-    perLayer.set(depth, index + 1);
-    positions.set(node.id, { x: depth * 300 + 20, y: index * 140 + 20 });
-  }
-  return positions;
-}
-
 function ProjectGraph({
   project,
   onBack,
@@ -457,28 +361,12 @@ function ProjectGraph({
   onNewConversation?: () => void;
   onConversationRouteCleared?: () => void;
 }): React.ReactElement {
-  const { theme } = useTheme();
-  const base = `/api/projects/${project.id}`;
   const isAdoptionJourney =
     project.entry_flow === "adoption" ||
     project.onboarding_scenario === "existing_repo" ||
     project.source_type === "local";
   const isCanonicalPlanningJourney =
     isAdoptionJourney || project.entry_flow === "new" || project.onboarding_scenario === "new_repo";
-  const [graph, setGraph] = useState<GraphDto | null>(null);
-  const [draftOnly, setDraftOnly] = useState(false);
-  const [selected, setSelected] = useState<string | null>(null);
-  const [strategy, setStrategy] = useState("balanced");
-  const [allocationLoading, setAllocationLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [approval, setApproval] = useState<ApprovalState>({ kind: "never" });
-  // UI-7: override drafts are keyed by node id (not flat state) so a half-typed
-  // override for one node never leaks into another; switching selection shows
-  // that node's own pending draft or a clean slate, never the previous node's.
-  const [overrideDrafts, setOverrideDrafts] = useState<
-    Record<string, { model: string; budget: string }>
-  >({});
-  const [overrideError, setOverrideError] = useState<string | null>(null);
   const [resume, setResume] = useState<ProjectResumeDto | null>(null);
   const [monitoredPhaseId, setMonitoredPhaseId] = useState<string | null>(null);
   const [phaseExecution, setPhaseExecution] = useState<PhaseExecutionDto | null>(null);
@@ -489,11 +377,7 @@ function ProjectGraph({
   const [relationalPlanningRun, setRelationalPlanningRun] = useState<PhasePlanningRunDto | null>(
     null,
   );
-  // FRONT DOOR P1d (layout): the workspace shell reorganized into a normal
-  // top-width page with a tab bar, per the approved mockup — the graph
-  // canvas was the dominant panel before this, everything else crammed into
-  // a narrow sidebar. Purely a layout change: every section below is the
-  // exact same JSX/logic that existed already, just grouped under a tab.
+  // The workspace shell keeps each project surface in one stable top-level tab.
   type WorkspaceTab = "overview" | "work" | "graph" | "members" | "debates" | "settings";
   const [workspaceTab, setWorkspaceTab] = useState<WorkspaceTab>(
     initialWorkRoute || initialConversationId ? "work" : "overview",
@@ -520,87 +404,10 @@ function ProjectGraph({
   const [strategyReview, setStrategyReview] = useState<StrategyReviewDto | null>(null);
   const [strategyBusy, setStrategyBusy] = useState(false);
   const [strategyError, setStrategyError] = useState<string | null>(null);
-  // Last-known-*good* approval state (never "pending"): what we revert to when
-  // an in-flight mutation fails, so the banner is never left stuck at pending.
-  const lastGoodApprovalRef = useRef<ApprovalState>({ kind: "never" });
   const handleWorkspaceUnauthorized = useCallback(
     () => onLogout("Session expired. Sign in again."),
     [onLogout],
   );
-
-  const applyApproval = useCallback((next: ApprovalState) => {
-    lastGoodApprovalRef.current = next;
-    setApproval(next);
-  }, []);
-
-  // ADR-1: mount/refresh and every mutation response reconcile the banner from
-  // the server's `approval` field — the source of truth — not client memory.
-  const reconcileApproval = useCallback(
-    (g: GraphDto) => {
-      const a = g.approval;
-      if (a?.current) {
-        applyApproval({
-          kind: "current",
-          hash: a.content_hash,
-          approvedAt: a.approved_at,
-          actor: a.actor,
-        });
-      } else if (a) {
-        applyApproval({ kind: "stale", hash: a.content_hash });
-      } else {
-        applyApproval({ kind: "never" });
-      }
-    },
-    [applyApproval],
-  );
-
-  const call = useCallback(
-    async (path: string, method = "GET", body?: unknown) => {
-      const prevApproval = lastGoodApprovalRef.current;
-      try {
-        setError(null);
-        setApproval({ kind: "pending" }); // a mutation is in flight
-        const next = await api(path, method, body);
-        setGraph(next);
-        setDraftOnly(false);
-        reconcileApproval(next);
-      } catch (err) {
-        if (err instanceof UnauthorizedError) {
-          onLogout("Session expired. Sign in again.");
-        } else {
-          setError(err instanceof Error ? err.message : String(err));
-          setApproval(prevApproval); // revert; never leave the banner at pending
-        }
-      }
-    },
-    [onLogout, reconcileApproval],
-  );
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const g = await api(`${base}/graph`);
-        if (!cancelled) {
-          setGraph(g);
-          setDraftOnly(false);
-          reconcileApproval(g);
-        }
-      } catch (err) {
-        if (cancelled) return;
-        if (err instanceof UnauthorizedError) {
-          onLogout("Session expired. Sign in again.");
-        } else if (err instanceof ApiError && err.status === 409) {
-          setDraftOnly(true); // a fresh project simply has no plan yet
-        } else {
-          setError(err instanceof Error ? err.message : String(err));
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [base, onLogout, reconcileApproval]);
 
   const [resumeError, setResumeError] = useState<string | null>(null);
   const loadResume = useCallback(async () => {
@@ -641,9 +448,9 @@ function ProjectGraph({
         suppressRouteExitReset.current = true;
         onConversationRouteCleared?.();
       }
-      if (draftOnly && !graph) void loadLatestRelationalPlanningRun();
+      void loadLatestRelationalPlanningRun();
     },
-    [draftOnly, graph, loadLatestRelationalPlanningRun, onConversationRouteCleared],
+    [loadLatestRelationalPlanningRun, onConversationRouteCleared],
   );
 
   useEffect(() => {
@@ -745,14 +552,11 @@ function ProjectGraph({
     };
   }, [project.id, project.focus_planning_run_id, isCanonicalPlanningJourney, onLogout]);
 
-  // A project can remain visible through the legacy workspace while all new
-  // work is relational. Load the same fallback used by Graph as soon as the
-  // legacy graph is absent so Overview, Tracking, and Knowledge do not claim
-  // there is no phase until the human happens to open Graph.
+  // Overview consumes the current relational plan independently of the
+  // repository knowledge graph shown in the Graphify tab.
   useEffect(() => {
-    if (!draftOnly || graph) return;
     void loadLatestRelationalPlanningRun();
-  }, [draftOnly, graph, loadLatestRelationalPlanningRun]);
+  }, [loadLatestRelationalPlanningRun]);
 
   // Workspace updates use the user's global cadence unless this project has
   // a local override. Active runs still use the faster execution poll below.
@@ -922,7 +726,6 @@ function ProjectGraph({
   }, [strategyReview, project.id, onLogout, loadResume]);
 
   const relationalGraph = useMemo<RelationalGraphReadModel | null>(() => {
-    if (!draftOnly) return null;
     const currentPhase =
       resume?.phases.find((phase) => phase.id === monitoredPhaseId) ?? resume?.phases[0] ?? null;
     return buildRelationalGraphReadModel({
@@ -930,7 +733,7 @@ function ProjectGraph({
       phaseExecution,
       phase: currentPhase,
     });
-  }, [draftOnly, monitoredPhaseId, phaseExecution, relationalPlanningRun, resume?.phases]);
+  }, [monitoredPhaseId, phaseExecution, relationalPlanningRun, resume?.phases]);
 
   // When the legacy resume has not learned about a relational run yet, keep a
   // single honest phase projection for every Overview consumer. This is a
@@ -985,230 +788,6 @@ function ProjectGraph({
     (resume?.attention.blocked_tasks ?? 0) > 0 ||
     monitoredPhaseStatus === "needs attention" ||
     Boolean(relationalPhaseFallback?.needsAttention);
-
-  // ADR-1: approval is a POST that persists server-side; on success the server
-  // reports it as current, so we show the hash as evidence.
-  const approveAllocationAction = useCallback(async () => {
-    const prevApproval = lastGoodApprovalRef.current;
-    setError(null);
-    setApproval({ kind: "pending" });
-    try {
-      const res = await fetch(`${base}/graph/approve-allocation`, {
-        method: "POST",
-        headers: authHeaders(),
-      });
-      if (res.status === 401) {
-        onLogout("Session expired. Sign in again.");
-        return;
-      }
-      const body = (await res.json()) as {
-        content_hash?: string;
-        approved_at?: string;
-        actor?: string;
-        message?: string;
-      };
-      if (!res.ok) throw new Error(body.message ?? "approval refused");
-      applyApproval({
-        kind: "current",
-        hash: body.content_hash ?? "",
-        approvedAt: body.approved_at ?? new Date().toISOString(),
-        actor: body.actor ?? "operator",
-      });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      setApproval(prevApproval);
-    }
-  }, [base, onLogout, applyApproval]);
-
-  const allocateProject = useCallback(async () => {
-    setAllocationLoading(true);
-    try {
-      await call(
-        strategy === "pm" ? `${base}/graph/recommend-allocation` : `${base}/graph/allocate`,
-        "POST",
-        strategy === "pm" ? {} : { strategy },
-      );
-    } finally {
-      setAllocationLoading(false);
-    }
-  }, [base, call, strategy]);
-
-  // UI-7 draft helpers (keyed by node id).
-  const draft = (selected ? overrideDrafts[selected] : undefined) ?? { model: "", budget: "" };
-  const setDraft = useCallback(
-    (patch: Partial<{ model: string; budget: string }>) => {
-      if (!selected) return;
-      setOverrideDrafts((drafts) => ({
-        ...drafts,
-        [selected]: { ...(drafts[selected] ?? { model: "", budget: "" }), ...patch },
-      }));
-    },
-    [selected],
-  );
-  const clearDraft = useCallback((nodeId: string) => {
-    setOverrideDrafts((drafts) => {
-      const next = { ...drafts };
-      delete next[nodeId];
-      return next;
-    });
-  }, []);
-
-  const saveOverride = useCallback(async () => {
-    if (!selected) return;
-    const nodeId = selected;
-    const d = overrideDrafts[nodeId] ?? { model: "", budget: "" };
-    setOverrideError(null);
-    const patch: Record<string, unknown> = {};
-    if (d.model.trim()) patch.model = d.model.trim();
-    if (d.budget.trim()) {
-      // UI-7.6: validate client-side; never call the API with an invalid budget.
-      const budget = Number(d.budget);
-      if (!Number.isFinite(budget) || budget <= 0) {
-        setOverrideError("Budget must be a positive number.");
-        return;
-      }
-      patch.budget_usd = budget;
-    }
-    if (Object.keys(patch).length === 0) {
-      setOverrideError("Enter a model or budget to override.");
-      return;
-    }
-    const prevApproval = lastGoodApprovalRef.current;
-    setError(null);
-    setApproval({ kind: "pending" });
-    try {
-      const next = await api(`${base}/graph/nodes/${nodeId}/assignment`, "POST", patch);
-      setGraph(next);
-      setDraftOnly(false);
-      clearDraft(nodeId); // success clears the draft
-      // Override changed the allocation -> server marks approval not-current.
-      reconcileApproval(next);
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        onLogout("Session expired. Sign in again.");
-      } else {
-        setOverrideError(err instanceof Error ? err.message : String(err)); // failed save keeps the draft
-        setApproval(prevApproval);
-      }
-    }
-  }, [selected, overrideDrafts, base, onLogout, clearDraft, reconcileApproval]);
-
-  const cancelOverride = useCallback(() => {
-    if (selected) clearDraft(selected); // restore server-known values (empty draft = no pending override)
-    setOverrideError(null);
-  }, [selected, clearDraft]);
-
-  const displayGraph: GraphDto | null = graph ?? relationalGraph?.graph ?? null;
-  const graphIsReadOnly = !graph && relationalGraph !== null;
-
-  const { nodes, edges } = useMemo(() => {
-    if (!displayGraph) return { nodes: [] as Node[], edges: [] as Edge[] };
-    const positions = layout(displayGraph.nodes);
-    const flowNodes: Node[] = displayGraph.nodes.map((node) => ({
-      id: node.id,
-      position: positions.get(node.id) ?? { x: 0, y: 0 },
-      style: {
-        border:
-          node.id === selected
-            ? "2px solid #e59b45"
-            : `1px solid ${node.risk === "critical" ? "#a34f56" : node.risk === "high" ? "#9a6a32" : "#39414a"}`,
-        borderLeft: `5px solid ${node.risk === "critical" ? "#ff8585" : node.risk === "high" ? "#e59b45" : node.risk === "medium" ? "#86b9ef" : "#76d3a0"}`,
-        borderRadius: 12,
-        padding: 10,
-        width: 210,
-        fontSize: 12,
-        background:
-          theme === "light"
-            ? node.assignment
-              ? "#e8f5ed"
-              : "#ffffff"
-            : node.assignment
-              ? "#132019"
-              : "#14181d",
-        color: theme === "light" ? "#17202a" : "#f3f1eb",
-        boxShadow:
-          node.id === selected ? "0 0 0 5px rgba(229,155,69,.12)" : "0 10px 30px rgba(0,0,0,.2)",
-      },
-      data: {
-        label: (
-          <div>
-            <strong>{node.title}</strong>
-            <div
-              style={{
-                color: theme === "light" ? "#65717d" : "#9ba4ae",
-                fontSize: 12,
-                marginTop: 3,
-              }}
-            >
-              {node.id} · {node.complexity} · {node.risk} risk
-            </div>
-            {node.assignment ? (
-              <div
-                style={{
-                  marginTop: 7,
-                  color: theme === "light" ? "#247147" : "#9edbb8",
-                  fontSize: 12,
-                }}
-              >
-                {node.assignment.model} · {node.assignment.worker_count}w
-                {graphIsReadOnly ? "" : ` · $${node.assignment.budget_usd}`}
-                {!graphIsReadOnly && node.assignment.source === "override"
-                  ? " · OVERRIDE"
-                  : !graphIsReadOnly && node.assignment.source === "pm"
-                    ? " · PM PICK"
-                    : ""}
-              </div>
-            ) : (
-              <div
-                style={{
-                  color: theme === "light" ? "#8a5715" : "#ffcf91",
-                  marginTop: 7,
-                  fontSize: 12,
-                }}
-              >
-                ○ Needs allocation
-              </div>
-            )}
-          </div>
-        ),
-      },
-    }));
-    const flowEdges: Edge[] = displayGraph.nodes.flatMap((node) =>
-      node.dependencies.map((dep) => ({
-        id: `${dep}->${node.id}`,
-        source: dep,
-        target: node.id,
-        type: "orthogonal",
-        markerEnd: "arrowclosed" as const,
-        style: { stroke: theme === "light" ? "#7a8793" : "#66717d", strokeWidth: 1.7 },
-        animated: node.id === selected || dep === selected,
-      })),
-    );
-    return { nodes: flowNodes, edges: flowEdges };
-  }, [displayGraph, graphIsReadOnly, selected, theme]);
-
-  const onConnect = useCallback(
-    (connection: Connection) => {
-      if (connection.source && connection.target) {
-        void call(`${base}/graph/edges`, "POST", {
-          from: connection.source,
-          to: connection.target,
-        });
-      }
-    },
-    [call, base],
-  );
-
-  const onEdgesDelete = useCallback(
-    (deleted: Edge[]) => {
-      for (const edge of deleted) {
-        void call(`${base}/graph/edges`, "DELETE", { from: edge.source, to: edge.target });
-      }
-    },
-    [call, base],
-  );
-
-  const selectedNode = displayGraph?.nodes.find((n) => n.id === selected) ?? null;
 
   // UI-6: the "Dashboard" entry is intentionally not rendered for a real
   // project — it fetched a hardcoded global demo session's data (now moved to
@@ -1421,8 +1000,6 @@ function ProjectGraph({
 
         {workspaceTab === "overview" ? (
           <div className="workspace-tab-panel" data-testid="workspace-tab-overview">
-            {error ? <Alert testId="error">{error}</Alert> : null}
-
             {resume ? (
               <section className="card project-overview-dashboard" data-testid="overview-dashboard">
                 <div className="section-head">
@@ -1626,386 +1203,14 @@ function ProjectGraph({
 
         {workspaceTab === "graph" ? (
           <div className="workspace-tab-panel" data-testid="workspace-tab-graph">
-            {/* FRONT DOOR P1d: the React Flow canvas, demoted to its own tab —
-             *  same component, same props, same handlers as before; only the
-             *  surrounding layout changed. */}
-            <div className="graph-canvas" data-testid="graph-canvas">
-              <Suspense fallback={<Spinner label="Loading graph…" />}>
-                <GraphCanvas
-                  nodes={nodes}
-                  edges={edges}
-                  editable={Boolean(graph) && !graphIsReadOnly}
-                  theme={theme}
-                  onConnect={onConnect}
-                  onEdgesDelete={onEdgesDelete}
-                  onNodeSelect={setSelected}
-                />
-              </Suspense>
-            </div>
-            {displayGraph ? (
-              <>
-                <div className="actions">
-                  <Badge
-                    tone={
-                      graphIsReadOnly
-                        ? relationalGraph?.status === "blocked" ||
-                          relationalGraph?.status === "failed"
-                          ? "warn"
-                          : "info"
-                        : displayGraph.cost.unallocated.length
-                          ? "warn"
-                          : "success"
-                    }
-                  >
-                    {graphIsReadOnly
-                      ? "Relational read model"
-                      : displayGraph.cost.unallocated.length
-                        ? `${displayGraph.cost.unallocated.length} unallocated`
-                        : "Ready"}
-                  </Badge>
-                </div>
-                <div className="stat-strip">
-                  <div className="stat" data-testid="graph-version">
-                    <strong>
-                      {graphIsReadOnly ? displayGraph.nodes.length : `v${displayGraph.version}`}
-                    </strong>
-                    <span>{graphIsReadOnly ? "CURRENT WORK ITEMS" : "GRAPH VERSION"}</span>
-                  </div>
-                  <div className="stat" data-testid="cost-total">
-                    <strong>
-                      {graphIsReadOnly
-                        ? (relationalGraph?.status ?? "current")
-                        : `$${displayGraph.cost.total_usd}`}
-                    </strong>
-                    <span>{graphIsReadOnly ? "RELATIONAL STATUS" : "COST PREVIEW"}</span>
-                  </div>
-                </div>
-              </>
-            ) : draftOnly ? (
-              <div className="empty" data-testid="draft-hint">
-                <div>
-                  <div className="empty-icon">◇</div>
-                  <strong>No plan yet</strong>
-                  <p>Start work in Phase to create the first planning run.</p>
-                </div>
-              </div>
-            ) : (
-              <Spinner label="Loading graph…" />
-            )}
-
-            {graph ? (
-              <>
-                <details className="card side-section" open>
-                  <summary>02 · Allocate</summary>
-                  <div className="side-body form-stack">
-                    <Field label="Allocation strategy">
-                      <Select value={strategy} onChange={(e) => setStrategy(e.target.value)}>
-                        <option value="pm">Project manager · best-fit team</option>
-                        <option value="quality">Quality · strongest models</option>
-                        <option value="balanced">Balanced · cost and capability</option>
-                        <option value="cost">Cost · leanest viable models</option>
-                      </Select>
-                    </Field>
-                    <p className="muted" style={{ margin: 0 }}>
-                      {strategy === "pm"
-                        ? "Asks the selected PM to choose workers, models, reviewers, and budgets for this graph."
-                        : strategy === "quality"
-                          ? "Prioritizes capability on every module."
-                          : strategy === "cost"
-                            ? "Minimizes spend while meeting module needs."
-                            : "Balances model strength against total budget."}
-                    </p>
-                    <Button
-                      variant="primary"
-                      disabled={allocationLoading}
-                      onClick={() => void allocateProject()}
-                    >
-                      {allocationLoading
-                        ? strategy === "pm"
-                          ? "Project manager is staffing…"
-                          : "Allocating…"
-                        : strategy === "pm"
-                          ? "Ask PM to recommend team"
-                          : "Auto allocate"}
-                    </Button>
-                    {graph.allocation_advice ? (
-                      <div className="policy" data-testid="allocation-advice">
-                        <strong>PM recommendation</strong>
-                        <br />
-                        {graph.allocation_advice.summary}
-                        <div className="meta" style={{ marginTop: 6 }}>
-                          {graph.allocation_advice.pm_provider} · {graph.allocation_advice.pm_model}
-                        </div>
-                      </div>
-                    ) : null}
-                  </div>
-                </details>
-                <details className="card side-section" open>
-                  <summary>03 · Approve</summary>
-                  <div className="side-body">
-                    <p className="muted">
-                      Locks the current graph and budget with a verifiable content hash. Every node
-                      must be allocated first.
-                    </p>
-                    <Button
-                      className="btn-block"
-                      disabled={graph.cost.unallocated.length > 0 || approval.kind === "pending"}
-                      onClick={() => void approveAllocationAction()}
-                    >
-                      Approve graph & budget
-                    </Button>
-                    {/* Status is conveyed with visible text, not colour alone (UI-1.6). */}
-                    {approval.kind === "current" ? (
-                      <div
-                        data-testid="approval-hash"
-                        className="policy mono"
-                        style={{ marginTop: 8, wordBreak: "break-all" }}
-                      >
-                        ✓ Approved · current
-                        <br />
-                        {approval.hash}
-                      </div>
-                    ) : approval.kind === "stale" ? (
-                      <output
-                        data-testid="approval-stale"
-                        className="policy"
-                        style={{ marginTop: 8 }}
-                      >
-                        ⚠ Approval out of date — the graph or allocation changed since it was
-                        approved. Re-approve to lock the current graph and budget.
-                      </output>
-                    ) : approval.kind === "pending" ? (
-                      <output
-                        data-testid="approval-pending"
-                        className="policy"
-                        style={{ marginTop: 8 }}
-                      >
-                        Checking approval status…
-                      </output>
-                    ) : (
-                      <output
-                        data-testid="approval-none"
-                        className="policy"
-                        style={{ marginTop: 8 }}
-                      >
-                        Not yet approved.
-                      </output>
-                    )}
-                  </div>
-                </details>
-                <section
-                  className="card side-section"
-                  data-testid={selectedNode ? "node-panel" : undefined}
-                >
-                  <div className="section-head">
-                    <div>
-                      <div className="eyebrow">Node inspector</div>
-                      <h3>{selectedNode?.title ?? "No node selected"}</h3>
-                    </div>
-                    {selectedNode ? (
-                      <Badge
-                        tone={
-                          selectedNode.risk === "critical" || selectedNode.risk === "high"
-                            ? "danger"
-                            : "info"
-                        }
-                      >
-                        {selectedNode.risk}
-                      </Badge>
-                    ) : null}
-                  </div>
-                  {selectedNode ? (
-                    <div className="form-stack">
-                      <div className="meta">
-                        {selectedNode.id} · {selectedNode.complexity} COMPLEXITY
-                        <br />
-                        DEPENDS ON: {selectedNode.dependencies.join(", ") || "NOTHING"}
-                      </div>
-                      {selectedNode.assignment ? (
-                        <div className="assignment">
-                          <span>Provider</span>
-                          <strong>{selectedNode.assignment.provider}</strong>
-                          <span>Model</span>
-                          <strong>{selectedNode.assignment.model}</strong>
-                          <span>Workers</span>
-                          <strong>{selectedNode.assignment.worker_count}</strong>
-                          <span>Reviewer</span>
-                          <strong>{selectedNode.assignment.reviewer_model}</strong>
-                          <span>Budget</span>
-                          <strong>${selectedNode.assignment.budget_usd}</strong>
-                          <span>Source</span>
-                          <Badge
-                            tone={
-                              selectedNode.assignment.source === "override"
-                                ? "success"
-                                : selectedNode.assignment.source === "pm"
-                                  ? "info"
-                                  : "default"
-                            }
-                          >
-                            {selectedNode.assignment.source}
-                          </Badge>
-                          <span>Rationale</span>
-                          <strong>{selectedNode.assignment.rationale}</strong>
-                        </div>
-                      ) : (
-                        <p className="muted">This node has not been allocated.</p>
-                      )}
-                      <div className="divider" />
-                      <Field label="Override model">
-                        <Input
-                          placeholder="Model identifier"
-                          value={draft.model}
-                          onChange={(e) => setDraft({ model: e.target.value })}
-                        />
-                      </Field>
-                      <Field label="Override budget (USD)">
-                        <Input
-                          type="number"
-                          min="0"
-                          step="0.01"
-                          placeholder="0.00"
-                          value={draft.budget}
-                          onChange={(e) => setDraft({ budget: e.target.value })}
-                        />
-                      </Field>
-                      {overrideError ? (
-                        <Alert testId="override-error">{overrideError}</Alert>
-                      ) : null}
-                      <div className="actions">
-                        <Button
-                          variant="primary"
-                          className="btn-small"
-                          disabled={
-                            approval.kind === "pending" ||
-                            (!draft.model.trim() && !draft.budget.trim())
-                          }
-                          onClick={() => void saveOverride()}
-                        >
-                          Save override
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          className="btn-small"
-                          disabled={!draft.model.trim() && !draft.budget.trim()}
-                          onClick={cancelOverride}
-                        >
-                          Cancel
-                        </Button>
-                      </div>
-                      <div className="divider" />
-                      <div>
-                        <div className="field-label">Delete node</div>
-                        <p className="muted">
-                          Re-parent preserves dependents. Cascade also removes everything that
-                          depends on this node.
-                        </p>
-                        <div className="actions">
-                          <Button
-                            variant="danger"
-                            className="btn-small"
-                            onClick={() => {
-                              if (
-                                window.confirm(
-                                  `Delete ${selectedNode.title} and re-parent its dependents?`,
-                                )
-                              )
-                                void call(
-                                  `${base}/graph/nodes/${selectedNode.id}?mode=reparent`,
-                                  "DELETE",
-                                );
-                            }}
-                          >
-                            Re-parent
-                          </Button>
-                          <Button
-                            variant="danger"
-                            className="btn-small"
-                            onClick={() => {
-                              if (
-                                window.confirm(
-                                  `Cascade delete ${selectedNode.title} and all dependent nodes? This cannot be undone.`,
-                                )
-                              )
-                                void call(
-                                  `${base}/graph/nodes/${selectedNode.id}?mode=cascade`,
-                                  "DELETE",
-                                );
-                            }}
-                          >
-                            Cascade delete
-                          </Button>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="empty" style={{ minHeight: 140 }}>
-                      <div>
-                        <div className="empty-icon">⌖</div>
-                        <p>
-                          Select a node to inspect its assignment, override its budget, or delete
-                          it.
-                        </p>
-                      </div>
-                    </div>
-                  )}
-                </section>
-              </>
-            ) : relationalGraph ? (
-              <section
-                className="card side-section"
-                data-testid="relational-graph-summary"
-                aria-labelledby="relational-graph-title"
-              >
-                <div className="side-body form-stack">
-                  <div className="section-head">
-                    <div>
-                      <div className="eyebrow">Read-only relational view</div>
-                      <h3 id="relational-graph-title">{relationalGraph.title}</h3>
-                    </div>
-                    <Badge
-                      tone={
-                        relationalGraph.status === "blocked" || relationalGraph.status === "failed"
-                          ? "warn"
-                          : "info"
-                      }
-                    >
-                      {relationalGraph.status.replaceAll("_", " ")}
-                    </Badge>
-                  </div>
-                  <p className="muted">
-                    This graph comes from the current planning run and phase execution records.
-                    Allocation and graph-edit controls remain available only for legacy imported
-                    graphs.
-                  </p>
-                  {selectedNode ? (
-                    <div className="assignment" data-testid="relational-node-details">
-                      <span>Work item</span>
-                      <strong>{selectedNode.title}</strong>
-                      <span>Complexity</span>
-                      <strong>{selectedNode.complexity}</strong>
-                      <span>Risk</span>
-                      <strong>{selectedNode.risk}</strong>
-                      <span>Depends on</span>
-                      <strong>{selectedNode.dependencies.join(", ") || "Nothing"}</strong>
-                      <span>Agent</span>
-                      <strong>
-                        {selectedNode.assignment
-                          ? `${selectedNode.assignment.provider} · ${selectedNode.assignment.model}`
-                          : "Not assigned yet"}
-                      </strong>
-                      <span>Reviewer</span>
-                      <strong>{selectedNode.assignment?.reviewer_model ?? "Not assigned"}</strong>
-                    </div>
-                  ) : (
-                    <p className="muted">Select a work item to inspect its current assignment.</p>
-                  )}
-                </div>
-              </section>
-            ) : null}
+            <Suspense fallback={<Spinner label="Loading Graphify repository map…" />}>
+              <RepositoryGraph
+                projectId={project.id}
+                onUnauthorized={() => onLogout("Session expired. Sign in again.")}
+              />
+            </Suspense>
           </div>
         ) : null}
-
         {workspaceTab === "members" ? (
           <div className="workspace-tab-panel" data-testid="workspace-tab-members">
             <ProjectMembers

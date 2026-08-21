@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "TheNorns browser frontend: workflow graph editor + allocation (Phase 4)",
+  "description": "TheNorns browser frontend for planning, execution, and repository insight",
   "scripts": {
     "dev": "vite",
     "build": "vite build && node scripts/check-entry-bundle.mjs",

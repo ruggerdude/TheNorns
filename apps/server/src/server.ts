@@ -840,6 +840,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       workspaceClone: boolean;
       workspaceCloneDestination: boolean;
       workspaceDelete: boolean;
+      repositoryGraphify: boolean;
     }
   >();
   const sessionSockets = new Map<WsLike, SessionSocketBinding>();
@@ -1147,7 +1148,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       !reconciled ||
       reconciled.socket !== socket ||
       reconciled.generation !== generation ||
-      !reconciled.workspacePicker
+      !reconciled.workspacePicker ||
+      (["graphify_status", "graphify_index", "graphify_query"].includes(request.operation) &&
+        !reconciled.repositoryGraphify)
     ) {
       return false;
     }
@@ -5812,6 +5815,162 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }
       });
 
+      const repositoryGraphBuilds = new Map<string, { projectId: string; initiatedAt: number }>();
+      const pruneRepositoryGraphBuilds = (): void => {
+        const cutoff = Date.now() - 15 * 60_000;
+        for (const [requestId, build] of repositoryGraphBuilds) {
+          if (build.initiatedAt <= cutoff) repositoryGraphBuilds.delete(requestId);
+        }
+      };
+
+      const resolveRepositoryGraphRunner = async (
+        projectId: string,
+        reply: FastifyReply,
+      ): Promise<
+        | {
+            runnerId: string;
+            generation: number;
+            repositoryId: string;
+          }
+        | undefined
+      > => {
+        const binding = await options.phase3?.sourceBindings.connectedLocal(projectId);
+        if (!binding) {
+          reply.code(409).send({
+            error: "local_repository_required",
+            message:
+              "Repository maps are built on the execution computer. Connect a local repository to this project first.",
+          });
+          return undefined;
+        }
+        const runner = stores.runner(binding.runner_id);
+        const reconciled = reconciledRunners.get(binding.runner_id);
+        if (
+          !runner ||
+          !reconciled ||
+          reconciled.socket !== runnerSockets.get(binding.runner_id) ||
+          reconciled.generation !== runner.generation
+        ) {
+          reply.code(409).send({
+            error: "local_helper_unavailable",
+            message:
+              "Open the Norns Local Agent on the computer that owns this repository, then try again.",
+          });
+          return undefined;
+        }
+        if (!reconciled.repositoryGraphify) {
+          reply.code(409).send({
+            error: "local_agent_update_required",
+            message: "Update the Norns Local Agent to use Graphify repository maps.",
+          });
+          return undefined;
+        }
+        return {
+          runnerId: binding.runner_id,
+          generation: runner.generation,
+          repositoryId: binding.repository_id,
+        };
+      };
+
+      const sendRepositoryGraphResponse = (
+        reply: FastifyReply,
+        response: Awaited<ReturnType<RunnerWorkspaceBroker["request"]>>,
+      ): FastifyReply => {
+        if (response.status !== "ok" || !response.repository_graph) {
+          return reply.code(response.status === "not_found" ? 404 : 409).send({
+            error: response.status,
+            message:
+              response.status === "not_found"
+                ? "The connected repository is no longer available on the execution computer."
+                : "The Local Agent could not read the Graphify repository map.",
+          });
+        }
+        return reply.send(response.repository_graph);
+      };
+
+      app.get("/api/v2/projects/:id/repository-graph", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id } = req.params as { id: string };
+        try {
+          const target = await resolveRepositoryGraphRunner(id, reply);
+          if (!target) return;
+          const response = await workspaceBroker.request(target.runnerId, target.generation, {
+            operation: "graphify_status",
+            repository_id: target.repositoryId,
+          });
+          return sendRepositoryGraphResponse(reply, response);
+        } catch (error) {
+          return workspaceFailure(reply, error, "The repository map took too long to load.");
+        }
+      });
+
+      app.post("/api/v2/projects/:id/repository-graph/index", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id } = req.params as { id: string };
+        try {
+          const target = await resolveRepositoryGraphRunner(id, reply);
+          if (!target) return;
+          const { request_id } = workspaceBroker.initiate(target.runnerId, target.generation, {
+            operation: "graphify_index",
+            repository_id: target.repositoryId,
+          });
+          pruneRepositoryGraphBuilds();
+          repositoryGraphBuilds.set(request_id, { projectId: id, initiatedAt: Date.now() });
+          return reply.code(202).send({ request_id });
+        } catch (error) {
+          return workspaceFailure(reply, error);
+        }
+      });
+
+      app.get("/api/v2/projects/:id/repository-graph/index/:requestId", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const { id, requestId } = req.params as { id: string; requestId: string };
+        pruneRepositoryGraphBuilds();
+        if (repositoryGraphBuilds.get(requestId)?.projectId !== id) {
+          return reply.code(404).send({
+            error: "not_found",
+            message: "That Graphify build is no longer active. Start a new build.",
+          });
+        }
+        const result = workspaceBroker.poll(requestId);
+        if (result.state === "pending") return reply.code(202).send({ status: "pending" });
+        repositoryGraphBuilds.delete(requestId);
+        if (result.state === "unknown") {
+          return reply.code(404).send({
+            error: "not_found",
+            message: "That Graphify build is no longer active. Start a new build.",
+          });
+        }
+        if (result.state === "error") {
+          return workspaceFailure(
+            reply,
+            new WorkspaceBrokerError(result.code),
+            "Graphify did not finish in time. Try the build again.",
+          );
+        }
+        return sendRepositoryGraphResponse(reply, result.response);
+      });
+
+      const RepositoryGraphQuery = z.object({ query: z.string().trim().min(1).max(200) }).strict();
+      app.post("/api/v2/projects/:id/repository-graph/query", async (req, reply) => {
+        if (!(await requireSession(req, reply))) return;
+        const body = RepositoryGraphQuery.safeParse(req.body);
+        if (!body.success) return reply.code(400).send({ error: "bad_request" });
+        const { id } = req.params as { id: string };
+        try {
+          const target = await resolveRepositoryGraphRunner(id, reply);
+          if (!target) return;
+          const response = await workspaceBroker.request(target.runnerId, target.generation, {
+            operation: "graphify_query",
+            repository_id: target.repositoryId,
+            graph_search: body.data.query,
+          });
+          return sendRepositoryGraphResponse(reply, response);
+        } catch (error) {
+          return workspaceFailure(reply, error, "The repository search took too long.");
+        }
+      });
+
       app.post("/api/v2/projects/:id/source-bindings/local", async (req, reply) => {
         const user = await resolveUser(req);
         if (!user) return reply.code(401).send({ error: "unauthorized" });
@@ -8709,6 +8868,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               "workspace_clone_destination",
             ),
             workspaceDelete: advertisedDeviceCapabilities.has("workspace_delete"),
+            repositoryGraphify: advertisedDeviceCapabilities.has("repository_graphify"),
           });
         }
         stores.audit(`device:${authenticated.device_id}`, "device.wss_authenticated", "", now());
@@ -8913,6 +9073,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               workspaceClone: body.capabilities.includes("workspace_clone"),
               workspaceCloneDestination: body.capabilities.includes("workspace_clone_destination"),
               workspaceDelete: body.capabilities.includes("workspace_delete"),
+              repositoryGraphify: body.capabilities.includes("repository_graphify"),
             });
             options.deviceControl?.broker.markExecutionReady(
               deviceIdentity.device_id,
@@ -9055,6 +9216,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           workspaceClone: body.capabilities.includes("workspace_clone"),
           workspaceCloneDestination: body.capabilities.includes("workspace_clone_destination"),
           workspaceDelete: body.capabilities.includes("workspace_delete"),
+          repositoryGraphify: body.capabilities.includes("repository_graphify"),
         });
         stores.markSeen(authedRunnerId, now());
         stores.audit(`runner:${authedRunnerId}`, "runner.connected", "", now());

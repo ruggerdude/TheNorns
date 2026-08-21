@@ -133,6 +133,7 @@ test("device execution reconciles and replays durable events without enabling le
       "workspace_clone",
       "workspace_clone_destination",
       "workspace_delete",
+      "repository_graphify",
       "knowledge_transport",
     ]);
     assert.equal(firstReconcile.body.runner_id, identity.device_id);

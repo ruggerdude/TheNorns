@@ -4,6 +4,7 @@ import {
   type V2CreateGitHubRepositoryBindingT,
   V2CreateLocalRepositoryBinding,
   type V2CreateLocalRepositoryBindingT,
+  type V2LocalRunnerRepositoryBindingT,
   V2RepositoryBinding,
   type V2RepositoryBindingT,
 } from "@norns/contracts";
@@ -176,6 +177,22 @@ async function appendBindingAudit(tx: V2SqlExecutor, binding: V2RepositoryBindin
 
 export class SourceBindingService {
   constructor(private readonly transactions: V2TransactionRunner) {}
+
+  connectedLocal(projectId: string): Promise<V2LocalRunnerRepositoryBindingT | null> {
+    return this.transactions.transaction(async (tx) => {
+      const result = await tx.query<RepositoryBindingRow>(
+        `SELECT * FROM repository_bindings
+         WHERE project_id = $1 AND binding_type = 'local_runner' AND status = 'connected'
+         ORDER BY created_at, id
+         LIMIT 1`,
+        [projectId],
+      );
+      const row = result.rows[0];
+      if (!row) return null;
+      const binding = mapBinding(row);
+      return binding.binding_type === "local_runner" ? binding : null;
+    });
+  }
 
   createLocal(
     input: V2CreateLocalRepositoryBindingT,

@@ -355,6 +355,7 @@ function createPersistentRunner(input: {
     "workspace_clone",
     "workspace_clone_destination",
     "workspace_delete",
+    "repository_graphify",
     ...(input.deviceExecutionEnabled === true ? ["device_execution"] : []),
   ];
   const execution: {
@@ -596,6 +597,7 @@ async function main(): Promise<void> {
           "workspace_clone",
           "workspace_clone_destination",
           "workspace_delete",
+          "repository_graphify",
           ...(deviceExecutionEnabled ? ["device_execution"] : []),
         ],
       }),

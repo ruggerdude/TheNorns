@@ -467,3 +467,45 @@ export function makeDashboard(overrides: Partial<DashboardDtoFixture> = {}): Das
 }
 
 export const demoDashboard: DashboardDtoFixture = makeDashboard();
+
+export const graphifyRepositoryGraph = {
+  state: "ready" as const,
+  graphify_version: "0.9.48",
+  observed_head: "abcdef123456",
+  indexed_head: "abcdef123456",
+  indexed_at: "2026-08-21T12:00:00.000Z",
+  node_count: 2,
+  edge_count: 1,
+  community_count: 1,
+  nodes: [
+    {
+      id: "src/service.ts::run",
+      label: "run",
+      file_type: "function",
+      source_file: "src/service.ts",
+      source_location: "L12",
+      community: "runtime",
+      community_label: "Runtime",
+      degree: 1,
+    },
+    {
+      id: "src/store.ts::save",
+      label: "save",
+      file_type: "function",
+      source_file: "src/store.ts",
+      community: "runtime",
+      community_label: "Runtime",
+      degree: 1,
+    },
+  ],
+  edges: [
+    {
+      id: "edge:1",
+      source: "src/service.ts::run",
+      target: "src/store.ts::save",
+      relation: "calls",
+      confidence: "EXTRACTED",
+    },
+  ],
+  truncated: false,
+};

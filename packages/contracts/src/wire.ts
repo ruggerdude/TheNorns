@@ -39,6 +39,71 @@ const githubCloneUrl = z
     "clone URL must be an uncredentialed GitHub HTTPS URL",
   );
 
+const repositoryGraphText = z
+  .string()
+  .min(1)
+  .max(1_000)
+  .refine(
+    (value) =>
+      ![...value].some((character) => {
+        const code = character.charCodeAt(0);
+        return code < 32 || code === 127;
+      }),
+    "graph text must not contain control characters",
+  );
+
+const repositoryGraphPath = repositoryGraphText.refine(
+  (value) =>
+    !value.startsWith("/") &&
+    !value.includes("\\") &&
+    !value.split("/").some((segment) => segment === "" || segment === "." || segment === ".."),
+  "graph source files must be repository-relative paths",
+);
+
+export const RepositoryGraphNode = z
+  .object({
+    id: repositoryGraphText,
+    label: repositoryGraphText,
+    file_type: repositoryGraphText.optional(),
+    source_file: repositoryGraphPath.optional(),
+    source_location: z.string().min(1).max(100).optional(),
+    community: repositoryGraphText.optional(),
+    community_label: repositoryGraphText.optional(),
+    degree: z.number().int().nonnegative().max(1_000_000),
+  })
+  .strict();
+export type RepositoryGraphNodeT = z.infer<typeof RepositoryGraphNode>;
+
+export const RepositoryGraphEdge = z
+  .object({
+    id: repositoryGraphText,
+    source: repositoryGraphText,
+    target: repositoryGraphText,
+    relation: repositoryGraphText,
+    confidence: repositoryGraphText.optional(),
+  })
+  .strict();
+export type RepositoryGraphEdgeT = z.infer<typeof RepositoryGraphEdge>;
+
+export const RepositoryGraph = z
+  .object({
+    state: z.enum(["missing", "ready", "stale", "unavailable", "failed"]),
+    message: z.string().min(1).max(500).optional(),
+    graphify_version: z.string().min(1).max(100).optional(),
+    observed_head: z.string().min(1).max(240).optional(),
+    indexed_head: z.string().min(1).max(240).optional(),
+    indexed_at: z.string().datetime().optional(),
+    node_count: z.number().int().nonnegative().max(10_000_000),
+    edge_count: z.number().int().nonnegative().max(20_000_000),
+    community_count: z.number().int().nonnegative().max(1_000_000),
+    nodes: z.array(RepositoryGraphNode).max(240),
+    edges: z.array(RepositoryGraphEdge).max(600),
+    truncated: z.boolean(),
+    query: z.string().min(1).max(200).optional(),
+  })
+  .strict();
+export type RepositoryGraphT = z.infer<typeof RepositoryGraph>;
+
 export const LEGACY_RUNNER_WSS_AUTH_SIGNATURE_PURPOSE = "norns.legacy-runner-wss-auth.v1" as const;
 export const DEVICE_CANCELLATION_EVIDENCE_WSS_SIGNATURE_PURPOSE =
   "norns.device-cancellation-evidence-wss.v1" as const;
@@ -135,6 +200,9 @@ export const RunnerWorkspaceRequest = z
       "choose_clone_parent",
       "clone",
       "inspect",
+      "graphify_status",
+      "graphify_index",
+      "graphify_query",
       "delete",
     ]),
     workspace_id: opaqueId.optional(),
@@ -144,6 +212,7 @@ export const RunnerWorkspaceRequest = z
     repository_name: safeDisplayLabel.optional(),
     clone_token: z.string().min(1).max(1_000).optional(),
     clone_destination_id: opaqueId.optional(),
+    graph_search: z.string().trim().min(1).max(200).optional(),
   })
   .strict()
   .superRefine((value, ctx) => {
@@ -161,6 +230,23 @@ export const RunnerWorkspaceRequest = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["repository_id"],
+        message: "required",
+      });
+    }
+    if (
+      ["graphify_status", "graphify_index", "graphify_query"].includes(value.operation) &&
+      !value.repository_id
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["repository_id"],
+        message: "required",
+      });
+    }
+    if (value.operation === "graphify_query" && !value.graph_search) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["graph_search"],
         message: "required",
       });
     }
@@ -217,6 +303,9 @@ export const RunnerWorkspaceResponse = z
       "choose_clone_parent",
       "clone",
       "inspect",
+      "graphify_status",
+      "graphify_index",
+      "graphify_query",
       "delete",
     ]),
     status: z.enum([
@@ -246,6 +335,7 @@ export const RunnerWorkspaceResponse = z
       .optional(),
     repositories: z.array(RunnerWorkspaceRepository).max(200).optional(),
     inspection: RepositoryInspection.optional(),
+    repository_graph: RepositoryGraph.optional(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -256,6 +346,7 @@ export const RunnerWorkspaceResponse = z
       value.clone_destination,
       value.repositories,
       value.inspection,
+      value.repository_graph,
     ].filter((payload) => payload !== undefined);
     if (value.status !== "ok" && payloads.length > 0) {
       context.addIssue({
@@ -286,7 +377,9 @@ export const RunnerWorkspaceResponse = z
         value.operation === "choose" ||
         value.operation === "clone") &&
         value.repository !== undefined) ||
-      (value.operation === "inspect" && value.inspection !== undefined);
+      (value.operation === "inspect" && value.inspection !== undefined) ||
+      (["graphify_status", "graphify_index", "graphify_query"].includes(value.operation) &&
+        value.repository_graph !== undefined);
     const expectedPayloadCount = value.operation === "delete" ? 0 : 1;
     if (!correctPayload || payloads.length !== expectedPayloadCount) {
       context.addIssue({

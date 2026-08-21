@@ -149,13 +149,17 @@ export class RunnerWorkspaceBroker {
     }
     return new Promise<RunnerWorkspaceResponseT>((resolve, reject) => {
       const timeoutMs =
-        request.operation === "choose" ||
-        request.operation === "choose_clone_parent" ||
-        request.operation === "clone"
-          ? (this.options.timeoutMs ?? 5 * 60_000)
-          : request.operation === "inspect"
-            ? (this.options.timeoutMs ?? 20_000)
-            : (this.options.timeoutMs ?? 8_000);
+        request.operation === "graphify_index"
+          ? (this.options.timeoutMs ?? 10 * 60_000)
+          : request.operation === "choose" ||
+              request.operation === "choose_clone_parent" ||
+              request.operation === "clone"
+            ? (this.options.timeoutMs ?? 5 * 60_000)
+            : request.operation === "inspect" ||
+                request.operation === "graphify_status" ||
+                request.operation === "graphify_query"
+              ? (this.options.timeoutMs ?? 20_000)
+              : (this.options.timeoutMs ?? 8_000);
       const timer = setTimeout(() => {
         this.pending.delete(request.request_id);
         reject(new WorkspaceBrokerError("timeout"));

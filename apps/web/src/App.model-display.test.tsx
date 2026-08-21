@@ -27,7 +27,7 @@ describe("project model display", () => {
     expect(await screen.findByText(/Claude Sonnet 5.*Coordinator/i)).toBeInTheDocument();
   });
 
-  it("opens a newly created relational project as a draft instead of a blank graph error", async () => {
+  it("opens a newly created project with an independent repository-map empty state", async () => {
     seedAuth();
     mock = new MockFetch();
     mock.get("/api/auth/me", {
@@ -47,6 +47,19 @@ describe("project model display", () => {
     mock.get(`/api/projects/${projectAlpha.id}/graph`, {
       status: 409,
       body: { error: "not_planned", message: "project has no plan yet" },
+    });
+    mock.get(`/api/v2/projects/${projectAlpha.id}/repository-graph`, {
+      body: {
+        state: "missing",
+        message: "Build a local Graphify map to explore this repository.",
+        observed_head: "abcdef123456",
+        node_count: 0,
+        edge_count: 0,
+        community_count: 0,
+        nodes: [],
+        edges: [],
+        truncated: false,
+      },
     });
     mock.get(`/api/v2/projects/${projectAlpha.id}/resume`, {
       body: {
@@ -70,11 +83,11 @@ describe("project model display", () => {
     mock.install();
 
     const { user } = await renderAppAndOpenProject(projectAlpha.name);
-    // FRONT DOOR P1d: the graph canvas (and its draft-hint empty state) now
-    // lives under the "Graph" tab.
     await user.click(screen.getByRole("button", { name: "Graph" }));
 
-    expect(await screen.findByTestId("draft-hint")).toHaveTextContent("No plan yet");
+    expect(await screen.findByRole("heading", { name: "Repository map" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Build the repository map" })).toBeVisible();
+    expect(screen.getAllByRole("button", { name: "Build map" })).toHaveLength(1);
     expect(screen.queryByText(/unknown project/i)).not.toBeInTheDocument();
   });
 });

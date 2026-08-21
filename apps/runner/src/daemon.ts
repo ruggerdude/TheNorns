@@ -568,6 +568,7 @@ export class RunnerDaemon {
     | "workspace_clone"
     | "workspace_clone_destination"
     | "workspace_delete"
+    | "repository_graphify"
     | "model_proxy"
     | "knowledge_transport"
   > {
@@ -578,6 +579,7 @@ export class RunnerDaemon {
           "workspace_clone",
           "workspace_clone_destination",
           "workspace_delete",
+          "repository_graphify",
           "knowledge_transport",
         ]
       : [
@@ -586,6 +588,7 @@ export class RunnerDaemon {
           "workspace_clone",
           "workspace_clone_destination",
           "workspace_delete",
+          "repository_graphify",
           "model_proxy",
           "knowledge_transport",
         ];

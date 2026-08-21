@@ -205,6 +205,56 @@ describe("runner workspace wire", () => {
     ).toBe(true);
   });
 
+  it("accepts only bounded, repository-relative Graphify results", () => {
+    const response = {
+      request_id: "workspace:graphify",
+      operation: "graphify_status",
+      status: "ok",
+      repository_graph: {
+        state: "ready",
+        graphify_version: "0.9.48",
+        observed_head: "abc123",
+        indexed_head: "abc123",
+        indexed_at: "2026-08-21T12:00:00.000Z",
+        node_count: 2,
+        edge_count: 1,
+        community_count: 1,
+        nodes: [
+          {
+            id: "src/service.ts::run",
+            label: "run",
+            file_type: "function",
+            source_file: "src/service.ts",
+            source_location: "L12",
+            community: "1",
+            community_label: "Runtime",
+            degree: 1,
+          },
+        ],
+        edges: [],
+        truncated: true,
+      },
+    };
+    expect(
+      RunnerWorkspaceRequest.safeParse({
+        request_id: "workspace:graphify",
+        operation: "graphify_query",
+        repository_id: "local:repository",
+        graph_search: "run",
+      }).success,
+    ).toBe(true);
+    expect(RunnerWorkspaceResponse.safeParse(response).success).toBe(true);
+    expect(
+      RunnerWorkspaceResponse.safeParse({
+        ...response,
+        repository_graph: {
+          ...response.repository_graph,
+          nodes: [{ ...response.repository_graph.nodes[0], source_file: "/Users/me/repo.ts" }],
+        },
+      }).success,
+    ).toBe(false);
+  });
+
   it("accepts native folder selection without exposing a path", () => {
     expect(
       RunnerWorkspaceRequest.safeParse({

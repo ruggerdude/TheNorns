@@ -1,16 +1,16 @@
 // FRONT DOOR P1d: the workspace shell reorganized into a normal top-width
-// page (header + Overview | Work | Graph | Members | Debates | Settings), replacing the graph
-// canvas as the dominant panel with everything else crammed into a sidebar.
-// Purely a layout change — every section moved is the same JSX/logic that
-// existed before; this suite covers the new composition itself: Overview is
-// the default project dashboard, Work/Graph are reachable and hold the right
-// content, and Debates remains inside the workspace shell.
+// page (header + Overview | Work | Graph | Members | Debates | Settings).
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { App } from "./App";
 import { setToken } from "./auth";
-import { fullyAllocatedGraph, projectAlpha, projectBeta } from "./test/fixtures";
+import {
+  fullyAllocatedGraph,
+  graphifyRepositoryGraph,
+  projectAlpha,
+  projectBeta,
+} from "./test/fixtures";
 import { MockFetch } from "./test/mockFetch";
 import { preloadConversationWorkspaceForTest } from "./test/preloadConversationWorkspace";
 
@@ -114,7 +114,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     ).not.toBeInTheDocument();
     // The graph canvas is NOT the dominant panel anymore — it isn't even
     // mounted until the Graph tab is selected.
-    expect(screen.queryByTestId("graph-canvas")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("repository-graph-canvas")).not.toBeInTheDocument();
 
     const workspacePortfolioNavigation = document.querySelector(
       ".workspace-nav-start .portfolio-navigation",
@@ -259,11 +259,14 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     ).toBeInTheDocument();
   });
 
-  it("shows the graph canvas (full functionality preserved) only after switching to the Graph tab", async () => {
+  it("shows the Graphify repository map only after switching to the Graph tab", async () => {
     setToken("present");
     mock = new MockFetch();
     mock.get("/api/projects", { body: [projectAlpha] });
     mock.get(`/api/projects/${projectAlpha.id}/graph`, { body: fullyAllocatedGraph });
+    mock.get(`/api/v2/projects/${projectAlpha.id}/repository-graph`, {
+      body: graphifyRepositoryGraph,
+    });
     mock.get(`/api/v2/projects/${projectAlpha.id}/resume`, { status: 404, body: {} });
     mock.get("/api/v2/attention", { status: 404, body: {} });
     mock.install();
@@ -272,11 +275,12 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     render(<App />);
     await openProjectFromPortfolio();
 
-    expect(screen.queryByTestId("graph-canvas")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("repository-graph-canvas")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Graph" }));
 
-    expect(await screen.findByTestId("graph-canvas")).toBeInTheDocument();
-    expect(screen.getByTestId("graph-version")).toHaveTextContent("v3");
+    expect(await screen.findByTestId("repository-graph-canvas")).toBeInTheDocument();
+    expect(screen.getByText("2", { selector: "strong" })).toBeInTheDocument();
+    expect(screen.queryByText(/allocation strategy/i)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Graph" })).toHaveClass("on");
   });
 
