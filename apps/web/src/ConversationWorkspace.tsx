@@ -4082,6 +4082,25 @@ function developmentPhaseItems(
   });
 }
 
+/**
+ * A one-line, human-readable reason from a run's `failure_detail`. The full
+ * detail (often a raw error blob) still lives in the collapsed technical
+ * section; this is what a person needs at a glance so a failed run is never a
+ * mystery. Prefers an embedded API `"message"` (where the real cause usually
+ * is), else the text before the first JSON brace.
+ */
+export function conciseFailureReason(detail: string | null | undefined): string | null {
+  if (!detail) return null;
+  const apiMessage = detail.match(/"message"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+  if (apiMessage?.[1]) return apiMessage[1].replace(/\\"/g, '"').trim();
+  const headline = (detail.split(/\s*\{/, 1)[0] ?? detail)
+    .replace(/:\s*$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const reason = headline || detail.trim();
+  return reason.length > 240 ? `${reason.slice(0, 237)}…` : reason;
+}
+
 function developmentRunStatusMessage(task: DevelopmentTask | null): string {
   if (!task?.run) {
     return task?.state === "assigned"
@@ -4103,12 +4122,18 @@ function developmentRunStatusMessage(task: DevelopmentTask | null): string {
       return "Implementation and verification completed successfully.";
     case "failed":
     case "cancelled":
-    case "expired":
+    case "expired": {
+      // Surface WHY at a glance instead of a bare "this attempt failed".
+      const reason = conciseFailureReason(task.run.failure_detail);
+      const lead = reason
+        ? `This attempt ${task.run.state}: ${reason}`
+        : `This attempt ${task.run.state}`;
       // Recovery only renders while the task itself is recoverable; a
       // terminally cancelled task must not promise actions that never appear.
       return ["failed", "blocked", "ready"].includes(task.state)
-        ? `This attempt ${task.run.state}. Choose a recovery action below.`
-        : `This attempt ${task.run.state}. Development is stopped for this task.`;
+        ? `${lead}. Choose a recovery action below.`
+        : `${lead}. Development is stopped for this task.`;
+    }
     default:
       return `Current run status: ${task.run.state.replaceAll("_", " ")}.`;
   }

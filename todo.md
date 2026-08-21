@@ -1408,3 +1408,31 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   process) distinguishes a true orphan from a live run across a reconnect.
   Tests: orphanReap.test.mjs (3) + full runner suite 81/81. Requires a new
   agent build.
+
+## Runner/execution follow-ups surfaced during live test (2026-08-21)
+
+- [x] ✅ EXEC-CODEX-NOOUTPUT — Root cause found via the existing run-log: the
+  Codex/OpenAI runtime was sent `reasoning_effort: 'minimal'`, which every
+  gpt-5.6 model rejects (`unsupported_value`, param reasoning.effort) → model
+  400 → run produced nothing → failed. Fix: `reasoningEffortForModel()` clamps
+  the legacy `minimal` level to `low` at the dispatch boundary
+  (phase4Coordinator), and the allocation prompt no longer offers `minimal`.
+  contracts models test + coordinator/allocation suites green. No migration.
+- [x] ✅ LOG-SURFACE-FAILURE — Failed runs now say WHY at a glance. The reason
+  was already captured (agent_runs.failure_detail, run-log endpoint) and
+  rendered — but buried in a collapsed "Technical details" disclosure. Added
+  `conciseFailureReason()` (prefers an embedded API `message`, else the
+  headline) and surfaced it in the prominent development run status line; full
+  detail still available collapsed. ConversationWorkspace tests green.
+- [ ] 🔴 EXEC-CODEX-NOOUTPUT-OLD — Live: a task dispatched to the Codex (openai)
+  runtime ran ~13s and produced ZERO output (`last_agent_message: null`, empty
+  worktree, no tool calls) → task failed with nothing to verify/integrate. The
+  pipeline dispatched correctly; the agent-runtime/provider path returned
+  nothing. Investigate the runner's Codex/OpenAI gateway credentials + runtime
+  wiring. Claude-staffed runs have worked before, so likely provider-specific.
+- [ ] 🔴 EXEC-PHASE-RELEASE — Live: a FAILED run leaves its phase `active`
+  ("0/1 tasks complete; 1 task(s) failed"), and since the project runs one
+  phase at a time, that stuck phase blocks every subsequent run (a Claude
+  retry was refused: "already executing"). A terminally-failed run must release
+  its phase's concurrency slot (or the phase must move to blocked/failed).
+  Sibling to PIPE-RUNNER-REAP but server-side at the phase level.

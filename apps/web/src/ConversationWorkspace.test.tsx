@@ -20,7 +20,33 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ConversationWorkspace } from "./ConversationWorkspace";
+import { ConversationWorkspace, conciseFailureReason } from "./ConversationWorkspace";
+
+describe("conciseFailureReason", () => {
+  it("extracts the embedded API error message (the real cause)", () => {
+    const detail =
+      "runtime: the coding runtime failed before producing a commit: {\n" +
+      '  "error": {\n    "message": "Unsupported value: \'minimal\' is not supported with the \'gpt-5.6-luna\' model.",\n' +
+      '    "type": "invalid_request_error"\n  }\n}';
+    expect(conciseFailureReason(detail)).toBe(
+      "Unsupported value: 'minimal' is not supported with the 'gpt-5.6-luna' model.",
+    );
+  });
+
+  it("uses the headline before any JSON when there is no API message", () => {
+    expect(conciseFailureReason("the run produced no commit, so there is nothing to verify")).toBe(
+      "the run produced no commit, so there is nothing to verify",
+    );
+    expect(conciseFailureReason('runner failure during runtime: {"stack":"..."}')).toBe(
+      "runner failure during runtime",
+    );
+  });
+
+  it("returns null for an empty detail", () => {
+    expect(conciseFailureReason(null)).toBeNull();
+    expect(conciseFailureReason("")).toBeNull();
+  });
+});
 import { makeCoreApiModule, makePlan, makeWebUiModule } from "./test/fixtures";
 
 const projectId = "project-conversation";
