@@ -1562,3 +1562,15 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   and attempt 6 started. A transient serialization/deadlock error must be
   retried inside the route (bounded, same idempotency key), never surfaced as
   a conflict the human has to re-click.
+- [x] ✅ EXEC-RETRY-CARRIED-WORK — Live (StrumSheetX1 attempt 6): a retry of a
+  verification-only failure starts from the prior attempt's commit; the agent
+  found the work complete and green, made no new commit, and the runner failed
+  the run as "empty" (`expected_commit === base_revision`, where base = the
+  worktree's START revision). A finished deliverable rejected for being done.
+  Fix (runner): when the runtime completed normally with no new commit and the
+  dispatch names an `integrate_base_branch`, resolve the remote base tip; if
+  HEAD strictly descends from it, that base becomes the effective base for
+  emptiness, the change summary, and verification — HEAD is verified and
+  published/integrated as the deliverable. A HEAD at the base is still empty.
+  Real-git regression test (prior commit on the task branch, idle runtime →
+  verified + integrated, main advanced). Needs an agent reinstall.

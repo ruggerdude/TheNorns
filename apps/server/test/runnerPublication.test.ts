@@ -470,6 +470,52 @@ describe("EXECUTION E4 — a run's work is published, and verification is real",
     );
   });
 
+  it("RETRY: starting at the prior attempt's commit with no new commit still verifies and integrates that work", async () => {
+    // Live failure: a verification-only failure was retried, the agent found
+    // the work already complete and green, made no new commit, and the run was
+    // failed as "empty" — a finished deliverable rejected for being done.
+    const h = await harness(cleanup);
+    await git(h.repository, "switch", "-c", "norns/task-task-1");
+    await execFileAsync("node", ["-e", "require('fs').writeFileSync('agent.txt','work\\n')"], {
+      cwd: h.repository,
+    });
+    await git(h.repository, "add", "-A");
+    await git(h.repository, "commit", "-m", "prior attempt");
+    await git(h.repository, "push", "origin", "norns/task-task-1");
+    const prior = await git(h.repository, "rev-parse", "HEAD");
+    await git(h.repository, "switch", "main");
+
+    const events: EventPayloadT[] = [];
+    const result = await executor(
+      h,
+      idleRuntime,
+      PASSING,
+      new GitPublisher({
+        repositorySlug: "acme/widgets",
+        token: "test-token",
+        fetchImpl: githubApi().fetchImpl,
+      }),
+    ).execute(
+      dispatchCommand({ expected_revision: prior, integrate_base_branch: "main" }),
+      (event) => events.push(event),
+    );
+
+    expect(result).toMatchObject({
+      outcome: "succeeded",
+      empty: false,
+      commit_sha: prior,
+      verification_passed: true,
+    });
+    expect(result.publication?.integration?.outcome).toBe("integrated");
+    expect(await git(h.remote, "rev-parse", "refs/heads/main")).toBe(prior);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "run_log",
+        chunk: expect.stringContaining("already carries this task's work"),
+      }),
+    );
+  });
+
   it("reports an empty run as empty, and publishes nothing", async () => {
     const h = await harness(cleanup);
     const api = githubApi();

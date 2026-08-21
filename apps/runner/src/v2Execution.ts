@@ -1695,8 +1695,40 @@ export class V2RunnerExecutor {
         });
       }
       knowledgeCommit = commit;
+      // A retry continues from the prior attempt's commit, so "no commit since
+      // the worktree started" is not "no work": HEAD may already be the
+      // finished task, strictly ahead of the integration base. Live case: a
+      // verification-only failure was retried, the agent found the work
+      // complete and green, made no new commit, and the run was failed as
+      // empty — a finished deliverable rejected for being done. When the agent
+      // completed normally and HEAD strictly descends from the integration
+      // base, the base for emptiness, diff, and verification is that
+      // integration base, so HEAD is verified and published as the deliverable.
+      let effectiveBase = worktree.base_revision;
+      if (
+        commit === worktree.base_revision &&
+        runtimeResult.outcome === "completed" &&
+        command.integrate_base_branch
+      ) {
+        const integrationBase = await this.remoteBaseRevision(
+          worktree.path,
+          command.integrate_base_branch,
+        );
+        if (
+          integrationBase &&
+          integrationBase !== commit &&
+          (await this.isAncestor(worktree.path, integrationBase, commit))
+        ) {
+          effectiveBase = integrationBase;
+          emit({
+            kind: "run_log",
+            run_id: command.run_id,
+            chunk: `no new commit; HEAD ${commit} already carries this task's work ahead of ${command.integrate_base_branch} at ${integrationBase}, so it is verified as the deliverable`,
+          });
+        }
+      }
       knowledgeFiles = boundedKnowledgeList(
-        await this.changedPaths(worktree.path, worktree.base_revision, commit),
+        await this.changedPaths(worktree.path, effectiveBase, commit),
       );
       if (controller.signal.aborted) {
         return await cancelledWithWorktree(runtimeResult.usage);
@@ -1710,7 +1742,7 @@ export class V2RunnerExecutor {
       // produced no commit. There is nothing to publish and nothing to verify,
       // and calling that a success is the exact dishonesty this phase exists to
       // remove.
-      if (commit === worktree.base_revision) {
+      if (commit === effectiveBase) {
         const permissionDenied = runtimeResult.stopReason?.startsWith("permission_denied");
         const runtimeStopped = runtimeResult.outcome !== "completed";
         const reason = permissionDenied
@@ -1767,7 +1799,7 @@ export class V2RunnerExecutor {
         worktree_path: worktree.path,
         policy_ref: command.verification_policy_ref,
         expected_commit: commit,
-        base_revision: worktree.base_revision,
+        base_revision: effectiveBase,
         // EXECUTION E11 — E10 put the project's real commands on the dispatch
         // command and the runner ignored them, so the field it added was inert
         // and every project without a committed manifest still failed closed.
@@ -2158,6 +2190,44 @@ export class V2RunnerExecutor {
   }
 
   /** Repository-relative committed paths are useful evidence and reveal no local root. */
+  /** The remote's current tip of the integration base branch, or null if unreadable. */
+  private async remoteBaseRevision(worktreePath: string, branch: string): Promise<string | null> {
+    try {
+      const { stdout } = await execFileAsync("git", [
+        "-C",
+        worktreePath,
+        "ls-remote",
+        "origin",
+        `refs/heads/${branch}`,
+      ]);
+      const sha = stdout.trim().split(/\s+/)[0];
+      return sha && /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** True when `ancestor` is reachable from `descendant` (exit 1 = no, errors = no). */
+  private async isAncestor(
+    worktreePath: string,
+    ancestor: string,
+    descendant: string,
+  ): Promise<boolean> {
+    try {
+      await execFileAsync("git", [
+        "-C",
+        worktreePath,
+        "merge-base",
+        "--is-ancestor",
+        ancestor,
+        descendant,
+      ]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private async changedPaths(
     worktreePath: string,
     baseRevision: string,
