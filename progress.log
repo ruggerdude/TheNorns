@@ -177,3 +177,4 @@
 2026-08-21T15:40Z | VERIFY-LONGRUNNING | Drop dev servers/watchers from task-package verification commands (npm run dev killed every StrumSheetX1 attempt); PM told test_commands must terminate
 2026-08-21T15:41Z | LOG-VERIFY-DETAIL | Verification failures now name the failing command + exit code (runner reason + web status line)
 2026-08-21T22:05Z | VIS-EVIDENCE-LOCK | Lock only the run in the visual-evidence seeder; FOR SHARE across mockup/observation tables was denied (42501) every tick
+2026-08-21T22:50Z | EXEC-RETRY-DEADLOCK | Recovery retry/cancel re-run on transient Postgres deadlock/serialization instead of surfacing a 409

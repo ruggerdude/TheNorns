@@ -113,3 +113,32 @@ export class NodePgTransactionRunner implements V2TransactionRunner {
 export function affectedRows(result: V2QueryResult<Record<string, unknown>>): number {
   return result.affectedRows ?? result.rows.length;
 }
+
+/** Postgres deadlock (40P01) / serialization failure (40001): safe to retry. */
+export function isTransientPgError(error: unknown): boolean {
+  const code = (error as { code?: unknown } | null)?.code;
+  return code === "40P01" || code === "40001";
+}
+
+/**
+ * Re-run an IDEMPOTENT operation on a transient Postgres error. A deadlock
+ * between a human action and a background scanner is a scheduling accident,
+ * not a conflict the human should see and re-click — Postgres already picked a
+ * victim and rolled it back; the caller just needs to go again. Only for
+ * operations that are safe to repeat (idempotency-keyed sagas).
+ */
+export async function withTransientPgRetry<T>(
+  run: () => Promise<T>,
+  options: { attempts?: number; backoffMs?: number } = {},
+): Promise<T> {
+  const attempts = options.attempts ?? 3;
+  const backoffMs = options.backoffMs ?? 200;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await run();
+    } catch (error) {
+      if (!isTransientPgError(error) || attempt >= attempts) throw error;
+      await new Promise((resolve) => setTimeout(resolve, backoffMs * attempt));
+    }
+  }
+}

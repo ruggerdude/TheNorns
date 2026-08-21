@@ -6,7 +6,11 @@ import {
   executeV2ApplicationCommand,
   v2ExpectedVersionConflict,
 } from "../persistence/v2/application.js";
-import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
+import {
+  type V2SqlExecutor,
+  type V2TransactionRunner,
+  withTransientPgRetry,
+} from "../persistence/v2/database.js";
 import { transitionV2TaskLifecycle } from "../persistence/v2/lifecycleMutation.js";
 import { SqlV2ApplicationTransaction } from "../persistence/v2/sqlRepositories.js";
 import type { PhaseLaunchResult, PhaseLaunchService } from "./phaseLaunchService.js";
@@ -212,7 +216,18 @@ export class Phase4RecoveryActionService {
     private readonly phaseLaunch: PhaseLaunchService,
   ) {}
 
-  async retry(input: Phase4RecoveryBaseInput): Promise<Phase4RetryResult> {
+  /**
+   * The saga below is idempotent on `input.idempotency_key` (a replay returns
+   * the recorded outcome), so a transient deadlock/serialization failure —
+   * live: a retry colliding with the 60s recovery monitor surfaced to the
+   * human as "409 deadlock detected" after the run had already started — is
+   * simply re-run rather than reported.
+   */
+  retry(input: Phase4RecoveryBaseInput): Promise<Phase4RetryResult> {
+    return withTransientPgRetry(() => this.retryOnce(input));
+  }
+
+  private async retryOnce(input: Phase4RecoveryBaseInput): Promise<Phase4RetryResult> {
     const prepared = await this.preparedRetry(input);
     let replayed = true;
     let recoveryCommandId = prepared?.command_id ?? "";
@@ -463,7 +478,13 @@ export class Phase4RecoveryActionService {
     };
   }
 
-  async cancel(input: Phase4RecoveryBaseInput & { reason: string }): Promise<Phase4CancelResult> {
+  cancel(input: Phase4RecoveryBaseInput & { reason: string }): Promise<Phase4CancelResult> {
+    return withTransientPgRetry(() => this.cancelOnce(input));
+  }
+
+  private async cancelOnce(
+    input: Phase4RecoveryBaseInput & { reason: string },
+  ): Promise<Phase4CancelResult> {
     const command = V2CancelTaskCommand.parse({
       schema_version: 2,
       kind: "cancel_task",

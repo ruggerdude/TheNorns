@@ -1540,3 +1540,25 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   mockup/observation tables. Latent since 2026-07-27, fired once an eligible
   row existed. Fix: lock only `run` (the INSERT is already idempotent via ON
   CONFLICT). Verify by the spam stopping in `railway logs` after deploy.
+
+## Stop using the user as the test harness (agreed 2026-08-21)
+
+- [ ] 📋 PIPE-PREFLIGHT — Validate, at dispatch, everything a run will need and
+  refuse with a named reason (or auto-fix) BEFORE spending a run: the model
+  accepts the exact settings (effort, credential mode — a cheap real probe via
+  the runner/gateway), the runner's usable credential modes, verification
+  commands are present and terminating, binding connected, budget. Every
+  failure this week was an unchecked assumption discovered 10 min into a run.
+- [ ] 📋 PIPE-SMOKE — Repeatable golden-path smoke run after every deploy, run
+  by the assistant not the user: throwaway repo → quick push → verify →
+  integrate → cleanup, and the same for phased/QC. Then a realistic-shape
+  smoke (monorepo with workspaces + PM-authored plan), since the toy repo
+  passed while StrumSheetX1 failed.
+- [x] ✅ EXEC-RETRY-DEADLOCK — FIXED: `withTransientPgRetry` re-runs the
+  idempotent retry/cancel sagas on 40P01/40001 (bounded, backoff). Unit test +
+  recovery suites green. Original: Live: the task-recovery retry returned
+  `409 recovery_conflict: deadlock detected` (Postgres 40P01, a lock-order
+  collision with the 60s recovery monitor) even though the saga had committed
+  and attempt 6 started. A transient serialization/deadlock error must be
+  retried inside the route (bounded, same idempotency key), never surfaced as
+  a conflict the human has to re-click.
