@@ -370,7 +370,7 @@ describe.sequential("phase tab P4: approve auto-starts execution (HTTP, real cha
     );
     expect(command.rows).toHaveLength(1);
     expect((command.rows[0]?.envelope.context_refs ?? []).length).toBeGreaterThan(0);
-    expect(command.rows[0]?.envelope.max_turns).toBe(20);
+    expect(command.rows[0]?.envelope.max_turns).toBe(80);
 
     // The strategy approval originates from the planning-run decision: its
     // actor is the deciding human and its approved_at is the decision's
@@ -801,6 +801,7 @@ describe.sequential("phase tab P4: approve auto-starts execution (HTTP, real cha
       repaired_reservations: [],
       expired_dispatches: 0,
       watchdog_stop_requests: 0,
+      released_phases: 0,
     });
     expect(
       (

@@ -253,10 +253,10 @@ export class Phase4RecoveryActionService {
               actual_version: scope.task_aggregate_version,
             });
           }
-          if (scope.phase_status !== "active") {
+          if (!["active", "blocked"].includes(scope.phase_status)) {
             return failure(
               "phase_not_active",
-              `the phase is ${scope.phase_status}; only an active failed phase can be retried`,
+              `the phase is ${scope.phase_status}; only an active or blocked failed phase can be retried`,
             );
           }
           if (
@@ -287,6 +287,14 @@ export class Phase4RecoveryActionService {
               `the task is ${scope.task_state}, not failed, blocked, or ready`,
             );
           }
+          // A phase the recovery monitor parked as `blocked` (nothing left
+          // that could run) goes back to work the moment a human retries.
+          await tx.executor.query(
+            `UPDATE phases
+                SET status='active', aggregate_version=aggregate_version+1, updated_at=now()
+              WHERE id=$1 AND project_id=$2 AND status='blocked'`,
+            [retry.phase_id, retry.project_id],
+          );
 
           if (retry.adjustment) {
             const assignmentResult = await tx.executor.query<{
@@ -490,10 +498,10 @@ export class Phase4RecoveryActionService {
             actual_version: scope.task_aggregate_version,
           });
         }
-        if (scope.phase_status !== "active") {
+        if (!["active", "blocked"].includes(scope.phase_status)) {
           return failure(
             "phase_not_active",
-            `the phase is ${scope.phase_status}; only an active failed phase can be cancelled`,
+            `the phase is ${scope.phase_status}; only an active or blocked failed phase can be cancelled`,
           );
         }
         if (
@@ -564,7 +572,7 @@ export class Phase4RecoveryActionService {
               SET status='cancelled', closed_at=$2, closure_summary=$3,
                   closure_evidence=$4::jsonb,
                   aggregate_version=aggregate_version+1, updated_at=now()
-            WHERE id=$1 AND project_id=$5 AND status='active'`,
+            WHERE id=$1 AND project_id=$5 AND status IN ('active','blocked')`,
           [
             cancel.phase_id,
             cancel.issued_at,

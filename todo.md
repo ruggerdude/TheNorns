@@ -1391,7 +1391,13 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   rewritten quickWorkItem + conversationUiStream, web fixtures. Server tsc/biome
   clean; conversation+qc+kickoff+migration suites green; web conversation/
   onboarding 98 green.
-- [ ] ⛔ PIPE-BINDINGS — REASSESSED (attempt reverted). The 3-binding tangle is
+- [ ] ⛔ PIPE-BINDINGS — RE-CHECKED 2026-08-21: still cosmetic. Revoking the
+  orphaned github workspace binding would also remove it from the
+  execution-target picker (selection requires status connected/degraded/
+  disconnected), i.e. no way back to Actions-hosted execution for that
+  project; and the resume payload lists bindings regardless of status, so a
+  status flip alone would not hide it. Leave as-is unless the picker gains a
+  "re-attach GitHub" path. REASSESSED (attempt reverted). The 3-binding tangle is
   a KNOWN, deliberate artifact, not the dispatch blocker: for local execution
   the header of projectOnboardingService.ts intentionally records a github
   WORKSPACE candidate that activation promotes as a transient primary, then the
@@ -1418,6 +1424,14 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
 
 ## Runner/execution follow-ups surfaced during live test (2026-08-21)
 
+- [x] ✅ EXEC-CREDENTIALS-DECISION — Standardize on `api` (gateway) credential
+  mode for the local agent; do NOT log the runner into a Claude subscription.
+  Why: api mode already works end-to-end and is the credential-free runner
+  design (E9); a subscription login would live in the runner's isolated HOME
+  (fragile token refresh, breaks on every runtime-state rotation) and uses a
+  consumer subscription for automated work. Defaults are already `api`
+  (PhaseTab falls back to api; subscription stays an explicit per-phase opt-in
+  that fails fast with "Claude subscription login is unavailable"). No code.
 - [x] ✅ EXEC-TURNCAP-SANDBOX — Live (strumsheetx1 attempts 3+4, after the wedge
   fix): dispatch accepted, agent coded ~3 min, then "verification failed".
   Session transcripts show both attempts ended MID-FILE at 20 and 29 tool
@@ -1464,7 +1478,11 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   pipeline dispatched correctly; the agent-runtime/provider path returned
   nothing. Investigate the runner's Codex/OpenAI gateway credentials + runtime
   wiring. Claude-staffed runs have worked before, so likely provider-specific.
-- [ ] 🔴 EXEC-PHASE-RELEASE — Live: a FAILED run leaves its phase `active`
+- [x] ✅ EXEC-PHASE-RELEASE — FIXED: the recovery monitor (60s scan) parks an
+  `active` phase as `blocked` once nothing in it can run (no live/waiting
+  runs, no schedulable tasks, no task mid-flight); kickoff then accepts the
+  next plan. Retry re-activates the phase; cancel accepts `blocked`.
+  Coordinator/kickoff/recovery suites green. Original report: a FAILED run leaves its phase `active`
   ("0/1 tasks complete; 1 task(s) failed"), and since the project runs one
   phase at a time, that stuck phase blocks every subsequent run (a Claude
   retry was refused: "already executing"). A terminally-failed run must release

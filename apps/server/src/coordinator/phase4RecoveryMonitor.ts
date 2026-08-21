@@ -14,6 +14,7 @@ import {
   sqlV2DecisionPointTransactionFactory,
 } from "../persistence/v2/sqlRepositories.js";
 import { classifyFailureRetry } from "./failureRetryPolicy.js";
+import { SCHEDULABLE_TASKS_SQL } from "./phaseConcurrency.js";
 import { Phase4KnowledgeEventAdapter } from "./phase4KnowledgeEventAdapter.js";
 import { reconcileObsoleteRecoveryDecisions } from "./phase4TerminalReconciliation.js";
 
@@ -50,6 +51,7 @@ export class Phase4RecoveryMonitor {
     repaired_reservations: string[];
     expired_dispatches: number;
     watchdog_stop_requests: number;
+    released_phases: number;
   }> {
     const reconciledAt = now.toISOString();
     // Expire delivered-but-never-started commands past their deadline first, so
@@ -229,6 +231,43 @@ export class Phase4RecoveryMonitor {
       });
       if (result.kind === "created" || result.kind === "superseded") points += 1;
     }
+    // EXEC-PHASE-RELEASE — a phase whose remaining work is all terminal or
+    // blocked cannot progress without a human, yet left `active` it holds the
+    // project's one-phase-at-a-time slot and refuses every new plan. Park it
+    // as `blocked`: retry re-activates it, cancel accepts it.
+    let releasedPhases = 0;
+    const stalledPhases = new Set(
+      stuck
+        .filter((run) => ["failed", "expired"].includes(run.state))
+        .map((run) => `${run.project_id}\u0000${run.phase_id}`),
+    );
+    for (const key of stalledPhases) {
+      const [projectId, phaseId] = key.split("\u0000");
+      if (!projectId || !phaseId) continue;
+      const released = await this.transactions.transaction(async (sql) => {
+        const schedulable = await sql.query(SCHEDULABLE_TASKS_SQL, [projectId, phaseId]);
+        if (schedulable.rows.length > 0) return false;
+        const result = await sql.query(
+          `UPDATE phases
+              SET status='blocked', aggregate_version=aggregate_version+1, updated_at=now()
+            WHERE id=$1 AND project_id=$2 AND status='active'
+              AND NOT EXISTS (
+                SELECT 1 FROM agent_runs run
+                 WHERE run.phase_id=$1
+                   AND run.state IN ('created','dispatched','running','waiting_for_human','verifying')
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM tasks task
+                 WHERE task.phase_id=$1
+                   AND task.state IN ('assigned','in_progress','verifying','in_review')
+              )
+            RETURNING id`,
+          [phaseId, projectId],
+        );
+        return result.rows.length > 0;
+      });
+      if (released) releasedPhases += 1;
+    }
     const swept = await sweepV2OrphanReservations({
       transactionRunner: this.transactions,
       transactionFactory: sqlV2BudgetTransactionFactory,
@@ -241,6 +280,7 @@ export class Phase4RecoveryMonitor {
       repaired_reservations: swept.repaired,
       expired_dispatches: expiredDispatches,
       watchdog_stop_requests: watchdogStopRequests,
+      released_phases: releasedPhases,
     };
   }
 

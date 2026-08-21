@@ -1130,6 +1130,9 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       repaired_reservations: [],
       expired_dispatches: 0,
       watchdog_stop_requests: 0,
+      // Nothing in the phase can run after the pre-start failure, so the
+      // monitor parks it (EXEC-PHASE-RELEASE) instead of holding the slot.
+      released_phases: 1,
     });
     const decision = await pg.query<{ reason_class: string; status: string }>(
       "SELECT reason_class, status FROM decision_points WHERE scope_entity_id=$1",
@@ -1479,6 +1482,80 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     });
   });
 
+  it("parks a phase with nothing left to run as blocked and lets a retry re-activate it", async () => {
+    const scheduled = await schedule();
+    const transactions = new PGliteTransactionRunner(pg);
+    const dispatch = new Phase4DispatchRepository(transactions);
+    await dispatch.claim("dispatcher-a", 30_000);
+    await dispatch.markDelivered(
+      scheduled.dispatch_job_id,
+      "dispatcher-a",
+      "2026-07-16T20:01:00.000Z",
+    );
+    const events = new Phase4EventProcessor(transactions);
+    await events.apply({
+      protocol: 1,
+      event_seq: 1,
+      runner_id: "runner-1",
+      generation: 3,
+      correlation_id: "correlation-1",
+      causation_id: scheduled.command_id,
+      occurred_at: "2026-07-16T20:02:00.000Z",
+      payload: {
+        kind: "run_status",
+        run_id: scheduled.run_id,
+        status: "failed",
+        failure: {
+          stage: "runtime",
+          code: "runner_runtime_failed",
+          detail: "runtime stopped before completing",
+        },
+      },
+    });
+    const monitor = new Phase4RecoveryMonitor(transactions);
+    const scan = await monitor.scan(new Date("2026-07-16T20:30:00.000Z"));
+    expect(scan.released_phases).toBe(1);
+    const parked = await pg.query<{ status: string }>(
+      "SELECT status FROM phases WHERE id='phase-1'",
+    );
+    expect(parked.rows[0]?.status).toBe("blocked");
+    // Idempotent: a second scan has nothing more to release.
+    expect((await monitor.scan(new Date("2026-07-16T20:31:00.000Z"))).released_phases).toBe(0);
+
+    const task = await pg.query<{ aggregate_version: number }>(
+      "SELECT aggregate_version FROM tasks WHERE id='task-1'",
+    );
+    const recovery = new Phase4RecoveryActionService(
+      transactions,
+      new PhaseLaunchService(
+        transactions,
+        coordinator,
+        { assembleForTask: async () => [] },
+        new DispatchContextScopeRepository(transactions),
+        () => ({ runner_id: "runner-1", runner_generation: 3 }),
+      ),
+    );
+    await expect(
+      recovery.retry({
+        project_id: "project-1",
+        phase_id: "phase-1",
+        task_id: "task-1",
+        failed_run_id: scheduled.run_id,
+        expected_task_version: task.rows[0]?.aggregate_version ?? 0,
+        actor: { actor_type: "human" as const, actor_id: "admin-1" },
+        authorized_by_session_id: "session-recovery",
+        idempotency_key: "retry-parked-phase-once",
+        correlation_id: "correlation-retry-parked",
+        causation_id: scheduled.run_id,
+        issued_at: "2026-07-16T20:35:00.000Z",
+      }),
+    ).resolves.toMatchObject({ action: "retry" });
+    const reactivated = await pg.query<{ status: string }>(
+      "SELECT status FROM phases WHERE id='phase-1'",
+    );
+    expect(reactivated.rows[0]?.status).toBe("active");
+  });
+
   it("raises one stable DecisionPoint for stuck work", async () => {
     const scheduled = await schedule();
     const transactions = new PGliteTransactionRunner(pg);
@@ -1506,12 +1583,14 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       repaired_reservations: [],
       expired_dispatches: 0,
       watchdog_stop_requests: 1,
+      released_phases: 0,
     });
     await expect(monitor.scan(new Date("2026-07-16T20:11:00.000Z"), 60_000)).resolves.toEqual({
       decision_points: 0,
       repaired_reservations: [],
       expired_dispatches: 0,
       watchdog_stop_requests: 0,
+      released_phases: 0,
     });
     expect(watchdogStops).toEqual([
       {
@@ -1541,6 +1620,7 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       repaired_reservations: [],
       expired_dispatches: 0,
       watchdog_stop_requests: 0,
+      released_phases: 0,
     });
     const reconciled = await pg.query<{ status: string; audits: number }>(
       `SELECT decision.status,
