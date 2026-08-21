@@ -1424,6 +1424,19 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
 
 ## Runner/execution follow-ups surfaced during live test (2026-08-21)
 
+- [x] ✅ EXEC-LIVE-GATE — The two best follow-on investments from the
+  2026-08-21 incident, done: (1) `scripts/agent-diagnose.mjs` — one command
+  that prints installed agent version/uptime, last dispatch outcomes
+  (`rejected` vs `failed`), cancellation-journal entries that replay on
+  reconnect, leftover worktrees, and the last coding session's final
+  command/result/message (every question asked today, answered in one
+  screen, no server session needed); (2) `docs/runbooks/LIVE-RUN-GATE.md` —
+  the rule that runner/coordinator/devices/kickoff changes are not done until
+  one live probe run passes on the deployed server + packaged agent,
+  including the two recovery edges that bit us (stop→restart→dispatch, and
+  failed run → next plan starts). Checked and NOT changed: the 15-min watchdog
+  is safe because the runtime emits a knowledge heartbeat every 60s while
+  device execution is on, and the server bumps the inactivity clock on it.
 - [x] ✅ EXEC-CREDENTIALS-DECISION — Standardize on `api` (gateway) credential
   mode for the local agent; do NOT log the runner into a Claude subscription.
   Why: api mode already works end-to-end and is the credential-free runner
