@@ -1636,7 +1636,12 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   gateway closed mid-response (Railway edge timeout? provider?). Logs had
   rotated by the time it was investigated; add gateway-side logging of stream
   aborts with duration + bytes so the next one is diagnosable.
-- [ ] 🟡 DECISION-RESOLVE-NOT-DELIVERED — Resolving a human-wait's decision
+- [ ] 🔴 DECISION-RESOLVE-NOT-DELIVERED — (worse than logged: after the direct
+  resolve, the UI's proper path — `answer_human_wait` proposal + confirm —
+  is refused with `idempotency_conflict: human decision point was already
+  resolved`, so the wait is WEDGED: answered on paper, never delivered, and
+  un-answerable. The resolve route must either deliver or refuse for a
+  runner-backed wait.) Resolving a human-wait's decision
   point (`/decision-points/:id/resolve`, 200, approval + record written) did
   not answer the wait: human_waits stayed `awaiting_human`, no resume reached
   the runner. The UI reply path must use a different route; make the resolve
