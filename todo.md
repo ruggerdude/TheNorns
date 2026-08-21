@@ -1636,7 +1636,18 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   gateway closed mid-response (Railway edge timeout? provider?). Logs had
   rotated by the time it was investigated; add gateway-side logging of stream
   aborts with duration + bytes so the next one is diagnosable.
-- [ ] 🔴 DECISION-RESOLVE-NOT-DELIVERED — (worse than logged: after the direct
+- [x] ✅ DECISION-RESOLVE-GUARDED — The generic `/decision-points/:id/resolve`
+  route now REFUSES a decision point owned by a live human wait
+  (`human_wait_answer_required`), pointing the caller at the development-chat
+  reply that actually delivers to the agent. Root cause: resolving there only
+  recorded the decision, and because `answer_human_wait` needs the same row
+  flipped open→resolved atomically, the wait became answered-on-paper,
+  undelivered and un-answerable. StrumSheetX1's verification run (its work is
+  committed at 31a3eb5) stays wedged — a DB trigger forbids un-resolving a
+  decision, correctly — and is left as-is. TEST GAP: no regression test; a
+  human_waits fixture needs agent_runs + work_conversations + work_messages +
+  commands + runner_events + budget_reservations and no suite has one yet.
+- [ ] 🟡 DECISION-RESOLVE-NOT-DELIVERED (original) — (worse than logged: after the direct
   resolve, the UI's proper path — `answer_human_wait` proposal + confirm —
   is refused with `idempotency_conflict: human decision point was already
   resolved`, so the wait is WEDGED: answered on paper, never delivered, and

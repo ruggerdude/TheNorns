@@ -229,7 +229,8 @@ export class DecisionResolutionError extends Error {
       | "stale_decision"
       | "invalid_option"
       | "scope_not_found"
-      | "idempotency_conflict",
+      | "idempotency_conflict"
+      | "human_wait_answer_required",
     message: string,
   ) {
     super(message);
@@ -868,6 +869,24 @@ export class AttentionService {
       }
       if (point.status !== "open") {
         throw new DecisionResolutionError("decision_closed", "decision point is already closed");
+      }
+      // A decision point raised by a WAITING RUN is answered through the
+      // conversation's answer_human_wait action, which delivers the answer to
+      // the runner and resumes it. Resolving it here would only record the
+      // decision — and because answering requires flipping this same row
+      // open→resolved atomically, it permanently wedges the wait: answered on
+      // paper, never delivered, and no longer answerable. Live: that is how
+      // StrumSheetX1's verification run got stuck. Refuse instead.
+      const liveWait = await sql.query<{ id: string }>(
+        `SELECT id FROM human_waits
+          WHERE decision_point_id=$1 AND status='awaiting_human' LIMIT 1`,
+        [point.id],
+      );
+      if (liveWait.rows[0]) {
+        throw new DecisionResolutionError(
+          "human_wait_answer_required",
+          `decision point ${point.id} belongs to a run waiting for an answer; reply in the development chat so the answer reaches the agent`,
+        );
       }
       if (point.condition_fingerprint !== input.expected_condition_fingerprint) {
         throw new DecisionResolutionError(
