@@ -12,6 +12,8 @@ import { V2ArtifactKind } from "./evidence.js";
 
 const nonNegativeInteger = z.number().int().nonnegative();
 const nonNegativeMoney = z.number().nonnegative();
+const nonNegativeNumber = z.number().nonnegative().finite();
+const nullableRate = z.number().min(0).max(1).finite().nullable();
 
 function parseIpv6(value: string): bigint | null {
   const halves = value.split("::");
@@ -449,6 +451,185 @@ const budget = z
     }
   });
 
+const deliveryTimeMetric = z
+  .object({
+    sample_size: nonNegativeInteger,
+    median_seconds: nonNegativeNumber.nullable(),
+    p75_seconds: nonNegativeNumber.nullable(),
+  })
+  .strict();
+
+const firstPassYieldMetric = z
+  .object({
+    completed_tasks: nonNegativeInteger,
+    first_pass_tasks: nonNegativeInteger,
+    rate: nullableRate,
+  })
+  .strict();
+
+const tokenEfficiencyMetric = z
+  .object({
+    accepted_tasks: nonNegativeInteger,
+    input_tokens: nonNegativeInteger,
+    output_tokens: nonNegativeInteger,
+    cache_read_tokens: nonNegativeInteger,
+    cache_write_tokens: nonNegativeInteger,
+    reasoning_tokens: z.null(),
+    total_tokens: nonNegativeInteger,
+    per_accepted_task: nonNegativeNumber.nullable(),
+  })
+  .strict();
+
+const costEfficiencyMetric = z
+  .object({
+    accepted_tasks: nonNegativeInteger,
+    priced_runs: nonNegativeInteger,
+    total_runs: nonNegativeInteger,
+    coverage_rate: z.number().min(0).max(1).finite(),
+    total_cost_usd: nonNegativeMoney.nullable(),
+    per_accepted_task_usd: nonNegativeMoney.nullable(),
+  })
+  .strict();
+
+const reworkMetric = z
+  .object({
+    total_tokens: nonNegativeInteger,
+    rework_tokens: nonNegativeInteger,
+    rate: nullableRate,
+  })
+  .strict();
+
+const changeFailureMetric = z
+  .object({
+    terminal_deployments: nonNegativeInteger,
+    failed_deployments: nonNegativeInteger,
+    rate: nullableRate,
+  })
+  .strict();
+
+const phaseMetricBreakdown = z
+  .object({
+    phase_id: V2EntityId,
+    phase_name: V2NonEmptyString,
+    total_tasks: nonNegativeInteger,
+    completed_tasks: nonNegativeInteger,
+    run_count: nonNegativeInteger,
+    active_coding_seconds: nonNegativeNumber,
+    median_delivery_seconds: nonNegativeNumber.nullable(),
+    first_pass_yield: nullableRate,
+    input_tokens: nonNegativeInteger,
+    output_tokens: nonNegativeInteger,
+    total_tokens: nonNegativeInteger,
+    total_cost_usd: nonNegativeMoney.nullable(),
+    cost_coverage_rate: z.number().min(0).max(1).finite(),
+  })
+  .strict();
+
+const agentMetricBreakdown = z
+  .object({
+    agent_profile_id: V2EntityId,
+    provider: V2NonEmptyString,
+    model: V2NonEmptyString,
+    run_count: nonNegativeInteger,
+    succeeded_runs: nonNegativeInteger,
+    failed_runs: nonNegativeInteger,
+    active_coding_seconds: nonNegativeNumber,
+    input_tokens: nonNegativeInteger,
+    output_tokens: nonNegativeInteger,
+    total_tokens: nonNegativeInteger,
+    total_cost_usd: nonNegativeMoney.nullable(),
+    cost_coverage_rate: z.number().min(0).max(1).finite(),
+  })
+  .strict();
+
+const taskMetricBreakdown = z
+  .object({
+    task_id: V2EntityId,
+    phase_id: V2EntityId,
+    title: V2NonEmptyString,
+    complexity: z.enum(["S", "M", "L", "XL"]),
+    risk: z.enum(["low", "medium", "high", "critical"]),
+    state: z.enum([
+      "pending",
+      "ready",
+      "assigned",
+      "in_progress",
+      "verifying",
+      "in_review",
+      "completed",
+      "blocked",
+      "failed",
+      "cancelled",
+    ]),
+    attempt_count: nonNegativeInteger,
+    active_coding_seconds: nonNegativeNumber,
+    delivery_seconds: nonNegativeNumber.nullable(),
+    input_tokens: nonNegativeInteger,
+    output_tokens: nonNegativeInteger,
+    total_tokens: nonNegativeInteger,
+    total_cost_usd: nonNegativeMoney.nullable(),
+    cost_coverage_rate: z.number().min(0).max(1).finite(),
+    verification_passed: z.boolean(),
+  })
+  .strict();
+
+export const V2ProjectCodingMetrics = z
+  .object({
+    project_id: V2EntityId,
+    total_tasks: nonNegativeInteger,
+    completed_tasks: nonNegativeInteger,
+    completed_tasks_last_30_days: nonNegativeInteger,
+    terminal_runs: nonNegativeInteger,
+    active_coding_seconds: nonNegativeNumber,
+    time_to_verified_delivery: deliveryTimeMetric,
+    first_pass_yield: firstPassYieldMetric,
+    tokens_per_accepted_task: tokenEfficiencyMetric,
+    cost_per_accepted_task: costEfficiencyMetric,
+    rework_ratio: reworkMetric,
+    change_failure_rate: changeFailureMetric,
+    phase_breakdown: z.array(phaseMetricBreakdown),
+    agent_breakdown: z.array(agentMetricBreakdown),
+    task_breakdown: z.array(taskMetricBreakdown).max(50),
+  })
+  .strict()
+  .superRefine((metrics, ctx) => {
+    if (
+      metrics.completed_tasks > metrics.total_tasks ||
+      metrics.completed_tasks_last_30_days > metrics.completed_tasks
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["completed_tasks"],
+        message: "completed task counts cannot exceed their enclosing totals",
+      });
+    }
+    if (metrics.first_pass_yield.first_pass_tasks > metrics.first_pass_yield.completed_tasks) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["first_pass_yield", "first_pass_tasks"],
+        message: "first-pass tasks cannot exceed completed tasks",
+      });
+    }
+    if (metrics.rework_ratio.rework_tokens > metrics.rework_ratio.total_tokens) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["rework_ratio", "rework_tokens"],
+        message: "rework tokens cannot exceed total tokens",
+      });
+    }
+    if (
+      metrics.change_failure_rate.failed_deployments >
+      metrics.change_failure_rate.terminal_deployments
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["change_failure_rate", "failed_deployments"],
+        message: "failed deployments cannot exceed terminal deployments",
+      });
+    }
+  });
+export type V2ProjectCodingMetricsT = z.infer<typeof V2ProjectCodingMetrics>;
+
 const recentVerification = z.array(
   z
     .object({
@@ -501,6 +682,7 @@ export const V2ProjectDashboard = z
     needs_attention: dashboardSection("attention_projection", needsAttention),
     open_decisions: dashboardSection("human_waits_and_decisions", openDecisions),
     budget: dashboardSection("usage_ledger_and_approved_plan", budget),
+    coding_metrics: dashboardSection("coding_metrics", V2ProjectCodingMetrics),
     recent_deployments: dashboardSection("deployment_observations", z.array(dashboardDeployment)),
     recent_verification: dashboardSection("verification_results", recentVerification),
     conversations: dashboardSection("work_conversations", z.array(V2WorkConversation)),
@@ -576,6 +758,16 @@ export const V2ProjectDashboard = z
         code: z.ZodIssueCode.custom,
         path: ["budget", "data", "project_id"],
         message: "dashboard budget must belong to the requested project",
+      });
+    }
+    if (
+      dashboard.coding_metrics.availability === "available" &&
+      dashboard.coding_metrics.data.project_id !== dashboard.project_id
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["coding_metrics", "data", "project_id"],
+        message: "dashboard coding metrics must belong to the requested project",
       });
     }
     if (dashboard.conversations.availability === "available") {

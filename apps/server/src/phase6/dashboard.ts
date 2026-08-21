@@ -9,6 +9,7 @@ import {
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import type { Phase6DeploymentService } from "./deployments.js";
 import type { Phase6MockupService } from "./mockups.js";
+import { ProjectCodingMetricsService } from "./projectCodingMetrics.js";
 
 function iso(value: string | Date): string {
   return value instanceof Date ? value.toISOString() : value;
@@ -116,6 +117,7 @@ export class Phase6DashboardService {
       needsAttention,
       openDecisions,
       budget,
+      codingMetrics,
       recentDeployments,
       recentVerification,
       conversations,
@@ -127,6 +129,9 @@ export class Phase6DashboardService {
       section("attention_projection", generatedAt, () => this.needsAttention(projectId)),
       section("human_waits_and_decisions", generatedAt, () => this.openDecisions(projectId)),
       section("usage_ledger_and_approved_plan", generatedAt, () => this.budget(projectId)),
+      section("coding_metrics", generatedAt, () =>
+        new ProjectCodingMetricsService(this.transactions, this.now).read(projectId),
+      ),
       section("deployment_observations", generatedAt, () => this.recentDeployments(projectId)),
       section("verification_results", generatedAt, () => this.verification(projectId)),
       section("work_conversations", generatedAt, () => this.conversations(projectId)),
@@ -142,6 +147,7 @@ export class Phase6DashboardService {
       needs_attention: needsAttention,
       open_decisions: openDecisions,
       budget,
+      coding_metrics: codingMetrics,
       recent_deployments: recentDeployments,
       recent_verification: recentVerification,
       conversations,

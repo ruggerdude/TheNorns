@@ -10,6 +10,7 @@ import {
   V2MockupArtifactUploadInput,
   V2MockupManifest,
   V2ProjectArtifactQuotaReceipt,
+  V2ProjectCodingMetrics,
   V2ProjectDashboard,
   V2ProjectDeployment,
   V2ProjectDeploymentObservation,
@@ -576,6 +577,7 @@ describe("Phase 6 mockup and dashboard contracts", () => {
       needs_attention: unavailable("attention_projection"),
       open_decisions: unavailable("human_waits_and_decisions"),
       budget: unavailable("usage_ledger_and_approved_plan"),
+      coding_metrics: unavailable("coding_metrics"),
       recent_deployments: unavailable("deployment_observations"),
       recent_verification: unavailable("verification_results"),
       conversations: unavailable("work_conversations"),
@@ -665,6 +667,60 @@ describe("Phase 6 mockup and dashboard contracts", () => {
             },
           ],
         },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("keeps project coding metrics outcome-normalized and internally bounded", () => {
+    const metrics = {
+      project_id: "project-1",
+      total_tasks: 2,
+      completed_tasks: 1,
+      completed_tasks_last_30_days: 1,
+      terminal_runs: 2,
+      active_coding_seconds: 900,
+      time_to_verified_delivery: {
+        sample_size: 1,
+        median_seconds: 1200,
+        p75_seconds: 1200,
+      },
+      first_pass_yield: { completed_tasks: 1, first_pass_tasks: 1, rate: 1 },
+      tokens_per_accepted_task: {
+        accepted_tasks: 1,
+        input_tokens: 100,
+        output_tokens: 20,
+        cache_read_tokens: 25,
+        cache_write_tokens: 5,
+        reasoning_tokens: null,
+        total_tokens: 120,
+        per_accepted_task: 120,
+      },
+      cost_per_accepted_task: {
+        accepted_tasks: 1,
+        priced_runs: 2,
+        total_runs: 2,
+        coverage_rate: 1,
+        total_cost_usd: 1.25,
+        per_accepted_task_usd: 1.25,
+      },
+      rework_ratio: { total_tokens: 120, rework_tokens: 0, rate: 0 },
+      change_failure_rate: { terminal_deployments: 1, failed_deployments: 0, rate: 0 },
+      phase_breakdown: [],
+      agent_breakdown: [],
+      task_breakdown: [],
+    } as const;
+
+    expect(V2ProjectCodingMetrics.safeParse(metrics).success).toBe(true);
+    expect(
+      V2ProjectCodingMetrics.safeParse({
+        ...metrics,
+        rework_ratio: { total_tokens: 120, rework_tokens: 121, rate: 1 },
+      }).success,
+    ).toBe(false);
+    expect(
+      V2ProjectCodingMetrics.safeParse({
+        ...metrics,
+        change_failure_rate: { terminal_deployments: 1, failed_deployments: 2, rate: 1 },
       }).success,
     ).toBe(false);
   });
