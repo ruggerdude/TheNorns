@@ -4,7 +4,14 @@
 // preference — the loop itself is untouched execution logic; see
 // ./runWorker.ts for the part that actually drives runPlanning().
 import type { ProviderName } from "@norns/adapters";
-import { type CodexReasoningEffortT, V2QcMode, type V2QcModeT } from "@norns/contracts";
+import {
+  type CodexReasoningEffortT,
+  DEFAULT_PONYTAIL_MODE,
+  type PonytailModeT,
+  type ProjectPonytailModeT,
+  V2QcMode,
+  type V2QcModeT,
+} from "@norns/contracts";
 import { newId } from "../ids.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
 import type { PersistedReviewerSelection } from "./reviewerSelection.js";
@@ -42,6 +49,11 @@ export type QcMode = V2QcModeT;
 export interface QcModeSettings {
   qcMode: QcMode;
   allowUnadjudicatedRebuttals: boolean;
+}
+
+export interface PonytailSettings {
+  projectMode: ProjectPonytailModeT;
+  effectiveMode: PonytailModeT;
 }
 
 export interface PlanningParticipantSelection {
@@ -588,6 +600,50 @@ export class PlanningRunService {
         qcMode: row?.qc_mode ?? "automatic",
         allowUnadjudicatedRebuttals: row?.allow_unadjudicated_rebuttals ?? false,
       };
+    });
+  }
+
+  async ponytailSettingsOf(projectId: string): Promise<PonytailSettings> {
+    return this.transactions.transaction(async (tx) => {
+      const row = (
+        await tx.query<{
+          project_mode: PonytailModeT | null;
+          effective_mode: PonytailModeT;
+        }>(
+          `SELECT setting.ponytail_mode AS project_mode,
+                  COALESCE(setting.ponytail_mode, global.ponytail_mode, $2) AS effective_mode
+             FROM projects project
+             LEFT JOIN planning_reviewer_settings setting ON setting.project_id=project.id
+             LEFT JOIN global_rule_settings global ON global.id='global'
+            WHERE project.id=$1`,
+          [projectId, DEFAULT_PONYTAIL_MODE],
+        )
+      ).rows[0];
+      if (!row) {
+        throw new PlanningRunConflictError("project_not_found", `unknown project "${projectId}"`);
+      }
+      return {
+        projectMode: row.project_mode ?? "inherit",
+        effectiveMode: row.effective_mode,
+      };
+    });
+  }
+
+  async setPonytailMode(projectId: string, mode: ProjectPonytailModeT): Promise<void> {
+    await this.transactions.transaction(async (tx) => {
+      const project = await tx.query<{ id: string }>("SELECT id FROM projects WHERE id = $1", [
+        projectId,
+      ]);
+      if (!project.rows[0]) {
+        throw new PlanningRunConflictError("project_not_found", `unknown project "${projectId}"`);
+      }
+      await tx.query(
+        `INSERT INTO planning_reviewer_settings (project_id, ponytail_mode)
+         VALUES ($1,$2)
+         ON CONFLICT (project_id) DO UPDATE
+           SET ponytail_mode=EXCLUDED.ponytail_mode, updated_at=now()`,
+        [projectId, mode === "inherit" ? null : mode],
+      );
     });
   }
 

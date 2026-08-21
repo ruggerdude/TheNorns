@@ -298,6 +298,7 @@ describe.sequential("conversation plan workflow", () => {
         execution_started: false,
         execution_detail: "Execution kickoff is not configured.",
         planning_run_id: sent.effect.planning_run_id,
+        ponytail_mode: "full",
       });
     }
     const work = await pg.query<{

@@ -96,7 +96,7 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
     );
   }
 
-  it("PATCHes an explicit reviewer model right after creation", async () => {
+  it("PATCHes explicit reviewer and Ponytail choices right after creation", async () => {
     setup();
     mock.patch("/api/v2/projects/project-created/planning-reviewer", { status: 204 });
     mock.install();
@@ -105,6 +105,7 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
     await user.click(await screen.findByRole("button", { name: /new project/i }));
     await user.type(screen.getByTestId("project-name"), "Ravel search index");
     await user.selectOptions(screen.getByTestId("reviewer-model"), "openai:gpt-5.6-sol");
+    await user.selectOptions(screen.getByTestId("ponytail-mode"), "ultra");
     await user.type(await screen.findByTestId("github-new-repository-name"), "ravel-search-index");
     await user.click(screen.getByRole("button", { name: /create project/i }));
 
@@ -115,7 +116,9 @@ describe("FRONT DOOR P2b: reviewer selector", () => {
             call.method === "PATCH" &&
             call.url === "/api/v2/projects/project-created/planning-reviewer",
         ),
-      ).toMatchObject({ body: { provider: "openai", model: "gpt-5.6-sol" } }),
+      ).toMatchObject({
+        body: { provider: "openai", model: "gpt-5.6-sol", ponytail_mode: "ultra" },
+      }),
     );
     // Never DELETEd when an explicit choice was made.
     expect(

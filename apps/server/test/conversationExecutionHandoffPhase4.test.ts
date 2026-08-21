@@ -461,6 +461,7 @@ describe.sequential("conversation-first Phase 4 execution handoff", () => {
       execution_started: false,
       execution_detail: "Explicit development start refused safely.",
       planning_run_id: scope.planningRunId,
+      ponytail_mode: "full",
     });
     expect(kickoffCalls).toBe(1);
 
@@ -560,6 +561,7 @@ describe.sequential("conversation-first Phase 4 execution handoff", () => {
       execution_started: false,
       execution_detail: "Restart reconciliation refused safely.",
       planning_run_id: scope.planningRunId,
+      ponytail_mode: "full",
     });
     expect(approvedBeforeStart.effect).toMatchObject({
       kind: "plan_approved",

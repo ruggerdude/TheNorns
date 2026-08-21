@@ -1202,6 +1202,7 @@ describe.sequential("conversation-first Phase 3 plan workflow", () => {
       execution_started: false,
       execution_detail: "runner unavailable after approval",
       planning_run_id: qc.effect.planning_run_id,
+      ponytail_mode: "full",
     });
     expect(kickoffInputs).toEqual([
       {

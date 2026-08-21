@@ -288,6 +288,7 @@ describe.sequential("persistent planning conversation streaming", () => {
       "prompt",
       "global_rules",
       "project_rules",
+      "global_rules",
       "project_knowledge",
       "work_objective",
       "decision",

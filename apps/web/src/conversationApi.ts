@@ -2,6 +2,8 @@ import type {
   ConversationExecutionProjectionT,
   PmModelT,
   PmProviderT,
+  PonytailModeT,
+  ProjectPonytailModeT,
   ProjectRunCancellationProjectionT,
   ProjectRunCancellationRequestT,
   V2ConfirmConversationActionResponseT,
@@ -450,17 +452,20 @@ export interface ConversationDevelopmentStart {
   execution_started: boolean | null;
   execution_detail: string | null;
   planning_run_id: string;
+  ponytail_mode: PonytailModeT;
 }
 
 export function startConversationDevelopment(
   projectId: string,
   workItemId: string,
   conversationId: string,
+  ponytailMode?: ProjectPonytailModeT,
 ): Promise<ConversationDevelopmentStart> {
   return requestJson(
     `${messageEndpoint(projectId, workItemId, conversationId)}/start-development`,
     {
       method: "POST",
+      ...(ponytailMode ? { body: JSON.stringify({ ponytail_mode: ponytailMode }) } : {}),
     },
   );
 }
@@ -571,6 +576,8 @@ export interface PlanningReviewerSettings {
    *  conversation already has reviews — is what decides whether QC surfaces
    *  are shown at all. */
   default_max_rounds: number;
+  ponytail_mode: ProjectPonytailModeT;
+  effective_ponytail_mode: PonytailModeT;
 }
 
 /** The project-layer QC defaults (QC-PAUSE-POINTS.md "Settings: three

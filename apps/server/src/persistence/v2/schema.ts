@@ -4152,6 +4152,7 @@ export const globalRuleSettings = pgTable(
     id: text("id").primaryKey(),
     filename: text("filename").notNull(),
     content: text("content").notNull().default(""),
+    ponytailMode: text("ponytail_mode").notNull().default("full"),
     version: integer("version").notNull(),
     updatedBy: text("updated_by").notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" })
@@ -4162,6 +4163,10 @@ export const globalRuleSettings = pgTable(
     check("global_rule_settings_singleton_check", sql`${table.id} = 'global'`),
     check("global_rule_settings_filename_check", sql`${table.filename} = 'NORN.md'`),
     check("global_rule_settings_version_check", sql`${table.version} > 0`),
+    check(
+      "global_rule_settings_ponytail_mode_check",
+      sql`${table.ponytailMode} IN ('off','lite','full','ultra')`,
+    ),
     check("global_rule_settings_updated_by_check", sql`length(trim(${table.updatedBy})) > 0`),
   ],
 );
@@ -5557,6 +5562,7 @@ export const conversationKickoffIntents = pgTable(
     planningRunId: text("planning_run_id").notNull(),
     handoffId: text("handoff_id").notNull(),
     decidedByUserId: text("decided_by_user_id").notNull(),
+    ponytailMode: text("ponytail_mode").notNull().default("full"),
     status: text("status").notNull().default("pending"),
     leaseToken: text("lease_token"),
     leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true, mode: "string" }),

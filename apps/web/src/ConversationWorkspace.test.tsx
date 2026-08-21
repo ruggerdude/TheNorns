@@ -6024,6 +6024,108 @@ describe("conversation workspace", () => {
     expect(screen.getByRole("combobox", { name: "Conversation model" })).toHaveValue("gpt-5.6-sol");
   });
 
+  it("reviews approved agents and pins the selected Ponytail mode before development starts", async () => {
+    const approvedVersion = planVersion({
+      status: "approved",
+      approved_by_user_id: "user-1",
+      approved_at: now,
+    });
+    const execution = executionConversation();
+    const handoff = handoffFor(approvedVersion, execution.id);
+    let started = false;
+    let launchBody: unknown = null;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = urlOf(input);
+        if (url.endsWith("/work-items")) {
+          return Response.json({
+            work_items: [
+              {
+                work_item: {
+                  ...workItem,
+                  status: started ? "executing" : "awaiting_approval",
+                  approved_plan_version_id: approvedVersion.id,
+                },
+                conversations: [execution],
+              },
+            ],
+          });
+        }
+        if (
+          url.endsWith(`/conversations/${execution.id}`) &&
+          (!init?.method || init.method === "GET")
+        ) {
+          return detailResponse([], null, null, {
+            workItem: {
+              ...workItem,
+              status: started ? "executing" : "awaiting_approval",
+              approved_plan_version_id: approvedVersion.id,
+            },
+            conversation: execution,
+            planVersions: [approvedVersion],
+            handoff,
+          });
+        }
+        if (url.endsWith("/planning-reviewer")) {
+          return Response.json({
+            provider: "openai",
+            model: "gpt-5.6-sol",
+            mode: "explicit",
+            qc_mode: "automatic",
+            allow_unadjudicated_rebuttals: false,
+            default_max_rounds: 1,
+            ponytail_mode: "inherit",
+            effective_ponytail_mode: "full",
+          });
+        }
+        if (url.endsWith(`/conversations/${execution.id}/start-development`)) {
+          launchBody = JSON.parse(String(init?.body));
+          started = true;
+          return Response.json({
+            status: "succeeded",
+            execution_started: true,
+            execution_detail: "Started.",
+            planning_run_id: "planning-run-settings",
+            ponytail_mode: "ultra",
+          });
+        }
+        if (url.endsWith(`/api/projects/${projectId}/conversations/${execution.id}/execution`)) {
+          return Response.json({
+            project_id: projectId,
+            conversation_id: execution.id,
+            presentation: started ? "active" : "idle",
+            target: { execution_target_id: "target-1", name: "This computer" },
+            run: null,
+          });
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    render(
+      <ConversationWorkspace
+        projectId={projectId}
+        initialConversationId={execution.id}
+        onUnauthorized={() => undefined}
+      />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Review development settings" }));
+    const dialog = await screen.findByRole("dialog", { name: "Review before launch" });
+    expect(within(dialog).getByText("Approved agents")).toBeVisible();
+    expect(within(dialog).getByText("phase")).toBeVisible();
+    expect(within(dialog).getByText("USD 42")).toBeVisible();
+    await user.selectOptions(
+      within(dialog).getByRole("combobox", { name: "Ponytail development mode" }),
+      "ultra",
+    );
+    await user.click(within(dialog).getByRole("button", { name: "Start development" }));
+
+    await waitFor(() => expect(launchBody).toEqual({ ponytail_mode: "ultra" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
   it("replays a lost approval response into the exact durable execution target once", async () => {
     const approvedVersion = planVersion({
       status: "approved",

@@ -18,9 +18,14 @@
 //     material goes first. The task and its acceptance criteria are never
 //     trimmed; if the untrimmable core alone exceeds the cap, that is a
 //     failure, not a truncation.
-import type { V2ContentAddressedReferenceT, V2TaskInputFileT } from "@norns/contracts";
+import type {
+  PonytailModeT,
+  V2ContentAddressedReferenceT,
+  V2TaskInputFileT,
+} from "@norns/contracts";
 import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
+import { ponytailPolicy, resolvePonytailMode } from "../projects/ponytailPolicy.js";
 import {
   REPOSITORY_BOOTSTRAP_FACT_KEY,
   REPOSITORY_BOOTSTRAP_GREENFIELD,
@@ -252,6 +257,7 @@ interface ContextModel {
   assignment: AssignmentRow | null;
   architecture: ArchitectureRow;
   facts: RepositoryFact[];
+  ponytailMode: PonytailModeT;
   globalRules: string | null;
   directives: MemoryItem[];
   dependencies: DependencyOutcome[];
@@ -267,6 +273,7 @@ const SECTION_ORDER = [
   "mission",
   "objective",
   "task",
+  "ponytail",
   "knowledge",
   "dependencies",
   "repository",
@@ -512,6 +519,10 @@ function renderKnowledge(model: ContextModel): string | null {
   return model.knowledge;
 }
 
+function renderPonytail(model: ContextModel): string | null {
+  return ponytailPolicy(model.ponytailMode);
+}
+
 function renderSection(section: SectionName, model: ContextModel): string | null {
   switch (section) {
     case "mission":
@@ -520,6 +531,8 @@ function renderSection(section: SectionName, model: ContextModel): string | null
       return renderObjective(model);
     case "task":
       return renderTask(model);
+    case "ponytail":
+      return renderPonytail(model);
     case "knowledge":
       return renderKnowledge(model);
     case "dependencies":
@@ -615,6 +628,10 @@ function trimFrozenPackageContext(
       { section: "mission", content: utf8(`${renderMission(model)}\n`) },
       { section: "approved_task_package", content: canonicalPackage },
     ];
+    const ponytail = renderPonytail(model);
+    if (ponytail !== null) {
+      sections.push({ section: "ponytail", content: utf8(`${ponytail}\n`) });
+    }
     const dependencies = renderDependencies(model);
     if (dependencies !== null) {
       sections.push({ section: "dependencies", content: utf8(`${dependencies}\n`) });
@@ -1283,6 +1300,28 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
         );
     const globalRules = globalRulesResult.rows[0]?.content.trim() || null;
 
+    const ponytailSettings = (
+      await tx.query<{
+        launch_mode: PonytailModeT | null;
+        project_mode: PonytailModeT | null;
+        global_mode: PonytailModeT | null;
+      }>(
+        `SELECT intent.ponytail_mode AS launch_mode,
+                setting.ponytail_mode AS project_mode,
+                global.ponytail_mode AS global_mode
+           FROM tasks task
+           LEFT JOIN conversation_task_package_bindings binding ON binding.task_id=task.id
+           LEFT JOIN conversation_kickoff_intents intent ON intent.handoff_id=binding.handoff_id
+           LEFT JOIN planning_reviewer_settings setting ON setting.project_id=task.project_id
+           LEFT JOIN global_rule_settings global ON global.id='global'
+          WHERE task.id=$1`,
+        [task.id],
+      )
+    ).rows[0];
+    const ponytailMode =
+      ponytailSettings?.launch_mode ??
+      resolvePonytailMode(ponytailSettings?.global_mode, ponytailSettings?.project_mode);
+
     const directiveResult = frozenConversationPackage
       ? { rows: [] }
       : await tx.query<MemoryRow>(
@@ -1360,6 +1399,7 @@ export class RelationalTaskContextAssembler implements TaskContextAssembler {
       assignment,
       architecture,
       facts,
+      ponytailMode,
       globalRules,
       directives,
       dependencies,

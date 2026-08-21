@@ -137,6 +137,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       qc_mode: "automatic",
       allow_unadjudicated_rebuttals: false,
       default_max_rounds: 1,
+      ponytail_mode: "inherit",
+      effective_ponytail_mode: "full",
     });
   });
 
@@ -202,6 +204,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       qc_mode: "automatic",
       allow_unadjudicated_rebuttals: false,
       default_max_rounds: 1,
+      ponytail_mode: "inherit",
+      effective_ponytail_mode: "full",
     });
 
     // The existing resolution path (PlanningRunService.reviewerSelectionOf,
@@ -236,6 +240,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       qc_mode: "automatic",
       allow_unadjudicated_rebuttals: false,
       default_max_rounds: 1,
+      ponytail_mode: "inherit",
+      effective_ponytail_mode: "full",
     });
     await expect(planningRunService.reviewerSelectionOf(projectId)).resolves.toBeNull();
   });
@@ -266,6 +272,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       qc_mode: "automatic",
       allow_unadjudicated_rebuttals: false,
       default_max_rounds: 1,
+      ponytail_mode: "inherit",
+      effective_ponytail_mode: "full",
     });
   });
 
@@ -297,6 +305,34 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       qc_mode: "automatic",
       allow_unadjudicated_rebuttals: false,
       default_max_rounds: 1,
+      ponytail_mode: "inherit",
+      effective_ponytail_mode: "full",
+    });
+  });
+
+  it("round-trips a project Ponytail override without disturbing QC or reviewer settings", async () => {
+    const patch = await inject(
+      server,
+      "PATCH",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+      { ponytail_mode: "ultra" },
+    );
+    expect(patch.statusCode).toBe(204);
+
+    const response = await inject(
+      server,
+      "GET",
+      `/api/v2/projects/${projectId}/planning-reviewer`,
+      token,
+    );
+    expect(response.json()).toMatchObject({
+      provider: "openai",
+      model: null,
+      mode: "automatic",
+      qc_mode: "automatic",
+      ponytail_mode: "ultra",
+      effective_ponytail_mode: "ultra",
     });
   });
 
@@ -323,6 +359,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       qc_mode: "gated_when_contested",
       allow_unadjudicated_rebuttals: false,
       default_max_rounds: 1,
+      ponytail_mode: "inherit",
+      effective_ponytail_mode: "full",
     });
 
     // Setting the escape hatch alone must not disturb the qc_mode just set,
@@ -349,6 +387,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       qc_mode: "gated_when_contested",
       allow_unadjudicated_rebuttals: true,
       default_max_rounds: 1,
+      ponytail_mode: "inherit",
+      effective_ponytail_mode: "full",
     });
 
     // And setting the reviewer override alone must not reset qc_mode back to
@@ -375,6 +415,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       qc_mode: "gated_when_contested",
       allow_unadjudicated_rebuttals: true,
       default_max_rounds: 1,
+      ponytail_mode: "inherit",
+      effective_ponytail_mode: "full",
     });
   });
 
@@ -438,6 +480,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       qc_mode: "automatic",
       allow_unadjudicated_rebuttals: false,
       default_max_rounds: 5,
+      ponytail_mode: "inherit",
+      effective_ponytail_mode: "full",
     });
 
     // Setting qc_mode alone afterward must not reset default_max_rounds.
@@ -463,6 +507,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       qc_mode: "gated_each_round",
       allow_unadjudicated_rebuttals: false,
       default_max_rounds: 5,
+      ponytail_mode: "inherit",
+      effective_ponytail_mode: "full",
     });
 
     // And setting the reviewer override alone must leave default_max_rounds
@@ -489,6 +535,8 @@ describe.sequential("FRONT DOOR P2b: planning-reviewer HTTP route", () => {
       qc_mode: "gated_each_round",
       allow_unadjudicated_rebuttals: false,
       default_max_rounds: 5,
+      ponytail_mode: "inherit",
+      effective_ponytail_mode: "full",
     });
   });
 

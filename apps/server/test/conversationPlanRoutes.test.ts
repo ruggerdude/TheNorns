@@ -147,6 +147,7 @@ describe("conversation plan routes", () => {
     const response = await app.inject({
       method: "POST",
       url: "/api/v2/projects/project-1/work-items/work-1/conversations/execution-1/start-development",
+      payload: { ponytail_mode: "ultra" },
     });
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
@@ -160,6 +161,7 @@ describe("conversation plan routes", () => {
         arguments: [
           "route-user",
           { projectId: "project-1", workItemId: "work-1", conversationId: "execution-1" },
+          "ultra",
         ],
       },
     ]);

@@ -9,6 +9,7 @@ import {
 } from "@norns/contracts";
 import { canonicalJson, canonicalSha256 } from "../persistence/migration/canonicalJson.js";
 import type { V2SqlExecutor, V2TransactionRunner } from "../persistence/v2/database.js";
+import { ponytailPolicy, resolvePonytailMode } from "../projects/ponytailPolicy.js";
 import {
   CONVERSATIONAL_PM_INSTRUCTIONS,
   CONVERSATIONAL_PM_PROMPT_VERSION,
@@ -696,9 +697,11 @@ export class ConversationContextAssembler {
     sections: string[],
   ): Promise<void> {
     const global = (
-      await tx.query<{ content: string; version: number }>(
-        "SELECT content, version FROM global_rule_settings WHERE id='global'",
-      )
+      await tx.query<{
+        content: string;
+        version: number;
+        ponytail_mode: "off" | "lite" | "full" | "ultra";
+      }>("SELECT content, version, ponytail_mode FROM global_rule_settings WHERE id='global'")
     ).rows[0];
     if (global?.content.trim()) {
       materials.push({
@@ -722,6 +725,18 @@ export class ConversationContextAssembler {
     if (project?.content.trim()) {
       materials.push({ kind: "project_rules", ref: project.id, content: project.content });
       sections.push(section("Project NORN.md", project.content));
+    }
+    const projectPonytail = (
+      await tx.query<{ ponytail_mode: "off" | "lite" | "full" | "ultra" | null }>(
+        "SELECT ponytail_mode FROM planning_reviewer_settings WHERE project_id=$1",
+        [projectId],
+      )
+    ).rows[0]?.ponytail_mode;
+    const mode = resolvePonytailMode(global?.ponytail_mode, projectPonytail);
+    const policy = ponytailPolicy(mode);
+    if (policy) {
+      materials.push({ kind: "global_rules", ref: `ponytail:${mode}`, content: policy });
+      sections.push(section("Ponytail policy", policy));
     }
   }
 

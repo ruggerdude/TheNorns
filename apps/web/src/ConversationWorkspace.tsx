@@ -25,6 +25,8 @@ import type {
   ConversationExecutionProjectionT,
   PmModelT,
   PmProviderT,
+  PonytailModeT,
+  ProjectPonytailModeT,
   V2ConfirmConversationActionResponseT,
   V2ConversationActionDeliveryEventT,
   V2ConversationActionT,
@@ -100,6 +102,7 @@ import { ApiError, UnauthorizedError, authHeaders } from "./auth";
 import {
   type ConversationDetail,
   type PlanProposalProgress,
+  type PlanningReviewerSettings,
   type QcModeT,
   type SubmitConversationMessageBody,
   type WorkItemConversationGroup,
@@ -146,6 +149,7 @@ import {
   getExecutionModelCapabilities,
   retryPlanningRunExecution,
 } from "./phaseTabApi";
+import { PONYTAIL_OPTIONS, PROJECT_PONYTAIL_OPTIONS, ponytailModeLabel } from "./ponytailOptions";
 import { Alert, Badge, Button, Field, Input, Select, Spinner, TextArea } from "./ui";
 import "./ConversationWorkspace.css";
 
@@ -165,6 +169,20 @@ function ChatIcon(): React.ReactElement {
         strokeWidth="1.15"
         strokeLinejoin="round"
       />
+    </svg>
+  );
+}
+
+function SettingsIcon(): React.ReactElement {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M6.9 1.8h2.2l.4 1.55c.35.14.68.33.98.56l1.52-.45 1.1 1.9-1.12 1.1c.05.36.05.72 0 1.08l1.12 1.1-1.1 1.9-1.52-.45c-.3.23-.63.42-.98.56L9.1 12.2H6.9l-.4-1.55a5 5 0 0 1-.98-.56L4 10.54l-1.1-1.9 1.12-1.1a4 4 0 0 1 0-1.08L2.9 5.36 4 3.46l1.52.45c.3-.23.63-.42.98-.56L6.9 1.8Z"
+        stroke="currentColor"
+        strokeWidth="1.1"
+        strokeLinejoin="round"
+      />
+      <circle cx="8" cy="7" r="1.65" stroke="currentColor" strokeWidth="1.1" />
     </svg>
   );
 }
@@ -3242,6 +3260,156 @@ function PlanHandoffDialog({
   );
 }
 
+function DevelopmentLaunchSettingsDialog({
+  busy,
+  detail,
+  onCancel,
+  onStart,
+}: {
+  busy: boolean;
+  detail: ConversationDetail;
+  onCancel: () => void;
+  onStart: (ponytailMode: ProjectPonytailModeT) => void;
+}): React.ReactElement {
+  const [settings, setSettings] = useState<PlanningReviewerSettings | null>(null);
+  const [ponytailMode, setPonytailMode] = useState<ProjectPonytailModeT>("inherit");
+  const [error, setError] = useState<string | null>(null);
+  const handoff = detail.handoff?.package ?? null;
+  const modules = handoff?.approved_plan.plan.modules ?? [];
+
+  useEffect(() => {
+    let current = true;
+    void fetchPlanningReviewerSettings(detail.work_item.project_id)
+      .then((result) => {
+        if (!current) return;
+        setSettings(result);
+        setPonytailMode(result.ponytail_mode);
+      })
+      .catch((caught) => {
+        if (!current) return;
+        setError(
+          caught instanceof Error ? caught.message : "Project settings could not be loaded.",
+        );
+      });
+    return () => {
+      current = false;
+    };
+  }, [detail.work_item.project_id]);
+
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent): void => {
+      if (event.key === "Escape" && !busy) onCancel();
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [busy, onCancel]);
+
+  const effectiveMode =
+    ponytailMode === "inherit" ? (settings?.effective_ponytail_mode ?? "full") : ponytailMode;
+  const selectedPolicy = PONYTAIL_OPTIONS.find((option) => option.value === effectiveMode);
+
+  return createPortal(
+    <div className="plan-handoff-backdrop" role="presentation" onMouseDown={onCancel}>
+      <dialog
+        open
+        className="plan-handoff-dialog development-launch-dialog"
+        aria-labelledby="development-launch-settings-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header>
+          <div>
+            <div className="eyebrow">Development settings</div>
+            <h2 id="development-launch-settings-title">Review before launch</h2>
+          </div>
+          <Button type="button" variant="ghost" disabled={busy} onClick={onCancel}>
+            Cancel
+          </Button>
+        </header>
+
+        <div className="development-launch-summary" aria-label="Approved development summary">
+          <div>
+            <strong>{modules.length}</strong>
+            <span>phase{modules.length === 1 ? "" : "s"}</span>
+          </div>
+          <div>
+            <strong>{handoff?.acceptance_evidence.length ?? 0}</strong>
+            <span>acceptance checks</span>
+          </div>
+          <div>
+            <strong>
+              {handoff
+                ? `${handoff.budget.currency} ${handoff.budget.amount.toLocaleString()}`
+                : "—"}
+            </strong>
+            <span>approved budget</span>
+          </div>
+        </div>
+
+        <section className="development-launch-agents" aria-labelledby="development-agents-title">
+          <div className="development-launch-section-heading">
+            <div>
+              <h3 id="development-agents-title">Approved agents</h3>
+              <p>Agent assignments are locked with the approved plan.</p>
+            </div>
+            <Badge>{handoff?.staffing.length ?? 0}</Badge>
+          </div>
+          <div className="development-launch-agent-list">
+            {modules.map((module, index) => {
+              const staffing = handoff?.staffing.find((item) => item.module_id === module.id);
+              return (
+                <div key={module.id} className="development-launch-agent">
+                  <span>{index + 1}</span>
+                  <strong title={module.title}>{module.title}</strong>
+                  <small>
+                    {staffing
+                      ? `${staffing.agent_role} · ${aiProviderLabel(staffing.provider)} · ${staffing.model}`
+                      : "Agent unavailable"}
+                  </small>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+
+        <Field label="Ponytail development mode">
+          <Select
+            aria-label="Ponytail development mode"
+            value={ponytailMode}
+            disabled={busy || settings === null}
+            onChange={(event) => setPonytailMode(event.target.value as ProjectPonytailModeT)}
+          >
+            {PROJECT_PONYTAIL_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.value === "inherit" && settings
+                  ? `${option.label} (${ponytailModeLabel(settings.effective_ponytail_mode)})`
+                  : option.label}
+              </option>
+            ))}
+          </Select>
+          <small className="development-launch-policy-help">
+            {selectedPolicy?.help ?? "Use the selected project development policy."}
+          </small>
+        </Field>
+
+        {error ? <Alert>{error}</Alert> : null}
+        <p className="development-launch-note">
+          Starting saves this Ponytail choice as the project default and pins it to this launch.
+          Change agents or plan scope by revising the approved plan first.
+        </p>
+        <Button
+          type="button"
+          variant="primary"
+          disabled={busy || settings === null || handoff === null}
+          onClick={() => onStart(ponytailMode)}
+        >
+          {busy ? "Starting development…" : settings ? "Start development" : "Loading settings…"}
+        </Button>
+      </dialog>
+    </div>,
+    document.body,
+  );
+}
+
 function ConversationComposer({
   projectId,
   conversationId,
@@ -4576,6 +4744,7 @@ function ConversationThread({
   const [developmentStartBusy, setDevelopmentStartBusy] = useState(false);
   const [developmentAutoStartPending, setDevelopmentAutoStartPending] = useState(false);
   const [developmentStartError, setDevelopmentStartError] = useState<string | null>(null);
+  const [developmentSettingsOpen, setDevelopmentSettingsOpen] = useState(false);
   const [developmentPauseBusyIds, setDevelopmentPauseBusyIds] = useState(() => new Set<string>());
   const [developmentPausePointError, setDevelopmentPausePointError] = useState<string | null>(null);
   const [developmentStopAllBusy, setDevelopmentStopAllBusy] = useState(false);
@@ -5840,99 +6009,104 @@ function ConversationThread({
     onUnauthorized,
   ]);
 
-  const startDevelopment = useCallback(async (): Promise<void> => {
-    if (developmentStartInFlight.current) return;
-    developmentStartInFlight.current = true;
-    setDevelopmentStartBusy(true);
-    setDevelopmentStartError(null);
-    try {
-      let result = await startConversationDevelopment(
-        detail.work_item.project_id,
-        detail.work_item.id,
-        detail.conversation.id,
-      );
-      let started = result.execution_started === true;
-      let executionDetail = result.execution_detail;
-      let statusChecks = 0;
-      while (
-        !started &&
-        (result.status === "pending" || result.status === "leased") &&
-        statusChecks < 60
-      ) {
-        statusChecks += 1;
-        await waitForDevelopmentStatus(1_000);
-        result = await startConversationDevelopment(
+  const startDevelopment = useCallback(
+    async (ponytailMode?: ProjectPonytailModeT): Promise<void> => {
+      if (developmentStartInFlight.current) return;
+      developmentStartInFlight.current = true;
+      setDevelopmentStartBusy(true);
+      setDevelopmentStartError(null);
+      try {
+        let result = await startConversationDevelopment(
           detail.work_item.project_id,
           detail.work_item.id,
           detail.conversation.id,
+          ponytailMode,
         );
-        started = result.execution_started === true;
-        executionDetail = result.execution_detail;
-      }
-      let repositoryPrepared = false;
-      const needsRepositoryPreparation = (detail: string | null): boolean =>
-        /architecture revision|repository facts|ingest the repository/i.test(detail ?? "");
-      if (!started && needsRepositoryPreparation(executionDetail)) {
-        await analyzeProjectRepository(detail.work_item.project_id);
-        repositoryPrepared = true;
-      }
-      if (!started && (result.status === "refused" || result.status === "failed")) {
-        let retry = await retryPlanningRunExecution(
-          detail.work_item.project_id,
-          result.planning_run_id,
-        );
-        started = retry.execution?.started === true;
-        executionDetail = retry.execution?.detail ?? executionDetail;
-        if (!started && !repositoryPrepared && needsRepositoryPreparation(executionDetail)) {
+        let started = result.execution_started === true;
+        let executionDetail = result.execution_detail;
+        let statusChecks = 0;
+        while (
+          !started &&
+          (result.status === "pending" || result.status === "leased") &&
+          statusChecks < 60
+        ) {
+          statusChecks += 1;
+          await waitForDevelopmentStatus(1_000);
+          result = await startConversationDevelopment(
+            detail.work_item.project_id,
+            detail.work_item.id,
+            detail.conversation.id,
+            ponytailMode,
+          );
+          started = result.execution_started === true;
+          executionDetail = result.execution_detail;
+        }
+        let repositoryPrepared = false;
+        const needsRepositoryPreparation = (detail: string | null): boolean =>
+          /architecture revision|repository facts|ingest the repository/i.test(detail ?? "");
+        if (!started && needsRepositoryPreparation(executionDetail)) {
           await analyzeProjectRepository(detail.work_item.project_id);
           repositoryPrepared = true;
-          retry = await retryPlanningRunExecution(
+        }
+        if (!started && (result.status === "refused" || result.status === "failed")) {
+          let retry = await retryPlanningRunExecution(
             detail.work_item.project_id,
             result.planning_run_id,
           );
           started = retry.execution?.started === true;
           executionDetail = retry.execution?.detail ?? executionDetail;
+          if (!started && !repositoryPrepared && needsRepositoryPreparation(executionDetail)) {
+            await analyzeProjectRepository(detail.work_item.project_id);
+            repositoryPrepared = true;
+            retry = await retryPlanningRunExecution(
+              detail.work_item.project_id,
+              result.planning_run_id,
+            );
+            started = retry.execution?.started === true;
+            executionDetail = retry.execution?.detail ?? executionDetail;
+          }
+          let reconnectChecks = 0;
+          while (!started && localAgentIsDisconnected(executionDetail) && reconnectChecks < 30) {
+            reconnectChecks += 1;
+            await waitForDevelopmentStatus(1_000);
+            retry = await retryPlanningRunExecution(
+              detail.work_item.project_id,
+              result.planning_run_id,
+            );
+            started = retry.execution?.started === true;
+            executionDetail = retry.execution?.detail ?? executionDetail;
+          }
         }
-        let reconnectChecks = 0;
-        while (!started && localAgentIsDisconnected(executionDetail) && reconnectChecks < 30) {
-          reconnectChecks += 1;
-          await waitForDevelopmentStatus(1_000);
-          retry = await retryPlanningRunExecution(
-            detail.work_item.project_id,
-            result.planning_run_id,
+        if (!started) {
+          setDevelopmentStartError(
+            result.status === "pending" || result.status === "leased"
+              ? "The approved work is still queued because the assigned execution target has not confirmed its start. Check that the target is online, then choose Check status."
+              : readableDevelopmentStartError(executionDetail),
           );
-          started = retry.execution?.started === true;
-          executionDetail = retry.execution?.detail ?? executionDetail;
+          return;
         }
-      }
-      if (!started) {
+        await onRefresh();
+      } catch (caught) {
+        if (caught instanceof UnauthorizedError) {
+          onUnauthorized();
+          return;
+        }
         setDevelopmentStartError(
-          result.status === "pending" || result.status === "leased"
-            ? "The approved work is still queued because the assigned execution target has not confirmed its start. Check that the target is online, then choose Check status."
-            : readableDevelopmentStartError(executionDetail),
+          readableDevelopmentStartError(caught instanceof Error ? caught.message : String(caught)),
         );
-        return;
+      } finally {
+        developmentStartInFlight.current = false;
+        setDevelopmentStartBusy(false);
       }
-      await onRefresh();
-    } catch (caught) {
-      if (caught instanceof UnauthorizedError) {
-        onUnauthorized();
-        return;
-      }
-      setDevelopmentStartError(
-        readableDevelopmentStartError(caught instanceof Error ? caught.message : String(caught)),
-      );
-    } finally {
-      developmentStartInFlight.current = false;
-      setDevelopmentStartBusy(false);
-    }
-  }, [
-    detail.conversation.id,
-    detail.work_item.id,
-    detail.work_item.project_id,
-    onRefresh,
-    onUnauthorized,
-  ]);
+    },
+    [
+      detail.conversation.id,
+      detail.work_item.id,
+      detail.work_item.project_id,
+      onRefresh,
+      onUnauthorized,
+    ],
+  );
 
   useEffect(() => {
     if (!isExecution || detail.work_item.status !== "awaiting_approval") return;
@@ -6540,9 +6714,20 @@ function ConversationThread({
                         {developmentLaunchPending ? (
                           <Spinner label="Starting development…" />
                         ) : (
-                          <Button variant="primary" onClick={() => void startDevelopment()}>
-                            {developmentStartError ? "Check status" : "Start development"}
-                          </Button>
+                          <div className="conversation-development-start-actions">
+                            <Button
+                              className="conversation-development-settings-button"
+                              variant="ghost"
+                              aria-label="Review development settings"
+                              title="Review agents and development settings"
+                              onClick={() => setDevelopmentSettingsOpen(true)}
+                            >
+                              <SettingsIcon />
+                            </Button>
+                            <Button variant="primary" onClick={() => void startDevelopment()}>
+                              {developmentStartError ? "Check status" : "Start development"}
+                            </Button>
+                          </div>
                         )}
                       </section>
                     ) : null}
@@ -6847,6 +7032,17 @@ function ConversationThread({
               </div>
             ) : null}
           </section>
+          {developmentSettingsOpen ? (
+            <DevelopmentLaunchSettingsDialog
+              busy={developmentStartBusy}
+              detail={detail}
+              onCancel={() => setDevelopmentSettingsOpen(false)}
+              onStart={(ponytailMode) => {
+                setDevelopmentSettingsOpen(false);
+                void startDevelopment(ponytailMode);
+              }}
+            />
+          ) : null}
         </ConversationEditContext.Provider>
       </ConversationActionContext.Provider>
     </AssistantRuntimeProvider>

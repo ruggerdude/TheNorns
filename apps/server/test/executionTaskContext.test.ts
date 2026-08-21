@@ -238,7 +238,7 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
     }
   });
 
-  it("orders the prompt mission -> objective -> task -> dependencies -> repository -> directives -> memory", async () => {
+  it("orders the prompt mission -> objective -> task -> Ponytail -> dependencies -> repository -> directives -> memory", async () => {
     await seedMemory(
       "memory-directive",
       "directive",
@@ -258,6 +258,7 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
       "# Norns task briefing",
       "## Phase objective",
       "## TASK — this is what you must deliver",
+      "# Ponytail development policy · full",
       "## Upstream tasks",
       "## Repository",
       "## Project directives and constraints",
@@ -331,6 +332,7 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
     expect(sections.rows.map((row) => row.section)).toEqual([
       "mission",
       "objective",
+      "ponytail",
       "repository",
       "task",
     ]);
@@ -367,10 +369,18 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
   });
 
   it("shares repository and mission documents across tasks in a project", async () => {
+    const store = new TaskContextStore(transactions);
     const refsA = await assembler().assembleForTask(TASK);
     const refsB = await assembler().assembleForTask(UPSTREAM);
     expect(refsB[0]).toEqual(refsA[0]); // mission
-    const repositoryA = refsA.find((ref) => ref.storage_ref === refsA[4]?.storage_ref);
+    const repositoryA = (
+      await Promise.all(
+        refsA.map(async (ref) => ({
+          ref,
+          text: (await store.content(ref.artifact_id))?.bytes.toString("utf8") ?? "",
+        })),
+      )
+    ).find(({ text }) => text.startsWith("## Repository"))?.ref;
     expect(refsB.map((r) => r.artifact_id)).toContain(repositoryA?.artifact_id);
   });
 
@@ -516,7 +526,10 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
   it("never invents repository facts", async () => {
     const refs = await assembler().assembleForTask(TASK);
     const store = new TaskContextStore(transactions);
-    const repository = (await store.content(refs[4]?.artifact_id ?? ""))?.bytes.toString("utf8");
+    const documents = await Promise.all(
+      refs.map(async (ref) => (await store.content(ref.artifact_id))?.bytes.toString("utf8") ?? ""),
+    );
+    const repository = documents.find((document) => document.startsWith("## Repository"));
     expect(repository).toContain("pnpm biome check .");
     // Only seeded facts appear; no invented key sneaks in.
     const factLines = (repository ?? "")
@@ -565,11 +578,23 @@ describe.sequential("EXECUTION E1 — task context assembly", () => {
     // the least-confident non-policy fact goes — but the commands never do.
     // The cap is derived from the untrimmable sections (mission, objective,
     // task, repository) so the test does not hard-code a byte count.
-    const core =
-      (full[0]?.byte_size ?? 0) +
-      (full[1]?.byte_size ?? 0) +
-      (full[2]?.byte_size ?? 0) +
-      (full[4]?.byte_size ?? 0);
+    const fullDocuments = await Promise.all(
+      full.map(async (ref) => (await store.content(ref.artifact_id))?.bytes.toString("utf8") ?? ""),
+    );
+    const untrimmableHeadings = [
+      "# Norns task briefing",
+      "## Phase objective",
+      "## TASK — this is what you must deliver",
+      "# Ponytail development policy",
+      "## Repository",
+    ];
+    const core = full.reduce(
+      (sum, ref, index) =>
+        untrimmableHeadings.some((heading) => fullDocuments[index]?.startsWith(heading))
+          ? sum + ref.byte_size
+          : sum,
+      0,
+    );
     const tightCap = core - 20;
     const tight = await assembler({ maxTotalBytes: tightCap }).assembleForTask(TASK);
     const tightText = (await Promise.all(tight.map((ref) => store.content(ref.artifact_id))))

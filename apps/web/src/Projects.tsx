@@ -6,6 +6,7 @@ import {
   type OwnedDeviceProjectionT,
   type PmModelT,
   type PmProviderT,
+  type ProjectPonytailModeT,
   type V2QcModeT,
   pmModelOption,
   providerForPmModel,
@@ -25,6 +26,7 @@ import {
   type LocalRepositorySelection,
   loadLocalRepositories,
 } from "./localSources";
+import { PROJECT_PONYTAIL_OPTIONS } from "./ponytailOptions";
 import {
   type OnboardingResponse,
   type ProjectOnboardingScenario,
@@ -494,6 +496,7 @@ export function Projects({
   // qc_mode at kickoff).
   const [qcMode, setQcMode] = useState<QcModeT>("automatic");
   const [allowUnadjudicatedRebuttals, setAllowUnadjudicatedRebuttals] = useState(false);
+  const [ponytailMode, setPonytailMode] = useState<ProjectPonytailModeT>("inherit");
   const [projectUpdatePreferences, setProjectUpdatePreferences] = useState(
     loadGlobalUpdatePreferences,
   );
@@ -938,6 +941,7 @@ export function Projects({
       setRoundsCount(1);
       setQcMode("automatic");
       setAllowUnadjudicatedRebuttals(false);
+      setPonytailMode("inherit");
       setProjectUpdatePreferences(loadGlobalUpdatePreferences());
       setIdempotencyKey(globalThis.crypto.randomUUID());
       onOpenProject(stableProject, {
@@ -980,6 +984,7 @@ export function Projects({
             qc_mode: qcMode,
             allow_unadjudicated_rebuttals: allowUnadjudicatedRebuttals,
             default_max_rounds: roundsCount,
+            ponytail_mode: ponytailMode,
           });
         } else {
           await requestVerb(`/api/v2/projects/${projectId}/planning-reviewer`, "DELETE");
@@ -990,13 +995,14 @@ export function Projects({
             qc_mode: qcMode,
             allow_unadjudicated_rebuttals: allowUnadjudicatedRebuttals,
             default_max_rounds: roundsCount,
+            ponytail_mode: ponytailMode,
           });
         }
       } catch {
         // Best-effort: planning safely falls back to the account default.
       }
     },
-    [reviewerSelection, qcMode, allowUnadjudicatedRebuttals, roundsCount],
+    [reviewerSelection, qcMode, allowUnadjudicatedRebuttals, roundsCount, ponytailMode],
   );
 
   const chooseCloneDestination = useCallback(async (): Promise<void> => {
@@ -2337,7 +2343,7 @@ export function Projects({
                         </span>
                         <div>
                           <h2 id="qc-section">QC options</h2>
-                          <p>Set the planning models and review cadence.</p>
+                          <p>Set the planning models, development style, and review cadence.</p>
                         </div>
                       </header>
                       <div className="two-col-fields">
@@ -2375,6 +2381,21 @@ export function Projects({
                                   </option>
                                 ))}
                               </optgroup>
+                            ))}
+                          </Select>
+                        </Field>
+                        <Field label="Ponytail development mode">
+                          <Select
+                            data-testid="ponytail-mode"
+                            value={ponytailMode}
+                            onChange={(event) =>
+                              setPonytailMode(event.target.value as ProjectPonytailModeT)
+                            }
+                          >
+                            {PROJECT_PONYTAIL_OPTIONS.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
                             ))}
                           </Select>
                         </Field>

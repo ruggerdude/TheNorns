@@ -14,15 +14,25 @@ describe("workspace management settings", () => {
 
   test("loads and saves the global NORN.md from Settings", async () => {
     mock.get("/api/v2/admin/rules", {
-      body: { filename: "NORN.md", content: "", version: 0, updated_at: null },
+      body: {
+        filename: "NORN.md",
+        content: "",
+        ponytail_mode: "full",
+        version: 0,
+        updated_at: null,
+      },
     });
     mock.put("/api/v2/admin/rules", (_url, init) => {
       const body = JSON.parse(init?.body as string);
-      expect(body).toEqual({ content: "# Global rules\n\n- Keep updates concise." });
+      expect(body).toEqual({
+        content: "# Global rules\n\n- Keep updates concise.",
+        ponytail_mode: "ultra",
+      });
       return {
         body: {
           filename: "NORN.md",
           content: body.content,
+          ponytail_mode: body.ponytail_mode,
           version: 1,
           updated_at: "2026-07-31T01:00:00.000Z",
         },
@@ -34,6 +44,10 @@ describe("workspace management settings", () => {
     render(<GlobalRulesSettings onUnauthorized={vi.fn()} />);
     const editor = await screen.findByRole("textbox", { name: "Global NORN.md" });
     await user.type(editor, "# Global rules\n\n- Keep updates concise.");
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "Global Ponytail mode" }),
+      "ultra",
+    );
     await user.click(screen.getByRole("button", { name: "Save global rules" }));
 
     expect(await screen.findByText("v1")).toBeVisible();

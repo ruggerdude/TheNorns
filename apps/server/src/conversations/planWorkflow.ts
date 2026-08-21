@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { AdapterError, type LlmAdapter, type ProviderName } from "@norns/adapters";
 import {
+  type PonytailModeT,
+  type ProjectPonytailModeT,
   type UsageEventT,
   V2ConfirmConversationActionInput,
   type V2ConfirmConversationActionInputT,
@@ -51,6 +53,7 @@ import type {
   PlanningRunExecutionDto,
 } from "../planning/runService.js";
 import { planContentHash } from "../planning/session.js";
+import { ponytailPolicy, resolvePonytailMode } from "../projects/ponytailPolicy.js";
 
 type PlanDiff = typeof V2WorkPlanVersionDiff._type;
 
@@ -150,6 +153,7 @@ export interface ConversationDevelopmentStart {
   execution_started: boolean | null;
   execution_detail: string | null;
   planning_run_id: string;
+  ponytail_mode: PonytailModeT;
 }
 
 interface ActionRow {
@@ -3006,10 +3010,17 @@ export class ConversationPlanWorkflowService {
     const receiptId = this.makeId("compaction_receipt");
 
     const globalRule = (
-      await tx.query<{ content: string; version: number }>(
-        "SELECT content, version FROM global_rule_settings WHERE id='global'",
+      await tx.query<{ content: string; version: number; ponytail_mode: PonytailModeT }>(
+        "SELECT content, version, ponytail_mode FROM global_rule_settings WHERE id='global'",
       )
     ).rows[0];
+    const projectPonytailMode = (
+      await tx.query<{ ponytail_mode: PonytailModeT | null }>(
+        "SELECT ponytail_mode FROM planning_reviewer_settings WHERE project_id=$1",
+        [action.project_id],
+      )
+    ).rows[0]?.ponytail_mode;
+    const launchPonytailMode = resolvePonytailMode(globalRule?.ponytail_mode, projectPonytailMode);
     const projectRules = await tx.query<{
       id: string;
       content: string;
@@ -3480,8 +3491,8 @@ export class ConversationPlanWorkflowService {
          id, project_id, work_item_id, source_conversation_id,
          execution_conversation_id, action_id, approved_plan_version_id,
          plan_review_id, planning_run_id, handoff_id, decided_by_user_id,
-         status, created_at, updated_at
-       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'held',$12,$12)`,
+         ponytail_mode, status, created_at, updated_at
+       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'held',$13,$13)`,
       [
         kickoffIntentId,
         action.project_id,
@@ -3494,6 +3505,7 @@ export class ConversationPlanWorkflowService {
         review.planning_run_id,
         handoffId,
         userId,
+        launchPonytailMode,
         now,
       ],
     );
@@ -3522,6 +3534,7 @@ export class ConversationPlanWorkflowService {
   async startDevelopment(
     userId: string,
     scope: { projectId: string; workItemId: string; conversationId: string },
+    ponytailMode?: ProjectPonytailModeT,
   ): Promise<ConversationDevelopmentStart> {
     const intentId = await this.transactions.transaction(async (tx) => {
       await this.assertAccess(tx, scope.projectId, userId);
@@ -3541,8 +3554,12 @@ export class ConversationPlanWorkflowService {
         );
       }
       const intent = (
-        await tx.query<{ id: string; status: ConversationDevelopmentStart["status"] }>(
-          `SELECT id, status
+        await tx.query<{
+          id: string;
+          status: ConversationDevelopmentStart["status"];
+          ponytail_mode: PonytailModeT;
+        }>(
+          `SELECT id, status, ponytail_mode
              FROM conversation_kickoff_intents
             WHERE project_id=$1 AND work_item_id=$2 AND execution_conversation_id=$3
             FOR UPDATE`,
@@ -3556,11 +3573,38 @@ export class ConversationPlanWorkflowService {
         );
       }
       if (intent.status === "held") {
+        if (ponytailMode !== undefined) {
+          await tx.query(
+            `INSERT INTO planning_reviewer_settings (project_id, ponytail_mode)
+             VALUES ($1,$2)
+             ON CONFLICT (project_id) DO UPDATE
+               SET ponytail_mode=EXCLUDED.ponytail_mode, updated_at=now()`,
+            [scope.projectId, ponytailMode === "inherit" ? null : ponytailMode],
+          );
+        }
+        const savedModes = (
+          await tx.query<{
+            global_mode: PonytailModeT | null;
+            project_mode: PonytailModeT | null;
+          }>(
+            `SELECT global.ponytail_mode AS global_mode,
+                    setting.ponytail_mode AS project_mode
+               FROM projects project
+               LEFT JOIN global_rule_settings global ON global.id='global'
+               LEFT JOIN planning_reviewer_settings setting ON setting.project_id=project.id
+              WHERE project.id=$1`,
+            [scope.projectId],
+          )
+        ).rows[0];
+        const effectivePonytailMode = resolvePonytailMode(
+          savedModes?.global_mode,
+          savedModes?.project_mode,
+        );
         await tx.query(
           `UPDATE conversation_kickoff_intents
-              SET status='pending', updated_at=$2
+              SET status='pending', ponytail_mode=$3, updated_at=$2
             WHERE id=$1 AND status='held'`,
-          [intent.id, this.now().toISOString()],
+          [intent.id, this.now().toISOString(), effectivePonytailMode],
         );
       }
       return intent.id;
@@ -3569,7 +3613,7 @@ export class ConversationPlanWorkflowService {
     return this.transactions.transaction(async (tx) => {
       const result = (
         await tx.query<ConversationDevelopmentStart>(
-          `SELECT status, execution_started, execution_detail, planning_run_id
+          `SELECT status, execution_started, execution_detail, planning_run_id, ponytail_mode
              FROM conversation_kickoff_intents
             WHERE id=$1`,
           [intentId],
@@ -4218,12 +4262,29 @@ export class ConversationPlanWorkflowService {
       manual_qc_guidance: [],
     };
     const global = (
-      await tx.query<{ content: string; version: number }>(
-        "SELECT content, version FROM global_rule_settings WHERE id='global'",
+      await tx.query<{ content: string; version: number; ponytail_mode: PonytailModeT }>(
+        "SELECT content, version, ponytail_mode FROM global_rule_settings WHERE id='global'",
       )
     ).rows[0];
     if (global?.content.trim()) {
       const item = { id: `global-rules-v${global.version}`, content: global.content };
+      receipt.binding_rules?.push(item);
+      entries.push({
+        kind: "global_rules",
+        ref: item.id,
+        content_hash: canonicalSha256(item),
+      });
+    }
+    const projectPonytailMode = (
+      await tx.query<{ ponytail_mode: PonytailModeT | null }>(
+        "SELECT ponytail_mode FROM planning_reviewer_settings WHERE project_id=$1",
+        [action.project_id],
+      )
+    ).rows[0]?.ponytail_mode;
+    const effectivePonytailMode = resolvePonytailMode(global?.ponytail_mode, projectPonytailMode);
+    const policy = ponytailPolicy(effectivePonytailMode);
+    if (policy) {
+      const item = { id: `ponytail:${effectivePonytailMode}`, content: policy };
       receipt.binding_rules?.push(item);
       entries.push({
         kind: "global_rules",

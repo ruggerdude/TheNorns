@@ -292,11 +292,13 @@ describe.sequential("durable planning run HTTP API", () => {
 
     const first = await inject(server, token, "PUT", "/api/v2/admin/rules", {
       content: "# Global rules\r\n\r\n- Report blockers early.",
+      ponytail_mode: "ultra",
     });
     expect(first.statusCode).toBe(200);
     expect(first.json()).toMatchObject({
       filename: "NORN.md",
       content: "# Global rules\n\n- Report blockers early.",
+      ponytail_mode: "ultra",
       version: 1,
     });
 
@@ -304,7 +306,7 @@ describe.sequential("durable planning run HTTP API", () => {
       content: "# Global rules\n\n- Keep updates concise.",
     });
     expect(second.statusCode).toBe(200);
-    expect(second.json()).toMatchObject({ version: 2 });
+    expect(second.json()).toMatchObject({ ponytail_mode: "ultra", version: 2 });
   });
 
   it("rejects anonymous and non-administrator access to the global NORN.md", async () => {

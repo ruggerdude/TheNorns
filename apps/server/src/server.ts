@@ -41,6 +41,8 @@ import {
   type OwnedDeviceProjectionT,
   PROTOCOL_VERSION,
   PlanContract,
+  PonytailMode,
+  ProjectPonytailMode,
   ReconcileRequest,
   // EXECUTION E3 — the proxied-inference response frame body.
   type RunnerInferenceResponseT,
@@ -2599,11 +2601,18 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       });
     }
     const body = z
-      .object({ content: z.string().max(100_000) })
+      .object({
+        content: z.string().max(100_000),
+        ponytail_mode: PonytailMode.optional(),
+      })
       .strict()
       .safeParse(req.body);
     if (!body.success) return reply.code(400).send({ error: "bad_request" });
-    const rules = await globalRulesService.save(admin.id, body.data.content);
+    const rules = await globalRulesService.save(
+      admin.id,
+      body.data.content,
+      body.data.ponytail_mode,
+    );
     stores.audit(admin.id, "global.rules_updated", `${rules.version}`, now());
     reply.send(rules);
   });
@@ -7654,6 +7663,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           model: z.string().trim().min(1).max(200).optional(),
           qc_mode: z.enum(QC_MODES).optional(),
           allow_unadjudicated_rebuttals: z.boolean().optional(),
+          ponytail_mode: ProjectPonytailMode.optional(),
           // QCP-14: 0 means review is off; drizzle/0071_qc_zero_rounds.sql
           // widened planning_reviewer_settings_default_max_rounds_check to
           // BETWEEN 0 AND 5 to match.
@@ -7668,12 +7678,14 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         if (!(await requireSession(req, reply))) return;
         const { id } = req.params as { id: string };
         try {
-          const [pmSelection, persisted, qcModeSettings, defaultMaxRounds] = await Promise.all([
-            projects.pmSelectionOf(id),
-            planningRunService.reviewerSelectionOf(id),
-            planningRunService.qcModeSettingsOf(id),
-            planningRunService.defaultMaxRoundsOf(id),
-          ]);
+          const [pmSelection, persisted, qcModeSettings, defaultMaxRounds, ponytailSettings] =
+            await Promise.all([
+              projects.pmSelectionOf(id),
+              planningRunService.reviewerSelectionOf(id),
+              planningRunService.qcModeSettingsOf(id),
+              planningRunService.defaultMaxRoundsOf(id),
+              planningRunService.ponytailSettingsOf(id),
+            ]);
           reply.send({
             ...(persisted
               ? { provider: persisted.provider, model: persisted.model, mode: "explicit" as const }
@@ -7685,6 +7697,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
             qc_mode: qcModeSettings.qcMode,
             allow_unadjudicated_rebuttals: qcModeSettings.allowUnadjudicatedRebuttals,
             default_max_rounds: defaultMaxRounds,
+            ponytail_mode: ponytailSettings.projectMode,
+            effective_ponytail_mode: ponytailSettings.effectiveMode,
           });
         } catch (error) {
           projectError(reply, error);
@@ -7714,6 +7728,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
               allowUnadjudicatedRebuttals: body.data.allow_unadjudicated_rebuttals,
               defaultMaxRounds: body.data.default_max_rounds,
             });
+          }
+          if (body.data.ponytail_mode !== undefined) {
+            await planningRunService.setPonytailMode(id, body.data.ponytail_mode);
           }
           reply.code(204).send();
         } catch (error) {

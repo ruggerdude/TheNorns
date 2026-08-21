@@ -1,4 +1,5 @@
 import {
+  ProjectPonytailMode,
   V2CreateConversationPlanChangeProposalInput,
   V2CreateConversationPlanProposalInput,
   V2CreateExecutionActionProposalInput,
@@ -44,6 +45,8 @@ const DevelopmentPausePointsBody = z
     pause_after_completion: z.boolean(),
   })
   .strict();
+
+const DevelopmentStartBody = z.object({ ponytail_mode: ProjectPonytailMode.optional() }).strict();
 
 const CancelReviewBody = z
   .object({
@@ -402,12 +405,17 @@ export function registerConversationPlanRoutes(
       conversationId: string;
     };
     try {
+      const body = DevelopmentStartBody.parse(request.body ?? {});
       return reply.send(
-        await options.workflow.startDevelopment(user.id, {
-          projectId,
-          workItemId,
-          conversationId,
-        }),
+        await options.workflow.startDevelopment(
+          user.id,
+          {
+            projectId,
+            workItemId,
+            conversationId,
+          },
+          body.ponytail_mode,
+        ),
       );
     } catch (error) {
       routeError(reply, error);

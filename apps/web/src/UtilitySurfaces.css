@@ -160,6 +160,33 @@
   background: transparent;
 }
 
+.global-ponytail-setting {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(14rem, 0.7fr);
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+.global-ponytail-setting span,
+.global-ponytail-setting small {
+  display: block;
+}
+
+.global-ponytail-setting small {
+  margin-top: 0.2rem;
+  color: var(--muted);
+}
+
+@media (max-width: 640px) {
+  .global-ponytail-setting {
+    grid-template-columns: 1fr;
+  }
+}
+
 .settings-content .admin-archived-projects {
   padding: 0;
   border: 0;

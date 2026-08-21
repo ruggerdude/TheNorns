@@ -1,11 +1,14 @@
+import { DEFAULT_PONYTAIL_MODE, type PonytailModeT } from "@norns/contracts";
 import { useCallback, useEffect, useState } from "react";
 import "./UtilitySurfaces.css";
 import { ApiError, UnauthorizedError, authHeaders } from "./auth";
-import { Alert, Badge, Button, Spinner, TextArea } from "./ui";
+import { PONYTAIL_OPTIONS } from "./ponytailOptions";
+import { Alert, Badge, Button, Select, Spinner, TextArea } from "./ui";
 
 interface GlobalRulesDto {
   filename: "NORN.md";
   content: string;
+  ponytail_mode: PonytailModeT;
   version: number;
   updated_at: string | null;
 }
@@ -49,6 +52,7 @@ export function GlobalRulesSettings({
 }): React.ReactElement {
   const [rules, setRules] = useState<GlobalRulesDto | null>(null);
   const [draft, setDraft] = useState("");
+  const [ponytailMode, setPonytailMode] = useState<PonytailModeT>(DEFAULT_PONYTAIL_MODE);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -67,6 +71,7 @@ export function GlobalRulesSettings({
         if (!current) return;
         setRules(next);
         setDraft(next.content);
+        setPonytailMode(next.ponytail_mode ?? DEFAULT_PONYTAIL_MODE);
       })
       .catch((caught) => {
         if (current) fail(caught);
@@ -82,9 +87,11 @@ export function GlobalRulesSettings({
     try {
       const next = await settingsRequest<GlobalRulesDto>("PUT", "/api/v2/admin/rules", {
         content: draft,
+        ponytail_mode: ponytailMode,
       });
       setRules(next);
       setDraft(next.content);
+      setPonytailMode(next.ponytail_mode ?? ponytailMode);
     } catch (caught) {
       fail(caught);
     } finally {
@@ -108,6 +115,24 @@ export function GlobalRulesSettings({
       {error ? <Alert>{error}</Alert> : null}
       {rules ? (
         <>
+          <label className="global-ponytail-setting" htmlFor="global-ponytail-mode">
+            <span>
+              <strong>Ponytail default</strong>
+              <small>Applied to planning and development unless a project overrides it.</small>
+            </span>
+            <Select
+              id="global-ponytail-mode"
+              aria-label="Global Ponytail mode"
+              value={ponytailMode}
+              onChange={(event) => setPonytailMode(event.target.value as PonytailModeT)}
+            >
+              {PONYTAIL_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label} — {option.help}
+                </option>
+              ))}
+            </Select>
+          </label>
           <TextArea
             className="global-rules-editor"
             aria-label="Global NORN.md"
@@ -123,7 +148,10 @@ export function GlobalRulesSettings({
             </span>
             <Button
               variant="primary"
-              disabled={saving || draft.trim() === rules.content.trim()}
+              disabled={
+                saving ||
+                (draft.trim() === rules.content.trim() && ponytailMode === rules.ponytail_mode)
+              }
               onClick={() => void save()}
             >
               {saving ? "Saving…" : "Save global rules"}
