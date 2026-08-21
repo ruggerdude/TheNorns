@@ -170,7 +170,12 @@ export class Phase6VisualEvidenceCollectionWorker {
                    AND collection.approved_mockup_version_id=version.id
               )
             ORDER BY delivery.completed_at,run.id,version.id
-            FOR SHARE OF run,version,decision,observation
+            -- Lock only the run. A row lock needs UPDATE privilege on every
+            -- locked table, and the runtime role has only SELECT/INSERT on the
+            -- mockup and observation tables, so locking them fails with 42501
+            -- on every tick once an eligible row exists. Serializing on the
+            -- run is enough: the INSERT below is idempotent (ON CONFLICT).
+            FOR SHARE OF run
             LIMIT 1`,
         )
       ).rows[0];

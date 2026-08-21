@@ -176,3 +176,4 @@
 2026-08-21T14:50Z | EXEC-BOUNDS-SIMPLIFY | Runs bounded by money + wall-clock only: max_turns no longer dispatched; watchdog stop fires only past the run's own time bound + grace (runner gone), not at 15 min of quiet. Coordinator/kickoff/speed-policy/recovery/phaseLaunch suites green, tsc+biome clean
 2026-08-21T15:40Z | VERIFY-LONGRUNNING | Drop dev servers/watchers from task-package verification commands (npm run dev killed every StrumSheetX1 attempt); PM told test_commands must terminate
 2026-08-21T15:41Z | LOG-VERIFY-DETAIL | Verification failures now name the failing command + exit code (runner reason + web status line)
+2026-08-21T22:05Z | VIS-EVIDENCE-LOCK | Lock only the run in the visual-evidence seeder; FOR SHARE across mockup/observation tables was denied (42501) every tick

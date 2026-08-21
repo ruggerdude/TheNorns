@@ -1532,3 +1532,11 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   exited -1"; the web status line prefers the named failed commands
   (`failedVerificationSummary`) over the generic detail. Runner part needs an
   agent rebuild/reinstall; web part ships with the server.
+- [x] ✅ VIS-EVIDENCE-LOCK — Production logged `permission denied for table
+  conversation_mockup_versions` (42501) every second from the Phase 6
+  visual-evidence worker. Root cause: `seedOne` ended its SELECT with
+  `FOR SHARE OF run,version,decision,observation`; a row lock needs UPDATE
+  privilege on each locked table and `norns_app` has only INSERT,SELECT on the
+  mockup/observation tables. Latent since 2026-07-27, fired once an eligible
+  row existed. Fix: lock only `run` (the INSERT is already idempotent via ON
+  CONFLICT). Verify by the spam stopping in `railway logs` after deploy.
