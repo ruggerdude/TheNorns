@@ -114,7 +114,7 @@ export async function recommendProjectAllocation(options: {
     `Staff the project "${options.projectName}" for its current workflow graph.`,
     `Objective: ${options.objective}`,
     "Choose the best implementation provider/model, worker count, cross-provider reviewer, and USD budget for every node.",
-    "For every OpenAI implementation model, choose a Codex reasoning_effort from minimal, low, medium, high, or xhigh based on task complexity and risk. Use null for non-OpenAI implementation models.",
+    "For every OpenAI implementation model, choose a Codex reasoning_effort from low, medium, high, or xhigh based on task complexity and risk. Use null for non-OpenAI implementation models.",
     "Use only the approved models listed below. Prefer the least expensive model that can reliably handle the work, but spend for capability where complexity or risk warrants it.",
     "Use more than one worker only when parallel_safe is true and the work is genuinely divisible. Never use the implementation provider as the reviewer provider.",
     ...constraintLine,

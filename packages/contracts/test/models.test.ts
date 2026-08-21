@@ -6,7 +6,22 @@ import {
   isPmModelForProvider,
   pmModelOption,
   providerForPmModel,
+  reasoningEffortForModel,
 } from "../src/models.js";
+
+describe("reasoningEffortForModel", () => {
+  it("clamps the legacy 'minimal' level (rejected by gpt-5.6) to 'low'", () => {
+    for (const model of ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
+      expect(reasoningEffortForModel(model, "minimal")).toBe("low");
+    }
+  });
+
+  it("passes every supported level through unchanged", () => {
+    for (const effort of ["low", "medium", "high", "xhigh"] as const) {
+      expect(reasoningEffortForModel("gpt-5.6-luna", effort)).toBe(effort);
+    }
+  });
+});
 
 describe("PM model catalog", () => {
   it("maps every selectable model to exactly one provider", () => {

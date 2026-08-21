@@ -11,6 +11,23 @@ export const CodexReasoningEffort = z.enum(["minimal", "low", "medium", "high", 
 export type CodexReasoningEffortT = z.infer<typeof CodexReasoningEffort>;
 export const DEFAULT_CODEX_REASONING_EFFORT: CodexReasoningEffortT = "medium";
 
+/**
+ * Map a reasoning effort to one the target model actually accepts.
+ *
+ * `minimal` was a gpt-5.0-only level; the gpt-5.6 family (every configured
+ * OpenAI model) dropped it — passing `minimal` there is a hard
+ * `unsupported_value` 400 that fails the run before it writes a line. A planner
+ * may still validly pick `minimal` from the enum, so clamp it to the nearest
+ * supported level (`low`) at the dispatch boundary rather than letting the
+ * model reject it. Revisit if a model that supports `minimal` is ever added.
+ */
+export function reasoningEffortForModel(
+  _model: string,
+  effort: CodexReasoningEffortT,
+): CodexReasoningEffortT {
+  return effort === "minimal" ? "low" : effort;
+}
+
 export const AnthropicPmModel = z.enum([
   "claude-fable-5",
   "claude-opus-4-8",

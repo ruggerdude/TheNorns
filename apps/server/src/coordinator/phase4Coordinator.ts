@@ -9,6 +9,7 @@ import {
   type V2TaskInputFileT,
   V2_HUMAN_WAIT_CHANNEL_VERSION,
   V2_HUMAN_WAIT_INSTRUCTION_HASH,
+  reasoningEffortForModel,
   v2CommandIdForDispatchJob,
 } from "@norns/contracts";
 import type { PostgresDeviceActionAuthorization } from "../devices/actionAuthorization.js";
@@ -831,7 +832,11 @@ export class Phase4Coordinator {
         provider: row.provider,
         model: row.model,
         credential_mode: row.credential_mode,
-        ...(row.reasoning_effort ? { reasoning_effort: row.reasoning_effort } : {}),
+        // Clamp a legacy `minimal` effort (a valid enum choice, but rejected by
+        // every gpt-5.6 model) to a supported level so the model never 400s.
+        ...(row.reasoning_effort
+          ? { reasoning_effort: reasoningEffortForModel(row.model, row.reasoning_effort) }
+          : {}),
         context_refs: contextRefs,
         input_files: input.input_files ?? [],
         ...(taskPackageDispatch
