@@ -901,17 +901,18 @@ export class V2RunnerExecutor {
             })();
     const resumeSessionId =
       command.continuation?.resume_session_id ?? command.recovery?.resume_session_id;
+    const runtimeOptions = {
+      runId: command.run_id,
+      taskId: command.task_id,
+      maxOutputTokens: command.max_output_tokens,
+      provider: command.provider,
+      credentialMode,
+      ...(command.reasoning_effort ? { reasoningEffort: command.reasoning_effort } : {}),
+      ...(resumeSessionId ? { resumeSessionId } : {}),
+    };
     const runtime =
       typeof runtimeProvider === "function"
-        ? runtimeProvider(command.model, {
-            runId: command.run_id,
-            taskId: command.task_id,
-            maxOutputTokens: command.max_output_tokens,
-            provider: command.provider,
-            credentialMode,
-            ...(command.reasoning_effort ? { reasoningEffort: command.reasoning_effort } : {}),
-            ...(resumeSessionId ? { resumeSessionId } : {}),
-          })
+        ? runtimeProvider(command.model, runtimeOptions)
         : runtimeProvider;
     let scratch: string | undefined;
     let runtimeStateDirectory: string | undefined;
@@ -1374,7 +1375,7 @@ export class V2RunnerExecutor {
             fullTaskPrompt,
           ].join("\n\n")
         : fullTaskPrompt;
-      let runtimeResult = await runtime.run({
+      const runRequest: Parameters<typeof runtime.run>[0] = {
         runId: command.run_id,
         worktreePath: worktree.path,
         prompt: runtimePrompt,
@@ -1406,7 +1407,31 @@ export class V2RunnerExecutor {
               this.runner.scratch_root,
             ]),
           }),
-      });
+      };
+      let runtimeResult = await runtime.run(runRequest);
+      // EXEC-RUNTIME-FAILURE-IS-FAILURE (part 1): a dropped model stream ends
+      // the session mid-task (live: "API Error: Connection closed mid-response"
+      // 13 minutes into a task). Resume that same session once before treating
+      // the run as failed. A bound (turns/budget), a permission refusal, or a
+      // cancel is a real stop and is never resumed.
+      if (
+        runtimeResult.outcome === "failed" &&
+        runtimeResult.sessionId &&
+        !controller.signal.aborted &&
+        typeof runtimeProvider === "function" &&
+        !/^(error_max|permission_denied)/.test(runtimeResult.stopReason ?? "")
+      ) {
+        emit({
+          kind: "run_log",
+          run_id: command.run_id,
+          chunk: `coding runtime failed (${runtimeResult.stopReason ?? runtimeResult.detail.slice(0, 160)}); resuming the same session once before giving up`,
+        });
+        const resumedRuntime = runtimeProvider(command.model, {
+          ...runtimeOptions,
+          resumeSessionId: runtimeResult.sessionId,
+        });
+        runtimeResult = await resumedRuntime.run({ ...runRequest, resumeFallbackPrompt });
+      }
       processTreeReaped = processProofBeforeRuntime && runtimeResult.process_tree_reaped === true;
       let humanWaitEnvelope: HumanWaitEnvelopeT | null;
       try {
@@ -1971,7 +1996,20 @@ export class V2RunnerExecutor {
         });
       }
 
-      if (verification.passed) {
+      // EXEC-RUNTIME-FAILURE-IS-FAILURE (part 2): a run is a success only when
+      // the coding runtime COMPLETED and verification passed. A runtime that
+      // stopped early (dropped stream, crash) with tests still green is not a
+      // finished task — live, a task that delivered one of five acceptance
+      // criteria was marked completed this way and the phase could not finish.
+      // Its partial work is still published (above) so the standard retry
+      // resumes the session from that commit; the run itself lands `failed`.
+      const runtimeFinished = runtimeResult.outcome === "completed";
+      const succeeded = verification.passed && runtimeFinished;
+      const unfinishedReason = `coding runtime ${runtimeResult.outcome} (${runtimeResult.stopReason ?? runtimeResult.detail.slice(0, 160)}) before finishing the task; its partial work is published at ${commit} — retry to resume the session`;
+      if (verification.passed && !runtimeFinished) {
+        emitFailure("runtime", "runner_runtime_unsuccessful", unfinishedReason);
+      }
+      if (succeeded) {
         if (capabilities.knowledge_transport) {
           emit({
             kind: "knowledge_delta",
@@ -2026,14 +2064,14 @@ export class V2RunnerExecutor {
         emitFailure("verification", "runner_verification_failed", failureReason);
       }
       return finish({
-        outcome: verification.passed ? "succeeded" : "failed",
+        outcome: succeeded ? "succeeded" : "failed",
         commit_sha: commit,
         verification_passed: verification.passed,
         usage: runtimeResult.usage,
         empty: false,
         publication,
         session_id: sessionId,
-        reason: verification.passed ? null : failureReason,
+        reason: succeeded ? null : verification.passed ? unfinishedReason : failureReason,
       });
     } catch (error) {
       // EXECUTION E11 — an abort mid-stage typically surfaces as a thrown

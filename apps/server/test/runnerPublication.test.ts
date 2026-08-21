@@ -396,12 +396,17 @@ describe("EXECUTION E4 — a run's work is published, and verification is real",
       knowledge_transport: true,
     });
 
+    // EXEC-RUNTIME-FAILURE-IS-FAILURE: the work is verified and published so
+    // nothing is lost, but a runtime that stopped before finishing is NOT a
+    // finished task. The run lands failed with a resumable session, so the
+    // standard retry continues it — it is never dressed up as a success.
     expect(result).toMatchObject({
-      outcome: "succeeded",
+      outcome: "failed",
       verification_passed: true,
       empty: false,
       session_id: "claude-session-after-commit",
     });
+    expect(result.reason).toContain("retry to resume");
     expect(result.publication).toMatchObject({ outcome: "pushed", commit: result.commit_sha });
     expect(events).toContainEqual(
       expect.objectContaining({
@@ -418,12 +423,60 @@ describe("EXECUTION E4 — a run's work is published, and verification is real",
         commit_sha: result.commit_sha,
       }),
     );
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ kind: "knowledge_handoff", status: "completed" }),
+    );
+    expect(events).not.toContainEqual(
+      expect.objectContaining({ kind: "run_status", status: "completed" }),
+    );
+  });
+
+  it("RESUME: a dropped model stream is resumed once in the same run, and the resumed session's work succeeds", async () => {
+    // Live: "API Error: Connection closed mid-response" 13 minutes into a task.
+    const h = await harness(cleanup);
+    const api = githubApi();
+    const events: EventPayloadT[] = [];
+    const constructed: Array<string | undefined> = [];
+    const committing = committingRuntime("agent.txt", "finished after resume\n");
+    const provider = (_model: string, options: { resumeSessionId?: string }): CodingRuntime => {
+      constructed.push(options.resumeSessionId);
+      if (options.resumeSessionId === "sess-dropped") return committing;
+      return {
+        ...idleRuntime,
+        run: async () => ({
+          outcome: "failed",
+          detail:
+            "API Error: Connection closed mid-response. The response above may be incomplete.",
+          stopReason: "stop_sequence",
+          sessionId: "sess-dropped",
+          usage: { input_tokens: 10, output_tokens: 1, usage_source: "runtime_report" },
+        }),
+      };
+    };
+    const result = await new V2RunnerExecutor(
+      { id: "runner-1", generation: 3, scratch_root: h.root },
+      h.registry,
+      contextLoader(),
+      new GitWorktreeManager(h.worktreeRoot),
+      new Map([["codex", provider as unknown as CodingRuntime]]),
+      new CommandPolicyVerifier(policies(PASSING)),
+      undefined,
+      new GitPublisher({
+        repositorySlug: "acme/widgets",
+        token: "test-token",
+        fetchImpl: api.fetchImpl,
+      }),
+    ).execute(dispatchCommand({ expected_revision: h.base }), (event) => events.push(event));
+
+    expect(constructed).toEqual([undefined, "sess-dropped"]);
+    expect(result).toMatchObject({ outcome: "succeeded", verification_passed: true, empty: false });
+    expect(await git(h.remote, "show", "refs/heads/norns/task-task-1:agent.txt")).toBe(
+      "finished after resume",
+    );
     expect(events).toContainEqual(
       expect.objectContaining({
-        kind: "knowledge_handoff",
-        status: "completed",
-        commit: result.commit_sha,
-        files_changed: ["README.md"],
+        kind: "run_log",
+        chunk: expect.stringContaining("resuming the same session once"),
       }),
     );
   });

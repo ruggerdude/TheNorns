@@ -1549,7 +1549,13 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   the runner/gateway), the runner's usable credential modes, verification
   commands are present and terminating, binding connected, budget. Every
   failure this week was an unchecked assumption discovered 10 min into a run.
-- [ ] 📋 PIPE-SMOKE — Repeatable golden-path smoke run after every deploy, run
+- [ ] 🔄 PIPE-SMOKE — FIRST PASS GREEN 2026-08-21 22:33Z: quick run on the throwaway
+  Verify-test project, unattended, after deploy a36baaa → approved → dispatched →
+  agent coded → verified → integrated (verify-live main 5067a80 → d558de3, 2/2
+  tests on a fresh clone). Procedure = scratchpad smoke-golden-path.js (browser
+  API) + a GitHub/DB watcher. Still open: the phased/QC variant, the
+  realistic-shape (monorepo) variant, and automating it on deploy.
+  Original spec: Repeatable golden-path smoke run after every deploy, run
   by the assistant not the user: throwaway repo → quick push → verify →
   integrate → cleanup, and the same for phased/QC. Then a realistic-shape
   smoke (monorepo with workspaces + PM-authored plan), since the toy repo
@@ -1574,3 +1580,64 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   published/integrated as the deliverable. A HEAD at the base is still empty.
   Real-git regression test (prior commit on the task branch, idle runtime →
   verified + integrated, main advanced). Needs an agent reinstall.
+- [ ] 🟡 AGENT-BUILD-IDENTITY — Every local-agent build reports runner version
+  `0.1.0`, so after a reinstall nothing can say which build is installed; the
+  only way to confirm a runner fix landed was grepping the installed dist for
+  a string. Stamp the build (git sha + build time) into the packed runner and
+  surface it in the agent's status/`agent-host.json` and the server's
+  connections view. Cheap and it removes a whole class of "did the reinstall
+  take?" guessing.
+- [ ] 🟡 AGENT-DOWNLOAD-STALE — The in-app "Download for macOS" button points at
+  `NORNS_MACOS_AGENT_DOWNLOAD_URL` = GitHub release agent-v0.4.6 (Aug 19),
+  which predates every runner fix shipped since; the installs that actually
+  carried fixes were built locally via `scripts/package-macos-agent.sh`. Either
+  republish the release on each runner change (automate in CI from the packed
+  tarball) or have the app fetch the runner from the server's
+  `/install/runner/<version>/norns-runner.tgz` (already served, with sha256)
+  so a deploy updates agents without a hand-built pkg. Until then the button
+  silently hands out a stale agent.
+
+## Why core-engine "completed" without finishing (2026-08-21, StrumSheetX1)
+
+- [x] ✅ EXEC-RUNTIME-FAILURE-IS-FAILURE — FIXED (runner): a run succeeds only when
+  the runtime COMPLETED and verification passed; a stopped runtime publishes its
+  partial work but lands `failed` with a resumable session; a dropped stream is
+  resumed once in-run. Tests: max-turns contract re-specified, RESUME + RETRY
+  real-git cases; executor suites 73/73. Harness note: ProcessRuntime scripts
+  now end with `exit 0` (the executor appends prose; the old rule had masked the
+  resulting non-zero exit). Needs agent reinstall (pkg 0.4.15). Original: Root cause of the phase's bad task:
+  13 min into core-engine the model API stream dropped ("Connection closed
+  mid-response"); the runtime ended (stop_reason stop_sequence); the runner
+  checkpointed the partial files, ran verification (`npm test --workspace=
+  server`, already green from foundation), published, and settled the run
+  SUCCEEDED → task completed with none of its acceptance criteria met. The
+  rule "runtime failed + verification passed ⇒ succeeded" is enshrined in
+  runnerPublication.test ("independently verifies and publishes a commit made
+  before the runtime hit max turns"). Fix (runner): a runtime that did not
+  complete publishes its partial work but settles `failed` with the named
+  stop reason, so the standard retry resumes it (resume_session_id is already
+  carried; carried-work retry landed today). Auto-resume the session once on
+  a dropped stream before failing. Needs an agent rebuild + reinstall.
+- [ ] 🔴 PHASE-VERIFY-REWORK — David's design: when the phase's tasks are done,
+  verification/testing runs and, on a dependency/acceptance defect, TRIGGERS
+  REWORK of the failing task — instead of today's dead end (the verification
+  task can only ask a human; a completed task is terminal by contract
+  `completed: []`; review needs `in_review`; recovery needs a failed run; plan
+  changes only before execution; human directions are written but never
+  read). Needs: a lifecycle edge for rework (completed → in_progress with a
+  superseding run), a route/action the verification agent or a human can
+  invoke with the defect as direction, then re-run verification. Design first.
+- [ ] 🟡 EXEC-PARALLEL-INTEGRATE — Two parallel tasks from one base: the second
+  fast-forward fails (`conflict`, never forced) and its verified commit stays
+  on the branch (core-engine 245f41b8 never reached main; merges cleanly).
+  publication.ts has the `ponytail:` marker for a 3-way merge; do it: merge
+  base into the task branch when clean, re-verify, then fast-forward.
+- [ ] 🟡 EXEC-GATEWAY-STREAM-DROP — Find why a long Opus stream through the
+  gateway closed mid-response (Railway edge timeout? provider?). Logs had
+  rotated by the time it was investigated; add gateway-side logging of stream
+  aborts with duration + bytes so the next one is diagnosable.
+- [ ] 🟡 DECISION-RESOLVE-NOT-DELIVERED — Resolving a human-wait's decision
+  point (`/decision-points/:id/resolve`, 200, approval + record written) did
+  not answer the wait: human_waits stayed `awaiting_human`, no resume reached
+  the runner. The UI reply path must use a different route; make the resolve
+  route deliver (or reject with why).

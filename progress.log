@@ -179,3 +179,6 @@
 2026-08-21T22:05Z | VIS-EVIDENCE-LOCK | Lock only the run in the visual-evidence seeder; FOR SHARE across mockup/observation tables was denied (42501) every tick
 2026-08-21T22:50Z | EXEC-RETRY-DEADLOCK | Recovery retry/cancel re-run on transient Postgres deadlock/serialization instead of surfacing a 409
 2026-08-21T23:20Z | EXEC-RETRY-CARRIED-WORK | Runner verifies+integrates carried-forward work on a retry instead of failing it as an empty run
+2026-08-21T22:31Z | STRUMSHEETX1-FOUNDATION | First real-project task completed end-to-end: attempt 7 verified (npm test 7/7) and integrated; main ed3c7c4 -> 4618bea; phase auto-dispatched next 2 of 4 tasks
+2026-08-21T22:34Z | PIPE-SMOKE | First unattended golden-path smoke passed post-deploy: verify-live main 5067a80 -> d558de3 (2/2 tests)
+2026-08-22T00:05Z | EXEC-RUNTIME-FAILURE-IS-FAILURE | Stopped/dropped runtime no longer reported as success; partial work published + run failed with resumable session; one in-run resume on dropped stream

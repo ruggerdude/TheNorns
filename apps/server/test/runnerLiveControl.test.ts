@@ -536,6 +536,8 @@ describe("EXECUTION E11 — cancel reaches a live coding run", () => {
         "node -e \"require('fs').writeFileSync('agent.txt','all done\\n')\"",
         "git add -A",
         'git commit -q -m "agent work"',
+        // The executor appends briefing prose after the script; end before it.
+        "exit 0",
       ].join("\n"),
       liveRuns,
       githubApi().fetchImpl,
@@ -576,6 +578,10 @@ describe("EXECUTION E11 — send_message delivery", () => {
           "node -e \"require('fs').writeFileSync('answer.txt', process.argv[1])\" \"$answer\"",
           "git add -A",
           'git commit -q -m "acted on the human answer"',
+          // The executor appends briefing prose after the script; the shell
+          // must not run into it. A runtime that did not complete is now a
+          // failed run (EXEC-RUNTIME-FAILURE-IS-FAILURE), no longer masked.
+          "exit 0",
         ].join("\n"),
         liveRuns,
         githubApi().fetchImpl,
@@ -823,6 +829,10 @@ describe("EXECUTION E11 — the three emits E10 was waiting on", () => {
     "node -e \"require('fs').writeFileSync('agent.txt','work\\n')\"",
     "git add -A",
     'git commit -q -m "agent work"',
+    // The executor appends briefing prose after the script; the shell must end
+    // before it. A runtime that did not complete is now a failed run
+    // (EXEC-RUNTIME-FAILURE-IS-FAILURE) — it used to be masked as success.
+    "exit 0",
   ].join("\n");
 
   it("prefers the dispatch command's verification_commands over the local policy map", async () => {
