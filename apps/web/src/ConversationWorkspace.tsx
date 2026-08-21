@@ -4136,6 +4136,20 @@ export function conciseFailureReason(detail: string | null | undefined): string 
   return reason.length > 240 ? `${reason.slice(0, 237)}…` : reason;
 }
 
+/**
+ * The failed verification commands, named, for the status line. The server's
+ * failure_detail for a verification failure is a bare "verification failed";
+ * the command list is what tells a person which check broke.
+ */
+export function failedVerificationSummary(
+  commands: DevelopmentTask["failed_verification_commands"] | undefined,
+): string | null {
+  if (!commands?.length) return null;
+  return `verification failed: ${commands
+    .map((entry) => `\`${entry.command.join(" ")}\` exited ${entry.exit_code}`)
+    .join("; ")}`;
+}
+
 function developmentRunStatusMessage(task: DevelopmentTask | null): string {
   if (!task?.run) {
     return task?.state === "assigned"
@@ -4159,7 +4173,9 @@ function developmentRunStatusMessage(task: DevelopmentTask | null): string {
     case "cancelled":
     case "expired": {
       // Surface WHY at a glance instead of a bare "this attempt failed".
-      const reason = conciseFailureReason(task.run.failure_detail);
+      const reason =
+        failedVerificationSummary(task.failed_verification_commands) ??
+        conciseFailureReason(task.run.failure_detail);
       const lead = reason
         ? `This attempt ${task.run.state}: ${reason}`
         : `This attempt ${task.run.state}`;

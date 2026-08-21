@@ -20,7 +20,26 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ConversationWorkspace, conciseFailureReason } from "./ConversationWorkspace";
+import {
+  ConversationWorkspace,
+  conciseFailureReason,
+  failedVerificationSummary,
+} from "./ConversationWorkspace";
+
+describe("failedVerificationSummary", () => {
+  it("names each failed command and its exit code", () => {
+    expect(
+      failedVerificationSummary([
+        { name: "task-package-test-2", command: ["npm", "run", "dev"], exit_code: -1, output: "" },
+      ]),
+    ).toBe("verification failed: `npm run dev` exited -1");
+  });
+
+  it("is null when no verification command failed", () => {
+    expect(failedVerificationSummary([])).toBeNull();
+    expect(failedVerificationSummary(undefined)).toBeNull();
+  });
+});
 
 describe("conciseFailureReason", () => {
   it("extracts the embedded API error message (the real cause)", () => {

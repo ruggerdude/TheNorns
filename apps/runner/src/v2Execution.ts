@@ -638,11 +638,18 @@ export class CommandPolicyVerifier implements RunnerVerifier {
     }
 
     const passed = results.every((result) => result.passed);
+    // Name what failed. A bare "verification failed" sent three good commits
+    // back to the agent before anyone saw that the culprit was `npm run dev`.
+    const failed = results.filter((result) => !result.passed);
     return {
       passed,
       output: this.render(source, results),
       command_results: results,
-      reason: null,
+      reason: passed
+        ? null
+        : `verification failed: ${failed
+            .map((result) => `\`${result.command.join(" ")}\` exited ${result.exit_code}`)
+            .join("; ")}`,
       hygiene_only: isHygieneOnly(commands),
       process_tree_reaped: results.every((result) => result.process_tree_reaped),
     };

@@ -1513,3 +1513,22 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   retry was refused: "already executing"). A terminally-failed run must release
   its phase's concurrency slot (or the phase must move to blocked/failed).
   Sibling to PIPE-RUNNER-REAP but server-side at the phase level.
+
+## Verification hardening (2026-08-21, from the StrumSheetX1 live failure)
+
+- [x] ✅ VERIFY-LONGRUNNING — Live: StrumSheetX1 foundation attempts 3/4/5 all
+  `runner_verification_failed` although `npm test --workspace=server` passed
+  (7 tests). The PM had put `npm run dev` (concurrently + tsx watch) in the
+  plan's `execution.test_commands`; the server trusted it as a verification
+  command, it never exits, the verifier killed it (exit -1) and failed the run
+  — three commits of good work discarded, agent re-"fixing" correct code.
+  Fix: `isLongRunningCommand()` drops dev servers/watchers (script names
+  dev/start/serve/preview/watch/storybook, `--watch`, bare vite/nodemon/…)
+  from task-package verification commands; PM prompt now says test_commands
+  must be terminating checks. Shared (quick + phased).
+- [x] ✅ LOG-VERIFY-DETAIL — The run's failure_detail for a verification
+  failure was the bare "verification: verification failed" — it never named
+  the command. Runner now sets reason to "verification failed: `npm run dev`
+  exited -1"; the web status line prefers the named failed commands
+  (`failedVerificationSummary`) over the generic detail. Runner part needs an
+  agent rebuild/reinstall; web part ships with the server.
