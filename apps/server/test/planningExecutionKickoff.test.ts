@@ -370,7 +370,8 @@ describe.sequential("phase tab P4: approve auto-starts execution (HTTP, real cha
     );
     expect(command.rows).toHaveLength(1);
     expect((command.rows[0]?.envelope.context_refs ?? []).length).toBeGreaterThan(0);
-    expect(command.rows[0]?.envelope.max_turns).toBe(80);
+    // Budget and wall-clock bound the run; no turn cap is dispatched.
+    expect(command.rows[0]?.envelope.max_turns).toBeUndefined();
 
     // The strategy approval originates from the planning-run decision: its
     // actor is the deciding human and its approved_at is the decision's

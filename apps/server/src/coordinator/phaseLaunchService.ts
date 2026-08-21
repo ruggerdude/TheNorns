@@ -161,16 +161,6 @@ interface SchedulableTaskRow {
   designated_terminal_run_id: string | null;
 }
 
-// Budget and wall-clock are the real bounds; this only stops a runaway loop.
-// Scaffolding a repo routinely takes 50-100+ tool turns, and the first live
-// caps (12/20/30/45) cut every Foundation attempt off mid-file.
-export const MAX_AGENT_TURNS_BY_COMPLEXITY = {
-  S: 40,
-  M: 80,
-  L: 150,
-  XL: 200,
-} as const;
-
 function numeric(value: string | number): number {
   return typeof value === "number" ? value : Number(value);
 }
@@ -495,7 +485,6 @@ export class PhaseLaunchService {
         max_input_tokens: this.policy.maxInputTokens,
         max_output_tokens: this.policy.maxOutputTokens,
         max_duration_seconds: this.policy.maxDurationSeconds,
-        max_turns: MAX_AGENT_TURNS_BY_COMPLEXITY[task.task_complexity] ?? 20,
         issued_at: input.issued_at,
         expires_at: expiresAt,
         ...(input.retry

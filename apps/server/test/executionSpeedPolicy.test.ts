@@ -2,7 +2,6 @@ import { V2WorkPlanContract } from "@norns/contracts";
 import { describe, expect, it } from "vitest";
 import { removeFalsePlanDependencies } from "../src/conversations/planProposal.js";
 import { classifyFailureRetry } from "../src/coordinator/failureRetryPolicy.js";
-import { MAX_AGENT_TURNS_BY_COMPLEXITY } from "../src/coordinator/phaseLaunchService.js";
 
 function module(id: string, path: string, dependencies: string[] = []) {
   return {
@@ -41,10 +40,6 @@ function module(id: string, path: string, dependencies: string[] = []) {
 }
 
 describe("execution speed policies", () => {
-  it("uses bounded complexity-aware agent loops", () => {
-    expect(MAX_AGENT_TURNS_BY_COMPLEXITY).toEqual({ S: 40, M: 80, L: 150, XL: 200 });
-  });
-
   it("never recommends looping a deterministic permission failure", () => {
     expect(classifyFailureRetry("runner_permission_denied", "Edit denied", 1)).toMatchObject({
       retryClass: "configuration",

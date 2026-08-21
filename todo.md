@@ -1424,6 +1424,18 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
 
 ## Runner/execution follow-ups surfaced during live test (2026-08-21)
 
+- [x] ✅ EXEC-BOUNDS-SIMPLIFY — Principle adopted: a run is bounded by MONEY
+  (`max_charge_usd`) and WALL-CLOCK (`max_duration_seconds`), enforced by the
+  runner; everything else is security or observability, not a gate. Done:
+  (1) `max_turns` is no longer dispatched (contract field stays optional;
+  runner still honors it if present) — tool calls are not a unit anyone can
+  set a priori and the cap cut real work off twice; (2) the server watchdog
+  no longer acts as a second, earlier timeout: it requests a stop only when a
+  run has been silent past its OWN time bound + 5 min grace (the runner that
+  should have enforced it is gone); quiet-but-alive runs still get a
+  "stuck run" decision point for a human. Unchanged on purpose: budget,
+  duration, sandbox, command expiry, and the concurrency/phase gates (product
+  decisions that stopped being traps once slots/phases self-release).
 - [x] ✅ EXEC-LIVE-GATE — The two best follow-on investments from the
   2026-08-21 incident, done: (1) `scripts/agent-diagnose.mjs` — one command
   that prints installed agent version/uptime, last dispatch outcomes

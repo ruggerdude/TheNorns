@@ -14,9 +14,9 @@ import {
   sqlV2DecisionPointTransactionFactory,
 } from "../persistence/v2/sqlRepositories.js";
 import { classifyFailureRetry } from "./failureRetryPolicy.js";
-import { SCHEDULABLE_TASKS_SQL } from "./phaseConcurrency.js";
 import { Phase4KnowledgeEventAdapter } from "./phase4KnowledgeEventAdapter.js";
 import { reconcileObsoleteRecoveryDecisions } from "./phase4TerminalReconciliation.js";
+import { SCHEDULABLE_TASKS_SQL } from "./phaseConcurrency.js";
 
 interface StuckRun {
   id: string;
@@ -28,7 +28,14 @@ interface StuckRun {
   attempt: number;
   failure_code: string | null;
   failure_detail: string | null;
+  updated_at: string | Date;
+  max_duration_seconds: number | string | null;
 }
+
+/** Grace past a run's own wall-clock bound before the server concludes the
+ *  runner that should have enforced it is gone. */
+const WATCHDOG_GRACE_MS = 5 * 60_000;
+const DEFAULT_RUN_DURATION_SECONDS = 3_600;
 
 export const QUICK_COMPLETION_RECOVERY_BATCH_SIZE = 25;
 
@@ -141,7 +148,12 @@ export class Phase4RecoveryMonitor {
       const result = await sql.query<StuckRun>(
         `SELECT run.id, run.project_id, run.phase_id, run.task_id,
                 run.state, run.aggregate_version, run.attempt,
-                run.failure_code, run.failure_detail
+                run.failure_code, run.failure_detail, run.updated_at,
+                (SELECT (command.envelope->>'max_duration_seconds')::int
+                   FROM commands command
+                  WHERE command.run_id=run.id
+                  ORDER BY command.created_at DESC, command.command_id DESC
+                  LIMIT 1) AS max_duration_seconds
            FROM agent_runs run
            JOIN tasks task ON task.id=run.task_id
            JOIN phases phase ON phase.id=run.phase_id
@@ -162,12 +174,18 @@ export class Phase4RecoveryMonitor {
     for (const run of stuck) {
       const terminal = ["failed", "expired"].includes(run.state);
       const retryPolicy = classifyFailureRetry(run.failure_code, run.failure_detail, run.attempt);
-      if (!terminal && this.options.onInactiveRun) {
+      // A run is bounded by money and wall-clock, and the runner enforces the
+      // clock. The watchdog is not a second, earlier timeout: it steps in only
+      // when a run has been silent past its OWN bound, i.e. the runner that
+      // should have stopped it is gone. Quiet-but-alive runs get a decision
+      // point below, never a stop.
+      const boundMs = (Number(run.max_duration_seconds) || DEFAULT_RUN_DURATION_SECONDS) * 1_000;
+      const silentMs = now.getTime() - new Date(run.updated_at).getTime();
+      if (!terminal && this.options.onInactiveRun && silentMs >= boundMs + WATCHDOG_GRACE_MS) {
         try {
-          const inactiveMinutes = Math.max(1, Math.round(stuckAfterMs / 60_000));
           await this.options.onInactiveRun(
             run.id,
-            `run emitted no activity for ${inactiveMinutes} minute${inactiveMinutes === 1 ? "" : "s"}`,
+            `run silent for ${Math.round(silentMs / 60_000)} minutes, past its ${Math.round(boundMs / 60_000)}-minute time bound; the runner did not report an outcome`,
             reconciledAt,
           );
           watchdogStopRequests += 1;

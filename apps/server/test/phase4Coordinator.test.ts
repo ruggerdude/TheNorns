@@ -1595,7 +1595,8 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
     expect(watchdogStops).toEqual([
       {
         runId: scheduled.run_id,
-        reason: "run emitted no activity for 1 minute",
+        reason:
+          "run silent for 70 minutes, past its 15-minute time bound; the runner did not report an outcome",
         detectedAt: "2026-07-16T20:10:00.000Z",
       },
     ]);
