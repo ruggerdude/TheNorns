@@ -379,6 +379,22 @@ export class Phase4EventProcessor {
                 to: runTarget,
                 reason: `command ${event.payload.state} before successful completion`,
               });
+              // Keep the runner's own words (e.g. a rejection reason) so the
+              // UI can say WHY instead of a bare "this attempt failed".
+              await sql.query(
+                `UPDATE agent_runs
+                    SET failure_code=COALESCE(failure_code,$2),
+                        failure_detail=COALESCE(failure_detail,$3),
+                        finished_at=COALESCE(finished_at,$4)
+                  WHERE id=$1`,
+                [
+                  scope.id,
+                  `runner_command_${event.payload.state}`,
+                  event.payload.detail.trim() ||
+                    `command ${event.payload.state} before successful completion`,
+                  event.occurred_at,
+                ],
+              );
             }
             const task = await lifecycle.lockTaskLifecycle(scope.task_id);
             if (task && !["completed", "failed", "cancelled"].includes(task.state)) {

@@ -1361,7 +1361,14 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   frontend recovery triggers ingest, and the quick path never reaches it.
   Auto-ingest at project creation (or server-side on the missing-revision
   dispatch error). Shared.
-- [ ] 🟡 PIPE-VALIDATE — After deploy, drive BOTH end-to-end live from fresh
+- [x] ✅ PIPE-VALIDATE — Live GREEN end-to-end confirmed on ruggerdude/verify-live
+  (empty repo): plan → auto-approve → dispatch (greenfield marker cleared the
+  verification gate) → agent coded package.json+src/math.js+add.test.js →
+  verification auto-detected & ran `npm test` (1 pass) → integrated: main
+  advanced 8435fd5 → 5067a80. The only blockers were runner CREDENTIAL config
+  (Codex 'minimal' effort — fixed by the clamp; Claude subscription login
+  unavailable — used api/gateway mode), both surfaced instantly by the new
+  failure logging. Earlier drive (superseded) from fresh
   projects: (1) a quick push and (2) a phased plan, each through plan →
   implement → verify → integrate onto `main`. Definition of done for this
   batch.
@@ -1411,6 +1418,20 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
 
 ## Runner/execution follow-ups surfaced during live test (2026-08-21)
 
+- [x] ✅ EXEC-CANCEL-WEDGE — Live (strumsheetx1 Foundation, attempt 1): the
+  runner REJECTED the dispatch ("local emergency stop is engaged") and the UI
+  showed a bare "This attempt failed". Root cause: any server-delivered device
+  cancellation (`emergency_stop` — now also the 15-min watchdog from
+  fdcd7bf) ran `stopAllManagedForEvidence`, which set the runner-wide
+  `executionPaused` flag; the server replays every unresolved cancellation on
+  each reconnect (a stop for a long-dead run can never be proven exited), so a
+  restart re-armed the pause and every later dispatch was rejected. Fix:
+  runner stops only the named run and never touches the local dispatch kill
+  switch; server persists the ack `detail` into `failure_code/failure_detail`
+  so a rejection states its reason; server also stops replaying cancellations
+  whose run is already terminal (so the installed 0.4.11 agent un-wedges on
+  its next reconnect). Agent 0.4.12 packaged (sha256 8298c6ab…); install it
+  for the runner half. Live re-run on strumsheetx1 still to be observed.
 - [x] ✅ EXEC-CODEX-NOOUTPUT — Root cause found via the existing run-log: the
   Codex/OpenAI runtime was sent `reasoning_effort: 'minimal'`, which every
   gpt-5.6 model rejects (`unsupported_value`, param reasoning.effort) → model

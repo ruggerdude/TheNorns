@@ -1042,6 +1042,14 @@ describe.sequential("Phase 4 durable coordinator scheduling", () => {
       reservation: "released",
       outcome: "rejected",
     });
+    const reason = await pg.query<{ failure_code: string; failure_detail: string }>(
+      "SELECT failure_code, failure_detail FROM agent_runs WHERE id=$1",
+      [scheduled.run_id],
+    );
+    expect(reason.rows[0]).toEqual({
+      failure_code: "runner_command_rejected",
+      failure_detail: "runner execution is not configured",
+    });
   });
 
   it("converges a structured pre-start failure once from assigned without rejecting replay", async () => {

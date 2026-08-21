@@ -195,6 +195,13 @@ export class DeviceOnlineControlBroker {
            AND state IN (
              'cancellation_requested','runner_acknowledged','unconfirmed_offline'
            )
+           -- A stop for a run that is already terminal here has nothing left
+           -- to stop; replaying it on every reconnect only disturbs the device.
+           AND NOT EXISTS (
+             SELECT 1 FROM agent_runs run
+              WHERE run.id=device_run_cancellations.run_id
+                AND run.state IN ('succeeded','failed','cancelled','expired')
+           )
          ORDER BY requested_at,run_id`,
         [
           connection.identity.device_id,

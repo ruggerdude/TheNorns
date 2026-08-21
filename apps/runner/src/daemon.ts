@@ -212,23 +212,14 @@ export class RunnerDaemon {
           ...(this.opts.deviceControl.evidenceRetryMs !== undefined
             ? { evidenceRetryMs: this.opts.deviceControl.evidenceRetryMs }
             : {}),
-          stopRun: async (runId, reason, publication) => {
-            const result = await this.liveRuns.cancelAndWait(runId, reason, {
-              publication,
-            });
-            return {
-              target_found: result.found,
-              process_tree_reaped: result.process_tree_reaped,
-              ...(result.eventual_terminal
-                ? {
-                    eventual_process_tree_reaped: result.eventual_terminal.then(
-                      (facts) => facts.process_tree_reaped,
-                    ),
-                  }
-                : {}),
-            };
-          },
-          stopAll: (runId, reason) => this.stopAllManagedForEvidence(runId, reason),
+          stopRun: (runId, reason, publication) =>
+            this.stopRunForEvidence(runId, reason, publication),
+          // A server-delivered emergency/watchdog stop names ONE run. It must
+          // not touch sibling runs and must never engage the local dispatch
+          // kill switch: the server replays every unresolved cancellation on
+          // each reconnect, so a runner-wide pause here wedged the device
+          // (every later dispatch rejected) until the stale record was gone.
+          stopAll: (runId, reason) => this.stopRunForEvidence(runId, reason, "allow_committed"),
           fence: (reason) => this.fenceInstallation(reason),
           ...(this.opts.workspaces
             ? {
@@ -538,33 +529,23 @@ export class RunnerDaemon {
     return this.stateFile;
   }
 
-  private async stopAllManagedForEvidence(
+  private async stopRunForEvidence(
     runId: string,
     reason: string,
+    publication: "allow_committed" | "fenced",
   ): Promise<DeviceCancellationStopResult> {
-    this.executionPaused = true;
-    const targetWasLive = this.liveRuns.isLive(runId);
-    const priorTarget = this.liveRuns.terminalFacts(runId);
-    const targetEventual = this.liveRuns.waitForTerminal(runId);
-    this.inference.abortAll(reason);
-    this.executor.cancelAll();
-    const stopped = await this.liveRuns.cancelAllAndWait(reason);
-    const target = this.liveRuns.terminalFacts(runId) ?? priorTarget;
-    const initial = {
-      target_found: targetWasLive || target !== null,
-      process_tree_reaped: target?.process_tree_reaped === true && stopped.unconfirmed === 0,
+    const result = await this.liveRuns.cancelAndWait(runId, reason, { publication });
+    return {
+      target_found: result.found,
+      process_tree_reaped: result.process_tree_reaped,
+      ...(result.eventual_terminal
+        ? {
+            eventual_process_tree_reaped: result.eventual_terminal.then(
+              (facts) => facts.process_tree_reaped,
+            ),
+          }
+        : {}),
     };
-    const allEventual = stopped.eventual;
-    if (!initial.process_tree_reaped && targetEventual && allEventual) {
-      return {
-        ...initial,
-        eventual_process_tree_reaped: Promise.all([targetEventual, allEventual]).then(
-          ([targetFacts, allFacts]) =>
-            targetFacts.process_tree_reaped && allFacts.unconfirmed === 0,
-        ),
-      };
-    }
-    return initial;
   }
 
   private fenceInstallation(reason: string): void {

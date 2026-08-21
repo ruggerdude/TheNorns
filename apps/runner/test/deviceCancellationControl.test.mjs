@@ -968,3 +968,89 @@ test("Windows best-effort containment is explicit and never fabricates reaping p
     process_tree_reaped: false,
   });
 });
+
+test("a server stop for a run that is not live here leaves sibling runs and dispatch alone", async () => {
+  const dataDir = temporaryDataDir();
+  const relay = await createRelay();
+  const credential = pendingCredential(dataDir);
+  credential.prepare();
+  const identity = {
+    device_id: "device-daemon-stale",
+    credential_id: "credential-daemon-stale",
+    generation: 9,
+  };
+  const { privateKey } = generateKeyPairSync("ed25519");
+  new RunnerStateFile(dataDir, {
+    runner_id: "runner-1",
+    private_key_pem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    generation: 1,
+  });
+  const daemon = new RunnerDaemon({
+    serverUrl: relay.origin,
+    runnerId: "runner-1",
+    dataDir,
+    reconnect: false,
+    liveRunConfirmationTimeoutMs: 30,
+    deviceControl: {
+      identity,
+      sign: (transcript) => credential.sign(transcript),
+      reconnect: false,
+      evidenceRetryMs: 50,
+    },
+  });
+  daemon.loadState();
+  let siblingCancelled = 0;
+  const release = daemon.liveRuns.register({
+    runId: "run-sibling-live",
+    runtimeName: "process",
+    capabilities: new ProcessRuntime().capabilities,
+    cancel: () => {
+      siblingCancelled += 1;
+    },
+    session: () => null,
+  });
+  try {
+    daemon.connect();
+    await waitFor(() => daemon.deviceControlConnected, "daemon device connection");
+    const deviceConnection = relay.connections.find((connection) =>
+      connection.frames.some((frame) => frame.type === "device_auth"),
+    );
+    assert.ok(deviceConnection);
+    // A replayed watchdog/emergency stop for a run that died long ago.
+    deviceConnection.socket.send(
+      JSON.stringify({
+        type: "device_cancellation_request",
+        ...identity,
+        run_id: "run-long-dead",
+        cause: "emergency_stop",
+        requested_at: "2026-08-21T01:43:50.000Z",
+        publication_fenced: false,
+      }),
+    );
+    await waitFor(
+      () =>
+        deviceConnection.frames.some(
+          (frame) =>
+            frame.type === "device_cancellation_evidence" &&
+            frame.evidence_state === "runner_acknowledged",
+        ),
+      "stale stop acknowledgement",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(siblingCancelled, 0, "an unrelated live run must keep running");
+    assert.equal(
+      deviceConnection.frames.some(
+        (frame) =>
+          frame.type === "device_cancellation_evidence" &&
+          frame.evidence_state === "process_exited",
+      ),
+      false,
+      "no exit proof may be fabricated for a run that was never live here",
+    );
+  } finally {
+    release("cancelled", { process_tree_reaped: true });
+    daemon.stop();
+    await relay.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
