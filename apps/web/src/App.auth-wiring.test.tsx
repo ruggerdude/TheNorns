@@ -126,7 +126,7 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     expect(getToken()).toBe("present");
   });
 
-  test("shows Computers in Settings for members while keeping Admin hidden", async () => {
+  test("shows Computers in App Settings for members while keeping Administration hidden", async () => {
     mock.get("/api/auth/me", {
       body: { id: "u1", email: "member@x.com", name: null, role: "member", status: "active" },
     });
@@ -146,9 +146,11 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: /settings/i }));
+    await user.click(await screen.findByRole("button", { name: "Open application settings" }));
+    const settingsMenu = screen.getByRole("dialog", { name: "Application settings" });
+    expect(within(settingsMenu).queryByRole("button", { name: "Administration" })).toBeNull();
+    await user.click(within(settingsMenu).getByRole("button", { name: "App Settings" }));
     await screen.findByTestId("account-panel");
-    expect(screen.getByRole("button", { name: /^usage$/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^computers$/i })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^rules$/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^archive$/i })).not.toBeInTheDocument();
@@ -157,7 +159,7 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     );
   });
 
-  test("shows Settings, Usage, and Admin for an admin, and Admin opens the panel", async () => {
+  test("groups app destinations under the settings gear for an admin", async () => {
     mock.get("/api/auth/me", {
       body: { id: "u1", email: "admin@x.com", name: null, role: "admin", status: "active" },
     });
@@ -178,34 +180,38 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     const user = userEvent.setup();
     render(<App />);
 
-    const adminButton = await screen.findByRole("button", { name: /^admin$/i });
-    expect(screen.getByRole("button", { name: /^usage$/i })).toBeInTheDocument();
-    const headerActions = adminButton.closest(".header-actions");
+    const settingsTrigger = await screen.findByRole("button", {
+      name: "Open application settings",
+    });
+    const headerActions = settingsTrigger.closest(".header-actions");
     expect(headerActions).not.toBeNull();
     const headerButtons = within(headerActions as HTMLElement).getAllByRole("button");
-    // Desktop exposes the destinations inline; the same action group also
-    // owns the mobile drawer trigger.
-    expect(headerButtons).toHaveLength(6);
+    expect(headerButtons).toHaveLength(2);
     expect(headerButtons[0]).toHaveAccessibleName("Open navigation menu");
-    expect(headerButtons[1]).toHaveAccessibleName("Usage");
-    expect(headerButtons[2]).toHaveAccessibleName("Settings");
-    expect(headerButtons[3]).toHaveAccessibleName("Admin");
-    expect(headerButtons[4]).toHaveAccessibleName(/switch to (light|dark) mode/i);
-    expect(headerButtons[5]).toHaveAccessibleName("admin@x.com");
-    await user.click(adminButton);
+    expect(headerButtons[1]).toHaveAccessibleName("Open application settings");
+
+    await user.click(settingsTrigger);
+    let settingsMenu = screen.getByRole("dialog", { name: "Application settings" });
+    expect(within(settingsMenu).getByRole("button", { name: "Usage" })).toBeInTheDocument();
+    expect(within(settingsMenu).getByRole("button", { name: "App Settings" })).toBeInTheDocument();
+    await user.click(within(settingsMenu).getByRole("button", { name: "Administration" }));
     expect(await screen.findByTestId("admin-panel")).toBeInTheDocument();
     expect(screen.getByTestId("admin-panel")).toHaveClass("embedded-page-view");
-    expect(screen.getByRole("button", { name: "Admin" })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("button", { name: "Usage" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Open application settings" }));
+    settingsMenu = screen.getByRole("dialog", { name: "Application settings" });
+    expect(within(settingsMenu).getByRole("button", { name: "Administration" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
     expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Computers" })).not.toBeInTheDocument();
     expect(screen.queryByText("Global agent rules")).not.toBeInTheDocument();
     expect(screen.queryByText("Archived projects")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "Settings" }));
+    await user.click(within(settingsMenu).getByRole("button", { name: "App Settings" }));
     expect(await screen.findByTestId("account-panel")).toHaveClass("embedded-page-view");
-    expect(screen.getByRole("button", { name: "Settings" })).toHaveAttribute(
+    await user.click(screen.getByRole("button", { name: "Open application settings" }));
+    expect(screen.getByRole("button", { name: "App Settings" })).toHaveAttribute(
       "aria-current",
       "page",
     );
@@ -218,7 +224,7 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     expect(await screen.findByTestId("computers-page")).toBeInTheDocument();
   });
 
-  test("opens user settings and sign out actions from the username menu", async () => {
+  test("opens app settings and sign out actions from the settings gear", async () => {
     mock.get("/api/auth/me", {
       body: {
         id: "u1",
@@ -244,13 +250,15 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: /david hatwell/i }));
-    expect(screen.getByRole("menuitem", { name: "User settings" })).toBeInTheDocument();
-    expect(screen.getByRole("menuitem", { name: "Sign out" })).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "Open application settings" }));
+    const settingsMenu = screen.getByRole("dialog", { name: "Application settings" });
+    expect(within(settingsMenu).getByText("David Hatwell")).toBeInTheDocument();
+    expect(within(settingsMenu).getByRole("button", { name: "Sign out" })).toBeInTheDocument();
 
-    await user.click(screen.getByRole("menuitem", { name: "User settings" }));
+    await user.click(within(settingsMenu).getByRole("button", { name: "App Settings" }));
     expect(await screen.findByTestId("account-panel")).toHaveClass("embedded-page-view");
-    expect(screen.getByRole("button", { name: "Settings" })).toHaveAttribute(
+    await user.click(screen.getByRole("button", { name: "Open application settings" }));
+    expect(screen.getByRole("button", { name: "App Settings" })).toHaveAttribute(
       "aria-current",
       "page",
     );
@@ -292,7 +300,8 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: "Usage" }));
+    await user.click(await screen.findByRole("button", { name: "Open application settings" }));
+    await user.click(screen.getByRole("button", { name: "Usage" }));
 
     expect(await screen.findByRole("heading", { name: "Usage", level: 1 })).toBeInTheDocument();
     expect(screen.getByTestId("usage-panel")).toHaveClass("embedded-page-view");
@@ -300,8 +309,9 @@ describe("App — authenticated chrome reflects the signed-in user's role", () =
       "aria-current",
       "page",
     );
+    await user.click(screen.getByRole("button", { name: "Open application settings" }));
     expect(screen.getByRole("button", { name: "Usage" })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("button", { name: "Settings" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "App Settings" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Go to Portfolio" })).toBeInTheDocument();
   });

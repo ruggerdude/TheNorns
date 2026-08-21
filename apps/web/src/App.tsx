@@ -1330,7 +1330,7 @@ function ProjectGraph({
             aria-current={workspaceTab === "settings" ? "page" : undefined}
             onClick={() => selectWorkspaceTab("settings")}
           >
-            Settings
+            Project Settings
           </button>
           {user && mobileWorkspaceNavOpen ? (
             <div className="workspace-mobile-global-actions">

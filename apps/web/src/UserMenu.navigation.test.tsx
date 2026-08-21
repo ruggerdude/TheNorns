@@ -26,7 +26,14 @@ describe("Global navigation", () => {
     );
 
     expect(screen.queryByRole("button", { name: "Computers" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Admin" })).toHaveAttribute("aria-current", "page");
+    await interaction.click(screen.getByRole("button", { name: "Open application settings" }));
+    expect(screen.getByRole("button", { name: "Administration" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(screen.getByText("Device Owner")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Light" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Dark" })).toBeInTheDocument();
 
     await interaction.click(screen.getByRole("button", { name: "Open navigation menu" }));
     const navigation = screen.getByRole("navigation", { name: "Main navigation" });
@@ -34,7 +41,7 @@ describe("Global navigation", () => {
     expect(navigation).toHaveTextContent("Admin");
   });
 
-  it("dismisses the user menu with Escape", async () => {
+  it("dismisses the application settings menu with Escape", async () => {
     const interaction = userEvent.setup();
     render(
       <AuthenticatedHeaderActions
@@ -46,9 +53,9 @@ describe("Global navigation", () => {
       />,
     );
 
-    await interaction.click(screen.getByRole("button", { name: "Device Owner" }));
-    expect(screen.getByRole("menu")).toBeInTheDocument();
+    await interaction.click(screen.getByRole("button", { name: "Open application settings" }));
+    expect(screen.getByRole("dialog", { name: "Application settings" })).toBeInTheDocument();
     await interaction.keyboard("{Escape}");
-    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "Application settings" })).not.toBeInTheDocument();
   });
 });

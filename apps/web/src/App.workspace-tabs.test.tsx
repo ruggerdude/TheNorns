@@ -104,7 +104,8 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
 
     // Overview is the default tab, and it's the one already marked "on".
     expect(await screen.findByRole("button", { name: "Overview" })).toHaveClass("on");
-    expect(screen.getByRole("button", { name: "Usage" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open application settings" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Usage" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Members" })).toBeInTheDocument();
     expect(screen.getByTestId("overview-dashboard")).toBeInTheDocument();
     expect(screen.queryByTestId("work-history")).not.toBeInTheDocument();
@@ -224,6 +225,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     const user = userEvent.setup();
     render(<App />);
     await openProjectFromPortfolio();
+    await user.click(screen.getByRole("button", { name: "Open application settings" }));
     await user.click(screen.getByRole("button", { name: "Usage" }));
 
     // DESIGN R2: the per-scope H1 ("Project usage") was removed; the hub
@@ -234,6 +236,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
       "aria-current",
       "page",
     );
+    await user.click(screen.getByRole("button", { name: "Open application settings" }));
     expect(screen.getByRole("button", { name: "Usage" })).toHaveAttribute("aria-current", "page");
     expect(screen.queryByRole("navigation", { name: "Open projects" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Close" })).not.toBeInTheDocument();
@@ -251,7 +254,9 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     expect(within(workspaceNav).getByRole("button", { name: "Overview" })).toHaveClass("on");
     expect(within(workspaceNav).getByRole("button", { name: "Members" })).toBeInTheDocument();
     expect(within(workspaceNav).getByRole("button", { name: "Debates" })).toBeInTheDocument();
-    expect(within(workspaceNav).getByRole("button", { name: "Settings" })).toBeInTheDocument();
+    expect(
+      within(workspaceNav).getByRole("button", { name: "Project Settings" }),
+    ).toBeInTheDocument();
   });
 
   it("shows the graph canvas (full functionality preserved) only after switching to the Graph tab", async () => {
@@ -549,7 +554,7 @@ describe("FRONT DOOR P1d: workspace tab bar", () => {
     render(<App />);
     await openProjectFromPortfolio();
     const nav = screen.getByRole("navigation", { name: "Workspace sections" });
-    await user.click(within(nav).getByRole("button", { name: "Settings" }));
+    await user.click(within(nav).getByRole("button", { name: "Project Settings" }));
     const settings = await screen.findByTestId("workspace-settings");
     expect(
       within(settings)

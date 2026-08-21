@@ -3,21 +3,28 @@ import type { SettingsTab } from "./Account";
 import { PortfolioMenu } from "./PortfolioMenu";
 import type { ProjectSummary } from "./Projects";
 import type { CurrentUser } from "./auth";
-import { ThemeToggle } from "./theme";
+import { ThemeToggle, useTheme } from "./theme";
 import { Button } from "./ui";
 
 export function HeaderUserMenu({
   user,
+  onOpenUsage,
   onOpenAccount,
+  onOpenAdmin,
   onSignOut,
+  activeView = null,
 }: {
   user: CurrentUser;
+  onOpenUsage: () => void;
   onOpenAccount: (tab?: SettingsTab) => void;
+  onOpenAdmin: () => void;
   onSignOut: () => void;
+  activeView?: "usage" | "settings" | "admin" | null;
 }): React.ReactElement {
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const label = user.name ?? user.email;
+  const { theme, setTheme } = useTheme();
 
   useEffect(() => {
     if (!open) return;
@@ -37,42 +44,89 @@ export function HeaderUserMenu({
   }, [open]);
 
   return (
-    <div className="header-user-menu" ref={menuRef}>
+    <div className="header-user-menu global-settings-menu" ref={menuRef}>
       <button
         type="button"
-        className="user-chip user-menu-trigger"
-        aria-label={label}
-        aria-haspopup="menu"
+        className={`global-settings-trigger${activeView ? " is-active" : ""}`}
+        aria-label={open ? "Close application settings" : "Open application settings"}
+        aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => setOpen((current) => !current)}
       >
-        <span className="user-avatar" aria-hidden="true">
-          {label.slice(0, 1).toUpperCase()}
-        </span>
-        <span>{label}</span>
-        <span className="user-menu-caret" aria-hidden="true">
-          ▾
-        </span>
+        <svg aria-hidden="true" viewBox="0 0 24 24">
+          <path d="M12 8.25a3.75 3.75 0 1 0 0 7.5 3.75 3.75 0 0 0 0-7.5Z" />
+          <path d="M19.2 13.05a7.8 7.8 0 0 0 0-2.1l2.02-1.58-2-3.46-2.52 1.02a8 8 0 0 0-1.82-1.05L14.5 3.2h-4l-.39 2.68A8 8 0 0 0 8.3 6.93L5.78 5.91l-2 3.46 2.02 1.58a7.8 7.8 0 0 0 0 2.1l-2.02 1.58 2 3.46 2.52-1.02c.56.43 1.17.78 1.82 1.05l.39 2.68h4l.39-2.68a8 8 0 0 0 1.82-1.05l2.52 1.02 2-3.46-2.04-1.58Z" />
+        </svg>
       </button>
       {open ? (
-        <div className="user-menu-popover" role="menu">
+        <dialog
+          className="user-menu-popover global-settings-popover"
+          aria-label="Application settings"
+          open
+        >
           <div className="user-menu-identity">
-            <strong>{label}</strong>
-            {user.name ? <span>{user.email}</span> : null}
+            <span className="user-avatar" aria-hidden="true">
+              {label.slice(0, 1).toUpperCase()}
+            </span>
+            <span className="user-menu-identity-copy">
+              <strong>{label}</strong>
+              {user.name ? <span>{user.email}</span> : null}
+            </span>
           </div>
           <Button
             variant="ghost"
-            role="menuitem"
+            aria-current={activeView === "usage" ? "page" : undefined}
             onClick={() => {
               setOpen(false);
-              onOpenAccount("profile");
+              onOpenUsage();
             }}
           >
-            User settings
+            Usage
           </Button>
           <Button
             variant="ghost"
-            role="menuitem"
+            aria-current={activeView === "settings" ? "page" : undefined}
+            onClick={() => {
+              setOpen(false);
+              onOpenAccount();
+            }}
+          >
+            App Settings
+          </Button>
+          {user.role === "admin" ? (
+            <Button
+              variant="ghost"
+              aria-current={activeView === "admin" ? "page" : undefined}
+              onClick={() => {
+                setOpen(false);
+                onOpenAdmin();
+              }}
+            >
+              Administration
+            </Button>
+          ) : null}
+          <fieldset className="user-menu-appearance">
+            <legend>Appearance</legend>
+            <div>
+              <button
+                type="button"
+                aria-pressed={theme === "light"}
+                onClick={() => setTheme("light")}
+              >
+                Light
+              </button>
+              <button
+                type="button"
+                aria-pressed={theme === "dark"}
+                onClick={() => setTheme("dark")}
+              >
+                Dark
+              </button>
+            </div>
+          </fieldset>
+          <Button
+            className="user-menu-sign-out"
+            variant="ghost"
             onClick={() => {
               setOpen(false);
               onSignOut();
@@ -80,7 +134,7 @@ export function HeaderUserMenu({
           >
             Sign out
           </Button>
-        </div>
+        </dialog>
       ) : null}
     </div>
   );
@@ -135,34 +189,14 @@ export function AuthenticatedHeaderActions({
         <span aria-hidden="true">☰</span>
         Menu
       </Button>
-      <Button
-        className={`btn-small${activeView === "usage" ? " is-active" : ""}`}
-        variant="ghost"
-        aria-current={activeView === "usage" ? "page" : undefined}
-        onClick={onOpenUsage}
-      >
-        Usage
-      </Button>
-      <Button
-        className={`btn-small${activeView === "settings" ? " is-active" : ""}`}
-        variant="ghost"
-        aria-current={activeView === "settings" ? "page" : undefined}
-        onClick={() => onOpenAccount()}
-      >
-        Settings
-      </Button>
-      {user.role === "admin" ? (
-        <Button
-          className={`btn-small${activeView === "admin" ? " is-active" : ""}`}
-          variant="ghost"
-          aria-current={activeView === "admin" ? "page" : undefined}
-          onClick={onOpenAdmin}
-        >
-          Admin
-        </Button>
-      ) : null}
-      <ThemeToggle />
-      <HeaderUserMenu user={user} onOpenAccount={onOpenAccount} onSignOut={onSignOut} />
+      <HeaderUserMenu
+        user={user}
+        activeView={activeView}
+        onOpenUsage={onOpenUsage}
+        onOpenAccount={onOpenAccount}
+        onOpenAdmin={onOpenAdmin}
+        onSignOut={onSignOut}
+      />
       {mobileNavigationOpen ? (
         <button
           type="button"
@@ -230,7 +264,7 @@ export function AuthenticatedHeaderActions({
               onOpenAccount();
             }}
           >
-            Settings
+            App Settings
           </Button>
           {user.role === "admin" ? (
             <Button

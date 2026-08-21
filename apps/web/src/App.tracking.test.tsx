@@ -58,7 +58,7 @@ describe("FRONT DOOR P5: tracking update interval", () => {
 
     const { user } = await renderAppAndOpenProject(projectAlpha.name);
     const workspaceNav = screen.getByRole("navigation", { name: "Workspace sections" });
-    await user.click(within(workspaceNav).getByRole("button", { name: "Settings" }));
+    await user.click(within(workspaceNav).getByRole("button", { name: "Project Settings" }));
     await screen.findByTestId("workspace-settings");
     await user.selectOptions(screen.getByLabelText("Default timing"), "60");
     await user.click(screen.getByRole("button", { name: "Save update preferences" }));
