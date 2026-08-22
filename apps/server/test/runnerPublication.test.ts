@@ -569,6 +569,48 @@ describe("EXECUTION E4 — a run's work is published, and verification is real",
     );
   });
 
+  it("a stopped runtime's partial work is published but NEVER integrated into the base", async () => {
+    // Live (strumsheetx1): an expired run's checkpoint — one added import, the
+    // suite still green — was fast-forwarded into main, leaving the repo
+    // half-changed. Integration requires a FINISHED run, not just green tests.
+    const h = await harness(cleanup);
+    const committing = committingRuntime("partial.txt", "half done\n");
+    const stoppedMidTask: CodingRuntime = {
+      ...committing,
+      run: async (request) => {
+        await committing.run(request);
+        return {
+          outcome: "failed",
+          detail: "API Error: Connection closed mid-response",
+          stopReason: "stop_sequence",
+          usage: { input_tokens: 10, output_tokens: 5, usage_source: "runtime_report" },
+        };
+      },
+    };
+    const events: EventPayloadT[] = [];
+    const result = await executor(
+      h,
+      stoppedMidTask,
+      PASSING,
+      new GitPublisher({
+        repositorySlug: "acme/widgets",
+        token: "test-token",
+        fetchImpl: githubApi().fetchImpl,
+      }),
+    ).execute(
+      dispatchCommand({ expected_revision: h.base, integrate_base_branch: "main" }),
+      (event) => events.push(event),
+    );
+
+    // The work is preserved on its branch and the run is honestly failed...
+    expect(result).toMatchObject({ outcome: "failed", verification_passed: true, empty: false });
+    expect(result.publication?.outcome).toBe("pushed");
+    expect(await git(h.remote, "rev-parse", "refs/heads/norns/task-task-1")).toBe(result.commit_sha);
+    // ...but main is untouched.
+    expect(result.publication?.integration).toBeNull();
+    expect(await git(h.remote, "rev-parse", "refs/heads/main")).toBe(h.base);
+  });
+
   it("NOTHING TO DO: an empty run whose real checks pass succeeds without publishing", async () => {
     // Live: a phase's final wiring module found its routes already wired by the
     // preceding modules and the suite green, so it correctly made no commit —

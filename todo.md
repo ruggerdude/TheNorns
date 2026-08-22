@@ -1706,3 +1706,34 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   passes, settle the run succeeded with a "no change required" note (still
   publishing nothing). Sibling of EXEC-RETRY-CARRIED-WORK, which covered the
   retry-from-prior-commit case.
+
+## Agent connectivity + integration gaps (2026-08-22, from the StrumSheet deploy)
+
+- [ ] 🔴 AGENT-SOCKET-WEDGE — The local agent silently stopped delivering events
+  (~400 buffered on disk, server's last event 15 min stale) while its TCP socket
+  showed ESTABLISHED and it kept executing work locally. Fresh agent restarts
+  did NOT recover it — the agent logged only "connecting to …" and never
+  "connected". Only restarting the SERVER cleared it, which points at stale
+  in-memory socket/runner state server-side refusing or ignoring the new
+  connection. Needs: (a) the agent must detect "connected but never acked" and
+  force a reconnect (ack watchdog), (b) the server must evict a dead socket for
+  a runner when a new authenticated connection for the same device arrives,
+  (c) surface "agent connected but not delivering" in the UI — this was
+  invisible.
+- [x] ✅ EXEC-INTEGRATE-ONLY-FINISHED — FIXED (runner): integration now requires
+  `verification.passed && runtimeResult.outcome === "completed"`. A red or
+  stopped run still publishes its branch (nothing lost) but cannot move the
+  base. Real-git regression test added; publication 20/20, executor suites 90,
+  runner 85 green. Needs an agent rebuild. Original: While the server thought the dispatch had
+  expired, the runner finished locally, checkpointed PARTIAL work, verification
+  passed (an added import breaks nothing) and it INTEGRATED that partial commit
+  into main (strumsheetx1 aae5221 — no root start script, no railway.json).
+  Integration is gated on `verification.passed` alone; it must also require the
+  run to be a SUCCESS (runtime completed), which is exactly the distinction
+  EXEC-RUNTIME-FAILURE-IS-FAILURE introduced. A failed/expired run may publish
+  its branch (nothing is lost) but must never advance the base branch.
+- [ ] 🟡 DISPATCH-TTL-KILLS-LIVE-RUN — expireStaleDispatches expires a run still
+  in `dispatched` past the 5-minute command TTL. If the runner's `executing` ack
+  is lost (see AGENT-SOCKET-WEDGE) the server kills a run that is actively
+  working, and the runner's later terminal ack is then rejected. Only expire
+  when no runner event for that run has ever arrived.

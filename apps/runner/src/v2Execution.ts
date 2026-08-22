@@ -2016,9 +2016,15 @@ export class V2RunnerExecutor {
           task_id: command.task_id,
           verification_passed: verification.passed,
           verification_summary: verification.reason ?? verification.output.slice(0, 4_000),
-          // EXEC-INTEGRATE-1: only a verified run's work advances the base
-          // branch. A red run publishes for the reviewer but never integrates.
-          ...(verification.passed && command.integrate_base_branch
+          // EXEC-INTEGRATE-1 / EXEC-INTEGRATE-ONLY-FINISHED: only a FINISHED,
+          // verified run advances the base branch. A red run — or one whose
+          // runtime stopped early — still publishes its branch so nothing is
+          // lost, but must never move the base. Live: an expired run's partial
+          // checkpoint (one added import, tests still green) was integrated
+          // into main and left the repository half-changed.
+          ...(verification.passed &&
+          runtimeResult.outcome === "completed" &&
+          command.integrate_base_branch
             ? { integrate_base_branch: command.integrate_base_branch }
             : {}),
           signal: publicationFence.signal,
