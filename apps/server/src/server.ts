@@ -5834,8 +5834,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           }
         | undefined
       > => {
-        const binding = await options.phase3?.sourceBindings.connectedLocal(projectId);
-        if (!binding) {
+        const target = await options.phase3?.sourceBindings.repositoryGraphTarget(projectId);
+        if (!target) {
           reply.code(409).send({
             error: "local_repository_required",
             message:
@@ -5843,12 +5843,12 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           });
           return undefined;
         }
-        const runner = stores.runner(binding.runner_id);
-        const reconciled = reconciledRunners.get(binding.runner_id);
+        const runner = stores.runner(target.runner_id);
+        const reconciled = reconciledRunners.get(target.runner_id);
         if (
           !runner ||
           !reconciled ||
-          reconciled.socket !== runnerSockets.get(binding.runner_id) ||
+          reconciled.socket !== runnerSockets.get(target.runner_id) ||
           reconciled.generation !== runner.generation
         ) {
           reply.code(409).send({
@@ -5866,9 +5866,9 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           return undefined;
         }
         return {
-          runnerId: binding.runner_id,
+          runnerId: target.runner_id,
           generation: runner.generation,
-          repositoryId: binding.repository_id,
+          repositoryId: target.repository_id,
         };
       };
 

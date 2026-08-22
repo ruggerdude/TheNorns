@@ -4,7 +4,6 @@ import {
   type V2CreateGitHubRepositoryBindingT,
   V2CreateLocalRepositoryBinding,
   type V2CreateLocalRepositoryBindingT,
-  type V2LocalRunnerRepositoryBindingT,
   V2RepositoryBinding,
   type V2RepositoryBindingT,
 } from "@norns/contracts";
@@ -35,6 +34,11 @@ interface RepositoryBindingRow {
   last_synced_at: Date | string | null;
   created_at: Date | string;
   updated_at: Date | string;
+}
+
+export interface RepositoryGraphTarget {
+  runner_id: string;
+  repository_id: string;
 }
 
 export class SourceBindingProjectNotFoundError extends Error {
@@ -178,19 +182,58 @@ async function appendBindingAudit(tx: V2SqlExecutor, binding: V2RepositoryBindin
 export class SourceBindingService {
   constructor(private readonly transactions: V2TransactionRunner) {}
 
-  connectedLocal(projectId: string): Promise<V2LocalRunnerRepositoryBindingT | null> {
+  repositoryGraphTarget(projectId: string): Promise<RepositoryGraphTarget | null> {
     return this.transactions.transaction(async (tx) => {
-      const result = await tx.query<RepositoryBindingRow>(
-        `SELECT * FROM repository_bindings
-         WHERE project_id = $1 AND binding_type = 'local_runner' AND status = 'connected'
-         ORDER BY created_at, id
+      const result = await tx.query<RepositoryGraphTarget>(
+        `SELECT COALESCE(registration.device_id,binding.runner_id) AS runner_id,
+                binding.repository_id
+           FROM projects project
+           JOIN repository_bindings binding
+             ON binding.project_id=project.id
+            AND binding.binding_type='local_runner'
+           LEFT JOIN project_device_repository_grants grant_record
+             ON grant_record.id=binding.project_device_repository_grant_id
+            AND grant_record.project_id=project.id
+            AND grant_record.state='active'
+           LEFT JOIN device_repository_registrations registration
+             ON registration.id=grant_record.repository_registration_id
+            AND registration.state='active'
+            AND registration.workspace_id=binding.workspace_id
+            AND registration.repository_id=binding.repository_id
+           LEFT JOIN devices device
+             ON device.id=registration.device_id
+            AND device.lifecycle='active'
+           LEFT JOIN device_credentials credential
+             ON credential.device_id=device.id
+            AND credential.id=registration.approved_credential_id
+            AND credential.generation=registration.approved_generation
+            AND credential.generation=device.current_generation
+            AND credential.state='active'
+          WHERE project.id=$1
+            AND project.status='active'
+            AND (
+              (
+                binding.project_device_repository_grant_id IS NULL
+                AND binding.status='connected'
+                AND binding.runner_id IS NOT NULL
+              )
+              OR
+              (
+                binding.project_device_repository_grant_id IS NOT NULL
+                AND binding.status IN ('connected','degraded','disconnected')
+                AND grant_record.id IS NOT NULL
+                AND registration.id IS NOT NULL
+                AND device.id IS NOT NULL
+                AND credential.id IS NOT NULL
+              )
+            )
+         ORDER BY (binding.id=project.primary_repository_binding_id) DESC,
+                  CASE binding.role WHEN 'workspace' THEN 0 ELSE 1 END,
+                  binding.created_at,binding.id
          LIMIT 1`,
         [projectId],
       );
-      const row = result.rows[0];
-      if (!row) return null;
-      const binding = mapBinding(row);
-      return binding.binding_type === "local_runner" ? binding : null;
+      return result.rows[0] ?? null;
     });
   }
 
