@@ -1737,3 +1737,20 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   is lost (see AGENT-SOCKET-WEDGE) the server kills a run that is actively
   working, and the runner's later terminal ack is then rejected. Only expire
   when no runner event for that run has ever arrived.
+- [ ] 🟡 RETRY-NEEDS-PACKAGES — Recovery retry refuses with "missing an active
+  Project Package and an active Phase Package" for tasks created by a DIRECT
+  `POST /planning-runs` (no conversation handoff), even though the initial
+  dispatch of the very same task succeeded. Retry and dispatch must agree: if a
+  task can be dispatched, it can be retried. Hit twice (verify-live, and the
+  strumsheetx1 deploy-config task).
+- [ ] 🟡 PHASE-BLOCKED-HOLDS-SLOT — A phase whose only task has FAILED sits in
+  `blocked` but still counts as "already executing", so a project that runs one
+  phase at a time cannot start ANY new plan. The approved plan is accepted and
+  then parked with "can be started once the active phase completes" — but a
+  blocked phase never completes on its own. Today the only escape is a
+  task-level `recovery/cancel`, which is not discoverable from the UI. Either
+  stop counting `blocked` as executing, or expose a phase-level abandon.
+- [ ] 🟡 ORPHAN-PREVIEW-SURVIVES-RUN — `vite preview --port 4999` and its
+  esbuild child from a foundation run (18:28) were still alive hours later,
+  holding a port inside a worktree that the run had finished with. The orphan
+  reaper is not catching long-lived preview servers spawned by verification.
