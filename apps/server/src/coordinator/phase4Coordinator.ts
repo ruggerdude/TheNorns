@@ -129,6 +129,11 @@ export interface Phase4ScheduleInput {
    * explicit recovery from a terminal failed/expired/cancelled run.
    */
   supersedes_run_id?: string | null;
+  /**
+   * PHASE-VERIFY-REWORK — set when this attempt supersedes a SUCCEEDED run
+   * whose delivered work was found wanting. Carries the defect to the agent.
+   */
+  rework?: { previous_run_id: string; direction: string };
 }
 
 export interface Phase4ScheduledRun {
@@ -493,7 +498,7 @@ export class Phase4Coordinator {
         input.supersedes_run_id !== undefined && input.supersedes_run_id !== null;
       if (
         !["pending", "ready"].includes(row.task_state) &&
-        !(isReplacement && row.task_state === "in_review")
+        !(isReplacement && ["in_review", "completed"].includes(row.task_state))
       ) {
         throw new Phase4CoordinatorConflictError(`task is not schedulable from ${row.task_state}`);
       }
@@ -635,7 +640,12 @@ export class Phase4Coordinator {
           [input.supersedes_run_id, input.task_id],
         );
         const priorRun = prior.rows[0];
-        const validReviewRework = priorRun?.state === "succeeded" && row.task_state === "in_review";
+        // PHASE-VERIFY-REWORK — `in_review` is the reviewer's window; `completed`
+        // is the same judgement arriving later (phase verification found the
+        // delivered work does not meet its acceptance criteria). Both supersede
+        // a run that SUCCEEDED, so both take this path.
+        const validReviewRework =
+          priorRun?.state === "succeeded" && ["in_review", "completed"].includes(row.task_state);
         const validTerminalRetry =
           priorRun !== undefined &&
           ["failed", "expired", "cancelled"].includes(priorRun.state) &&
@@ -747,7 +757,7 @@ export class Phase4Coordinator {
           to: "assigned",
           reason: `designated run ${runId}`,
         });
-      } else if (task.state === "in_review" && isReplacement) {
+      } else if (["in_review", "completed"].includes(task.state) && isReplacement) {
         await transitionV2TaskLifecycle(lifecycle, {
           ...actor,
           project_id: input.project_id,
@@ -755,7 +765,10 @@ export class Phase4Coordinator {
           task_id: input.task_id,
           expected_aggregate_version: task.aggregate_version,
           to: "in_progress",
-          reason: `reviewer requested rework in ${runId}`,
+          reason:
+            task.state === "completed"
+              ? `completed work sent back for rework in ${runId}`
+              : `reviewer requested rework in ${runId}`,
         });
       }
       await sql.query(
@@ -829,6 +842,7 @@ export class Phase4Coordinator {
         // PROVIDER name by the planning bridge, which is not a key in the
         // runner's runtime map; such a run failed before doing any work. Real
         // runtime names pass through untouched.
+        ...(input.rework ? { rework: input.rework } : {}),
         runtime: resolveDispatchRuntime(row.runtime, row.provider),
         provider: row.provider,
         model: row.model,

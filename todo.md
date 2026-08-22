@@ -1618,7 +1618,18 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   stop reason, so the standard retry resumes it (resume_session_id is already
   carried; carried-work retry landed today). Auto-resume the session once on
   a dropped stream before failing. Needs an agent rebuild + reinstall.
-- [ ] 🔴 PHASE-VERIFY-REWORK — David's design: when the phase's tasks are done,
+- [x] ✅ PHASE-VERIFY-REWORK — BUILT: completed work can be sent back with the
+  exact defect. `V2_TASK_TRANSITIONS.completed = ["in_progress"]`; the dispatch
+  carries `rework { previous_run_id, direction }`; the coordinator schedules a
+  `completed` task as a replacement (superseding its SUCCEEDED run) and reopens
+  it to `in_progress`; `PhaseLaunchService.startPhase({ rework })` loads that one
+  task (deliberately outside SCHEDULABLE_TASKS_SQL — reopening finished work is
+  always explicit) and revives a phase that had closed; the runner puts the
+  defect at the top of the agent's briefing so it fixes that gap on top of the
+  existing work. Route: POST /projects/:id/phases/:phaseId/tasks/:taskId/rework
+  { completed_run_id, direction }. Real-DB regression test in executionE12.
+  Server 129, contracts 234, runner 85 green. Needs an agent rebuild for the
+  briefing half. Original design note: when the phase's tasks are done,
   verification/testing runs and, on a dependency/acceptance defect, TRIGGERS
   REWORK of the failing task — instead of today's dead end (the verification
   task can only ask a human; a completed task is terminal by contract

@@ -230,8 +230,14 @@ export class PhaseLaunchService {
    *  work is attempted. Every one of these is a condition the coordinator
    *  gate(s) would also refuse on -- checked here first only so the human
    *  gets a specific reason instead of a generic scheduling conflict. */
-  private assertLaunchable(row: PhaseBindingRow): void {
-    if (!["approved", "active"].includes(row.phase_status)) {
+  private assertLaunchable(row: PhaseBindingRow, options: { rework?: boolean } = {}): void {
+    // PHASE-VERIFY-REWORK — a phase closes when its last task completes, so
+    // reopening delivered work means reopening the phase around it. Allowed
+    // only for an explicit rework; nothing else revives a finished phase.
+    const launchable = options.rework
+      ? ["approved", "active", "completed", "blocked"]
+      : ["approved", "active"];
+    if (!launchable.includes(row.phase_status)) {
       throw new PhaseLaunchError(
         "phase_not_ready",
         `phase is ${row.phase_status}, not approved for execution`,
@@ -270,6 +276,35 @@ export class PhaseLaunchService {
         "Ask an operator to configure GitHub Actions execution for this deployment.",
       );
     }
+  }
+
+  /**
+   * PHASE-VERIFY-REWORK — the one COMPLETED task being sent back. It is
+   * deliberately not in SCHEDULABLE_TASKS_SQL (that predicate answers "what
+   * should dispatch on its own"); reopening finished work is always an
+   * explicit, audited act, never something the drainer decides.
+   */
+  private async reworkableTask(
+    projectId: string,
+    phaseId: string,
+    taskId: string,
+  ): Promise<SchedulableTaskRow[]> {
+    return this.transactions.transaction(async (tx) => {
+      const result = await tx.query<SchedulableTaskRow>(
+        `SELECT t.id AS task_id, t.title AS task_title,
+                COALESCE(to_jsonb(t)->>'complexity', 'M') AS task_complexity,
+                t.designated_assignment_id AS assignment_id,
+                a.budget_limit_usd AS budget_limit_usd,
+                NULL AS designated_terminal_run_id
+           FROM tasks t
+           JOIN agent_assignments a ON a.id = t.designated_assignment_id
+          WHERE t.project_id = $1 AND t.phase_id = $2 AND t.id = $3
+            AND t.state = 'completed'
+            AND t.designated_assignment_id IS NOT NULL`,
+        [projectId, phaseId, taskId],
+      );
+      return result.rows;
+    });
   }
 
   private async schedulableTasks(
@@ -420,11 +455,27 @@ export class PhaseLaunchService {
      * coordinator must atomically supersede this exact terminal run.
      */
     retry?: { task_id: string; failed_run_id: string };
+    /** PHASE-VERIFY-REWORK — reopen one completed task with the exact defect. */
+    rework?: { task_id: string; previous_run_id: string; direction: string };
   }): Promise<PhaseLaunchResult> {
     const row = await this.loadPhaseBinding(input.project_id, input.phase_id);
-    this.assertLaunchable(row);
+    this.assertLaunchable(row, { rework: input.rework !== undefined });
+    if (input.rework && row.phase_status !== "active") {
+      // Put the phase back to work so its reopened task can dispatch, exactly
+      // as a terminal-failure retry revives a phase parked as `blocked`.
+      await this.transactions.transaction(async (tx) => {
+        await tx.query(
+          `UPDATE phases
+              SET status='active', aggregate_version=aggregate_version+1, updated_at=now()
+            WHERE id=$1 AND project_id=$2 AND status IN ('completed','blocked','approved')`,
+          [input.phase_id, input.project_id],
+        );
+      });
+    }
 
-    const schedulable = await this.schedulableTasks(input.project_id, input.phase_id);
+    const schedulable = input.rework
+      ? await this.reworkableTask(input.project_id, input.phase_id, input.rework.task_id)
+      : await this.schedulableTasks(input.project_id, input.phase_id);
     const tasks = input.retry
       ? schedulable.filter((task) => task.task_id === input.retry?.task_id)
       : schedulable;
@@ -487,6 +538,15 @@ export class PhaseLaunchService {
         max_duration_seconds: this.policy.maxDurationSeconds,
         issued_at: input.issued_at,
         expires_at: expiresAt,
+        ...(input.rework
+          ? {
+              supersedes_run_id: input.rework.previous_run_id,
+              rework: {
+                previous_run_id: input.rework.previous_run_id,
+                direction: input.rework.direction,
+              },
+            }
+          : {}),
         ...(input.retry
           ? { supersedes_run_id: input.retry.failed_run_id }
           : task.designated_terminal_run_id

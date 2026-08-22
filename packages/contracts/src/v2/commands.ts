@@ -600,6 +600,20 @@ export const V2DispatchCommand = z
       })
       .strict()
       .optional(),
+    /**
+     * PHASE-VERIFY-REWORK — this attempt supersedes a run that COMPLETED but
+     * whose delivered work was found wanting by a later check (phase
+     * verification, a reviewer, a human). The direction is the exact defect,
+     * and the runner puts it at the top of the agent's briefing so the attempt
+     * fixes that gap rather than re-deriving the task from scratch.
+     */
+    rework: z
+      .object({
+        previous_run_id: V2EntityId,
+        direction: V2NonEmptyString.max(10_000),
+      })
+      .strict()
+      .optional(),
     budget_reservation_id: V2EntityId,
     max_charge_usd: z.number().nonnegative(),
     max_input_tokens: z.number().int().nonnegative(),

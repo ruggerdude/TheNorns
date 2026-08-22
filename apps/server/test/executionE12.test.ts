@@ -487,6 +487,58 @@ describe.sequential("EXECUTION E12 — concurrent tasks within one phase", () =>
     expect(await new PhaseReviewAutoCompleter(transactions, completion).sweep()).toHaveLength(0);
   }, 60_000);
 
+  it("PHASE-VERIFY-REWORK: sends a completed task back with the defect, superseding its green run", async () => {
+    // The lever the phase's verification step was missing. Live (StrumSheetX1):
+    // a task "completed" having delivered one of five acceptance criteria, and
+    // nothing could reopen it — a completed task was terminal, review needs
+    // `in_review`, and recovery retry needs a FAILED run.
+    await seed({ cap: 1, taskCount: 1 });
+    const first = await start();
+    const greenRun = first.scheduled[0]?.run_id;
+    if (!greenRun) throw new Error("expected one scheduled run");
+    await markRunning(greenRun);
+    await verifyGreen(taskId(1));
+    await publish(greenRun, "norns/task-1");
+    await runnerEvent({ kind: "run_status", run_id: greenRun, status: "completed" });
+    await new PhaseReviewAutoCompleter(transactions, completion).sweep();
+    const before = await pg.query<{ state: string }>("SELECT state FROM tasks WHERE id = $1", [
+      taskId(1),
+    ]);
+    expect(before.rows[0]?.state).toBe("completed");
+
+    const direction =
+      "Verification found the upload endpoint missing: POST /api/songs/upload returns 404. Implement it and re-run the E2E.";
+    const reworked = await service().startPhase({
+      project_id: PROJECT,
+      phase_id: PHASE,
+      authorized_by: HUMAN,
+      authorized_by_session_id: "session-e12",
+      issued_at: ISSUED_AT,
+      rework: { task_id: taskId(1), previous_run_id: greenRun, direction },
+    });
+
+    // A new attempt exists, the task is open again, and the green run is superseded.
+    expect(reworked.scheduled).toHaveLength(1);
+    const reworkRun = reworked.scheduled[0]?.run_id;
+    expect(reworkRun).not.toBe(greenRun);
+    const after = await pg.query<{ state: string }>("SELECT state FROM tasks WHERE id = $1", [
+      taskId(1),
+    ]);
+    expect(after.rows[0]?.state).toBe("in_progress");
+    const superseded = await pg.query<{ is_designated: boolean; superseded_at: string | null }>(
+      "SELECT is_designated, superseded_at FROM agent_runs WHERE id = $1",
+      [greenRun],
+    );
+    expect(superseded.rows[0]?.is_designated).toBe(false);
+
+    // The defect reaches the agent: it is on the dispatch command itself.
+    const dispatched = await pg.query<{ envelope: unknown }>(
+      "SELECT envelope FROM commands WHERE run_id = $1",
+      [reworkRun],
+    );
+    expect(JSON.stringify(dispatched.rows[0]?.envelope)).toContain(direction);
+  }, 60_000);
+
   // -------------------------------------------------------------------------
   // 2. Fan-out control: over-cap work queues, and starts when a slot frees
   // -------------------------------------------------------------------------

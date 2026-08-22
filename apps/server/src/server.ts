@@ -8553,6 +8553,69 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
       }
     });
 
+    // PHASE-VERIFY-REWORK — send completed work back with the exact defect.
+    // This is the lever the phase's verification step was missing: when a later
+    // check finds a delivered task does not meet its acceptance criteria, the
+    // task is reopened and re-dispatched carrying that defect, instead of the
+    // phase dead-ending on a task that is "done" but wrong.
+    const TaskReworkBody = z
+      .object({
+        completed_run_id: z.string().trim().min(1),
+        direction: z.string().trim().min(1).max(10_000),
+      })
+      .strict();
+    app.post("/api/v2/projects/:id/phases/:phaseId/tasks/:taskId/rework", async (req, reply) => {
+      if (!(await requireSession(req, reply))) return;
+      const user = await resolveUser(req);
+      if (!user) return;
+      const body = TaskReworkBody.safeParse(req.body);
+      if (!body.success) return reply.code(400).send({ error: "bad_request" });
+      const { id, phaseId, taskId } = req.params as {
+        id: string;
+        phaseId: string;
+        taskId: string;
+      };
+      const issuedAt = now();
+      try {
+        const result = await phaseLaunch.startPhase({
+          project_id: id,
+          phase_id: phaseId,
+          authorized_by: { actor_type: "human", actor_id: user.id },
+          authorized_by_session_id: `authenticated-request:${req.id}`,
+          issued_at: issuedAt.toISOString(),
+          rework: {
+            task_id: taskId,
+            previous_run_id: body.data.completed_run_id,
+            direction: body.data.direction,
+          },
+        });
+        if (result.scheduled.length === 0) {
+          const refusal = result.blocked[0] ?? result.deferred[0];
+          return reply.code(409).send({
+            error: "rework_not_scheduled",
+            detail:
+              refusal?.blocked_reason ??
+              "the task could not be reopened: it must be completed, with the named run as its current designated attempt",
+          });
+        }
+        stores.audit(
+          user.email,
+          "execution.task.rework",
+          `${taskId} from ${body.data.completed_run_id}`,
+          issuedAt,
+        );
+        reply.code(202).send(result);
+      } catch (error) {
+        if (error instanceof PhaseLaunchError) {
+          return reply.code(409).send({
+            error: error.code,
+            detail: error.message,
+            action_required: error.action_required,
+          });
+        }
+        reply.code(409).send({ error: "rework_conflict", detail: String(error) });
+      }
+    });
     const TerminalRecoveryBody = z.discriminatedUnion("action", [
       z
         .object({

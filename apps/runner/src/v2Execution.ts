@@ -1371,6 +1371,16 @@ export class V2RunnerExecutor {
       const fullTaskPrompt = command.human_wait_channel
         ? `${prompt}\n\n${humanWaitPrompt()}\n\nWork efficiently: inspect only the files needed, begin making concrete changes early, then verify and commit. Do not spend repeated turns restating or replanning the approved task.`
         : `${prompt}\n\nWork efficiently: inspect only the files needed, begin making concrete changes early, then verify and commit. Do not spend repeated turns restating or replanning the approved task.`;
+      // PHASE-VERIFY-REWORK — this attempt supersedes work that was delivered
+      // and then found wanting. The defect leads, so the agent closes that
+      // exact gap on top of what already exists instead of starting over.
+      const reworkPreamble = command.rework
+        ? [
+            "This task was completed once and then sent back for rework: a later check found the delivered work does not meet its acceptance criteria.",
+            `The exact defect to fix:\n${command.rework.direction}`,
+            "The prior attempt's work is already in this repository. Build on it — fix the named gap, run the required verification, and commit.",
+          ].join("\n\n")
+        : null;
       const runtimePrompt = command.recovery
         ? [
             "Continue the previous coding session for this same approved task.",
@@ -1388,11 +1398,13 @@ export class V2RunnerExecutor {
             fullTaskPrompt,
           ].join("\n\n")
         : fullTaskPrompt;
+      const withRework = (text: string): string =>
+        reworkPreamble ? `${reworkPreamble}\n\n${text}` : text;
       const runRequest: Parameters<typeof runtime.run>[0] = {
         runId: command.run_id,
         worktreePath: worktree.path,
-        prompt: runtimePrompt,
-        ...(resumeSessionId ? { resumeFallbackPrompt } : {}),
+        prompt: withRework(runtimePrompt),
+        ...(resumeSessionId ? { resumeFallbackPrompt: withRework(resumeFallbackPrompt) } : {}),
         additionalReadDirectories: approvedInputDirectory ? [approvedInputDirectory] : [],
         additionalWriteDirectories: [preflight.gitCommonDirectory],
         runtimeStateDirectory,
@@ -1443,7 +1455,10 @@ export class V2RunnerExecutor {
           ...runtimeOptions,
           resumeSessionId: runtimeResult.sessionId,
         });
-        runtimeResult = await resumedRuntime.run({ ...runRequest, resumeFallbackPrompt });
+        runtimeResult = await resumedRuntime.run({
+          ...runRequest,
+          resumeFallbackPrompt: withRework(resumeFallbackPrompt),
+        });
       }
       processTreeReaped = processProofBeforeRuntime && runtimeResult.process_tree_reaped === true;
       let humanWaitEnvelope: HumanWaitEnvelopeT | null;

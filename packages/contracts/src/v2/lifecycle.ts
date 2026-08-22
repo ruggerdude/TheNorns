@@ -24,7 +24,12 @@ export const V2_TASK_TRANSITIONS: Record<V2TaskStateT, readonly V2TaskStateT[]> 
   in_progress: ["verifying", "blocked", "failed", "cancelled"],
   verifying: ["in_review", "in_progress", "blocked", "failed", "cancelled"],
   in_review: ["completed", "in_progress", "blocked", "failed", "cancelled"],
-  completed: [],
+  // PHASE-VERIFY-REWORK — a completed task can be sent back for rework when a
+  // later check (phase verification, a reviewer, a human) finds its delivered
+  // work does not meet its acceptance criteria. Reopening is deliberate and
+  // audited: it creates a superseding run carrying the defect as direction,
+  // rather than leaving the phase with a task that is "done" but wrong.
+  completed: ["in_progress"],
   blocked: ["ready", "assigned", "in_progress", "verifying", "in_review", "failed", "cancelled"],
   failed: ["in_progress", "cancelled"],
   cancelled: [],
