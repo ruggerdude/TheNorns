@@ -1668,3 +1668,24 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   tick. TEST GAP: no unit test yet — a human_waits fixture needs agent_runs +
   work_conversations + work_messages + commands + runner_events +
   budget_reservations + decision_points; verified live instead.
+- [ ] 🟡 QUICK-BUDGET-CAP-OPAQUE — Quick-push runs are hard-capped at
+  DEFAULT_QUICK_CHANGE_MAX_CHARGE_USD ($2) via
+  `min(assignment budget, quick cap)` in phase4Coordinator, regardless of the
+  phase's approved budget ($25 here) and regardless of a recovery retry's
+  budget_limit_usd adjustment (the clamp is mode-based). Live: the core-engine
+  implementation was dispatched as quick, spent $0.30, then died with
+  "API Error: 402 the run's remaining budget cannot cover this request" — a
+  correct refusal with an opaque reason. Fix: (a) name the cap in the failure
+  ("quick changes are capped at $2 per run; re-run this as phased work"), and
+  (b) refuse/steer at PLAN time when a quick objective's estimated budget
+  exceeds the quick cap, instead of failing mid-run.
+- [ ] 🟡 EXEC-NOTHING-TO-DO — A task whose work is already satisfied by the base
+  fails as "the coding agent produced no commit; the run is empty". Live: the
+  core-engine phase's final module (app-wiring-suite-green) found the routes
+  already wired by the preceding modules and the suite green, so it correctly
+  made no commit — and was failed. The runner cannot distinguish "the agent did
+  nothing" from "nothing needed doing". Fix: when the runtime COMPLETED and the
+  worktree is clean at the base, run the task's verification anyway; if it
+  passes, settle the run succeeded with a "no change required" note (still
+  publishing nothing). Sibling of EXEC-RETRY-CARRIED-WORK, which covered the
+  retry-from-prior-commit case.
