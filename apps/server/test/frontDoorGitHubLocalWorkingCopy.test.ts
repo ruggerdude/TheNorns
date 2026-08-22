@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { PGlite } from "@electric-sql/pglite";
 import { RunnerDaemon, WorkspaceRegistry } from "@norns/runner";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { RepositoryGraphService } from "../../runner/dist/repositoryGraph.js";
 import type {
   GitHubIntegrationService,
   GitHubRepositorySummary,
@@ -52,6 +53,7 @@ describe.sequential("Front Door GitHub + this computer creation", () => {
   let token: string;
   let parent: string;
   let cloneTokenSeen: string | null;
+  let deviceWorkspaces: WorkspaceRegistry;
 
   beforeEach(async () => {
     pg = new PGlite();
@@ -144,6 +146,7 @@ describe.sequential("Front Door GitHub + this computer creation", () => {
           "workspace_clone",
           "workspace_clone_destination",
           "workspace_delete",
+          "repository_graphify",
         ],
       },
       repository_grants: [],
@@ -157,15 +160,17 @@ describe.sequential("Front Door GitHub + this computer creation", () => {
         state: "active" as const,
       })),
       selectProjectExecutionTarget: vi.fn(async ({ project_id }: { project_id: string }) => {
+        const repository = deviceWorkspaces.listLocalRepositoryApprovals()[0];
+        if (!repository) throw new Error("the cloned repository was not registered locally");
         await sourceBindings.createLocal(
           {
             project_id,
             runner_id: "device-local",
-            workspace_id: "workspace-device",
-            repository_id: "repository-device",
-            repository_display_name: "fresh-app",
-            default_branch: "main",
-            observed_head: HEAD,
+            workspace_id: repository.workspace_id,
+            repository_id: repository.repository_id,
+            repository_display_name: repository.repository_display_name,
+            default_branch: repository.default_branch,
+            observed_head: repository.observed_head,
             verification_policy_ref: "verification",
             created_by: { actor_type: "human", actor_id: "admin-1" },
           },
@@ -281,19 +286,44 @@ describe.sequential("Front Door GitHub + this computer creation", () => {
     await waitFor(() => server.connectedRunners().includes("runner-local"), "local helper");
 
     const deviceDataDir = mkdtempSync(join(tmpdir(), "norns-github-device-helper-"));
+    deviceWorkspaces = new WorkspaceRegistry(
+      deviceDataDir,
+      async () => parent,
+      async ({ cloneUrl, target, token: cloneToken }) => {
+        cloneTokenSeen = cloneToken;
+        execFileSync("git", ["clone", "--", source, target]);
+        execFileSync("git", ["-C", target, "remote", "set-url", "origin", cloneUrl]);
+      },
+      new RepositoryGraphService(deviceDataDir, async ({ repositoryPath, outputDirectory }) => {
+        const graphDirectory = join(outputDirectory, "graphify-out");
+        mkdirSync(graphDirectory, { recursive: true });
+        writeFileSync(
+          join(graphDirectory, "graph.json"),
+          JSON.stringify({
+            directed: true,
+            multigraph: false,
+            graph: { community_labels: { 1: "Application" } },
+            nodes: [
+              {
+                id: `${repositoryPath}/README.md::application`,
+                label: "Application",
+                file_type: "module",
+                source_file: join(repositoryPath, "README.md"),
+                source_location: "L1",
+                community: 1,
+              },
+            ],
+            links: [],
+          }),
+        );
+        return { version: "test" };
+      }),
+    );
     deviceDaemon = new RunnerDaemon({
       serverUrl: url,
       runnerId: "unused-device-runner",
       dataDir: deviceDataDir,
-      workspaces: new WorkspaceRegistry(
-        deviceDataDir,
-        async () => parent,
-        async ({ cloneUrl, target, token: cloneToken }) => {
-          cloneTokenSeen = cloneToken;
-          execFileSync("git", ["clone", "--", source, target]);
-          execFileSync("git", ["-C", target, "remote", "set-url", "origin", cloneUrl]);
-        },
-      ),
+      workspaces: deviceWorkspaces,
       registerWorkspace: async () => ({ registration_id: "registration-local" }),
       heartbeatMs: 250,
       reconnectDelayMs: 50,
@@ -430,12 +460,33 @@ describe.sequential("Front Door GitHub + this computer creation", () => {
     });
 
     expect(response.status).toBe(201);
-    await expect(response.json()).resolves.toMatchObject({
+    const body = (await response.json()) as { project_id: string };
+    expect(body).toMatchObject({
       execution_location: "local",
       workspace: { kind: "local_runner", display_name: "fresh-app" },
       local_working_copy: { status: "ready" },
     });
     expect(existsSync(join(parent, "fresh-app", ".git"))).toBe(true);
     expect(cloneTokenSeen).toBe("one-use-clone-token");
+
+    const build = await fetch(`${url}/api/v2/projects/${body.project_id}/repository-graph/index`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(build.status).toBe(202);
+    const { request_id: graph_request_id } = (await build.json()) as { request_id: string };
+
+    let graph: { state: string; node_count: number } | undefined;
+    await waitFor(async () => {
+      const poll = await fetch(
+        `${url}/api/v2/projects/${body.project_id}/repository-graph/index/${graph_request_id}`,
+        { headers: { authorization: `Bearer ${token}` } },
+      );
+      if (poll.status === 202) return false;
+      expect(poll.status).toBe(200);
+      graph = (await poll.json()) as typeof graph;
+      return true;
+    }, "device-backed Graphify build");
+    expect(graph).toMatchObject({ state: "ready", node_count: 1 });
   });
 });

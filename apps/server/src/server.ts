@@ -5843,14 +5843,8 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
           });
           return undefined;
         }
-        const runner = stores.runner(target.runner_id);
         const reconciled = reconciledRunners.get(target.runner_id);
-        if (
-          !runner ||
-          !reconciled ||
-          reconciled.socket !== runnerSockets.get(target.runner_id) ||
-          reconciled.generation !== runner.generation
-        ) {
+        if (!reconciled || reconciled.socket !== runnerSockets.get(target.runner_id)) {
           reply.code(409).send({
             error: "local_helper_unavailable",
             message:
@@ -5867,7 +5861,7 @@ export async function buildServer(options: ServerOptions): Promise<NornsServer> 
         }
         return {
           runnerId: target.runner_id,
-          generation: runner.generation,
+          generation: reconciled.generation,
           repositoryId: target.repository_id,
         };
       };
