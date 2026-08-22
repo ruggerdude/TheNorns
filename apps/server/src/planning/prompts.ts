@@ -17,7 +17,11 @@ dependencies[] (module ids, acyclic), estimated_complexity: S|M|L|XL, risk: low|
 execution { likely_paths[], owned_components[], test_commands[] (ADDITIVE to required verification only; each must be a terminating check — a test, build, or lint command — never a dev server, watcher, or anything that keeps running),
 environment_requirements[], migration_required }, parallelization { safe, candidate_work_units[],
 shared_files[], integration_owner_required }, inputs[], outputs[], open_decisions[] }.
-Dependencies are only real data/build-order requirements; disjoint parallel-safe modules stay independent.`;
+Dependencies are only real data/build-order requirements; disjoint parallel-safe modules stay independent.
+Any module producing user-facing behaviour needs at least one user-level acceptance criterion stating what a
+person can observably do or see end to end; acceptance written purely as unit tests goes green while the
+feature does not exist for the user. A module that renders UI is not complete as unstyled browser-default
+markup: give it acceptance covering layout, type hierarchy, and interactive states.`;
 
 const DEPENDENCY_DISCIPLINE =
   "Dependencies are only for real data/build-order requirements. Never add one merely to serialize work. Mark disjoint modules parallelization.safe and leave them independent when neither consumes the other's outputs.";

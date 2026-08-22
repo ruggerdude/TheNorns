@@ -1754,3 +1754,10 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   esbuild child from a foundation run (18:28) were still alive hours later,
   holding a port inside a worktree that the run had finished with. The orphan
   reaper is not catching long-lived preview servers spawned by verification.
+- [x] ✅ PLAN-USER-LEVEL-ACCEPTANCE — Planner prompts now require a user-level
+  acceptance criterion for any module with user-facing behaviour, and design
+  acceptance (layout, type hierarchy, interactive states) for UI modules.
+  Root cause of "phase green, product missing": acceptance was written purely
+  as unit tests, so foundation/ai-settings/core-engine all passed while the
+  deployed app was an unstyled login box. Added to PLAN_SHAPE_HINT, which every
+  planning path (draft, quick, revision, direction-revision) reads.
