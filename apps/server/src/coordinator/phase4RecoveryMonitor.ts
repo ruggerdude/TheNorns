@@ -63,7 +63,8 @@ export class Phase4RecoveryMonitor {
     const reconciledAt = now.toISOString();
     // Expire delivered-but-never-started commands past their deadline first, so
     // the runs they free land in the stuck-run sweep below as recoverable.
-    const expiredDispatches = await this.expireStaleDispatches(now);
+    const expiredDispatches =
+      (await this.expireStaleDispatches(now)) + (await this.expireUnanswerableWaits(now));
     await this.transactions.transaction(async (sql) => {
       await reconcileObsoleteRecoveryDecisions(sql, reconciledAt);
       const completedQuickRuns = await sql.query<{
@@ -314,6 +315,97 @@ export class Phase4RecoveryMonitor {
    * which is exactly the state the existing recovery surfaces offer retry
    * from — so the task self-heals into a recoverable state.
    */
+  /**
+   * EXEC-WAIT-UNANSWERABLE — a run parked on a question nobody can answer.
+   *
+   * `waiting_for_human` is normally patient: a human answers and the run
+   * resumes. But a wait whose decision point is already closed can never be
+   * answered — the answer path needs that row open. Left alone the run waits
+   * forever, its phase stays `active` (the release sweep deliberately spares
+   * waiting runs), and the project's one-phase-at-a-time slot is held against
+   * every future plan. Live: that is exactly how StrumSheetX1 stalled.
+   *
+   * Expire those runs (a legal edge from `waiting_for_human`) and cascade the
+   * task to `blocked`, so the phase-release sweep can park the phase and the
+   * human can retry or cancel the task normally.
+   */
+  private async expireUnanswerableWaits(now: Date): Promise<number> {
+    const occurredAt = now.toISOString();
+    const candidates = await this.transactions.transaction(async (sql) => {
+      const result = await sql.query<{
+        id: string;
+        project_id: string;
+        phase_id: string;
+        task_id: string;
+      }>(
+        `SELECT run.id, run.project_id, run.phase_id, run.task_id
+           FROM agent_runs run
+           JOIN phases phase ON phase.id=run.phase_id
+           JOIN human_waits wait ON wait.source_run_id=run.id
+           JOIN decision_points point ON point.id=wait.decision_point_id
+          WHERE phase.status='active'
+            AND run.is_designated=true
+            AND run.state='waiting_for_human'
+            AND wait.status='awaiting_human'
+            AND point.status <> 'open'
+          ORDER BY run.id
+          LIMIT 100`,
+      );
+      return result.rows;
+    });
+    let expired = 0;
+    for (const run of candidates) {
+      try {
+        await this.transactions.transaction(async (tx) => {
+          const lifecycle = new SqlV2ApplicationTransaction(tx);
+          const lockedRun = await lifecycle.lockAgentRunLifecycle(run.id);
+          if (!lockedRun || lockedRun.state !== "waiting_for_human") return;
+          const task = await tx.query<{ aggregate_version: number; state: string }>(
+            "SELECT aggregate_version, state FROM tasks WHERE id=$1 FOR UPDATE",
+            [run.task_id],
+          );
+          const taskRow = task.rows[0];
+          await transitionV2AgentRunLifecycle(lifecycle, {
+            project_id: run.project_id,
+            phase_id: run.phase_id,
+            task_id: run.task_id,
+            run_id: run.id,
+            expected_aggregate_version: lockedRun.aggregate_version,
+            to: "expired",
+            reason:
+              "the run's question can no longer be answered (its decision point is closed); retry or cancel the task",
+            actor_type: "coordinator",
+            actor_id: "system:unanswerable-wait",
+            correlation_id: run.id,
+            causation_id: run.id,
+            occurred_at: occurredAt,
+          });
+          if (taskRow && taskRow.state !== "blocked") {
+            await transitionV2TaskLifecycle(lifecycle, {
+              project_id: run.project_id,
+              phase_id: run.phase_id,
+              task_id: run.task_id,
+              expected_aggregate_version: taskRow.aggregate_version,
+              to: "blocked",
+              reason: "the run's question can no longer be answered",
+              actor_type: "coordinator",
+              actor_id: "system:unanswerable-wait",
+              correlation_id: run.id,
+              causation_id: run.id,
+              occurred_at: occurredAt,
+            });
+          }
+        });
+        expired += 1;
+      } catch {
+        // Best-effort sweep, exactly like the dispatch expiry below: a
+        // concurrent answer or cancellation simply wins and the next tick
+        // re-evaluates.
+      }
+    }
+    return expired;
+  }
+
   private async expireStaleDispatches(now: Date): Promise<number> {
     const occurredAt = now.toISOString();
     const candidates = await this.transactions.transaction(async (sql) => {

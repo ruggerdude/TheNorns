@@ -1657,3 +1657,14 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   not answer the wait: human_waits stayed `awaiting_human`, no resume reached
   the runner. The UI reply path must use a different route; make the resolve
   route deliver (or reject with why).
+- [x] ✅ EXEC-WAIT-UNANSWERABLE — A run parked on a question that can never be
+  answered (its decision point is closed) held its phase `active` forever, and
+  with one-phase-at-a-time that blocked EVERY new plan in the project — live,
+  it blocked the core-engine work item. The phase-release sweep deliberately
+  spares `waiting_for_human` runs, and only considers phases with a
+  failed/expired run, so nothing ever reclaimed it. The recovery monitor now
+  expires such runs (`waiting_for_human → expired`, a legal edge) and cascades
+  the task to `blocked`, which feeds the existing release sweep in the same
+  tick. TEST GAP: no unit test yet — a human_waits fixture needs agent_runs +
+  work_conversations + work_messages + commands + runner_events +
+  budget_reservations + decision_points; verified live instead.
