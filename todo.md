@@ -1679,7 +1679,13 @@ root causes; fixes are shared across quick AND QC/phased unless noted.
   ("quick changes are capped at $2 per run; re-run this as phased work"), and
   (b) refuse/steer at PLAN time when a quick objective's estimated budget
   exceeds the quick cap, instead of failing mid-run.
-- [ ] 🟡 EXEC-NOTHING-TO-DO — A task whose work is already satisfied by the base
+- [x] ✅ EXEC-NOTHING-TO-DO — FIXED (runner): when the runtime COMPLETED and the
+  worktree is clean at the base, the executor now verifies the state anyway; if
+  the project's REAL checks pass (never hygiene-only), the run settles
+  succeeded with `empty:true`, publishing nothing and reporting "no change was
+  required". A red suite, a stopped runtime, or hygiene-only checks still fail.
+  Tests: 2 new real-git cases + the empty-run case re-specified to red checks;
+  publication suite 19/19. Needs an agent rebuild. Original: A task whose work is already satisfied by the base
   fails as "the coding agent produced no commit; the run is empty". Live: the
   core-engine phase's final module (app-wiring-suite-green) found the routes
   already wired by the preceding modules and the suite green, so it correctly

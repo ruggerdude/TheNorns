@@ -186,3 +186,4 @@
 2026-08-22T00:35Z | EXEC-WAIT-UNANSWERABLE | Recovery monitor expires runs waiting on a closed decision point so the phase releases its slot
 2026-08-22T00:25Z | QUICK-BUDGET-CAP | core-engine quick run refused at the $2 quick-mode cap; re-running as phased work
 2026-08-22T01:45Z | STRUMSHEETX1-CORE-ENGINE | Core engine built end-to-end: parser, upload API, sheet renderer+endpoint, mock provider, routes wired; main c7cc8b0 -> c348bdf; 62 tests green
+2026-08-22T02:05Z | EXEC-NOTHING-TO-DO | An empty run whose real checks pass is 'nothing to do' (succeeded, publishes nothing), not a failure

@@ -414,6 +414,12 @@ export interface RunnerVerifier {
     /** The commit the worktree started at, so an empty run cannot pass. */
     base_revision: string;
     /**
+     * EXEC-NOTHING-TO-DO — verify the state at `expected_commit` even though it
+     * equals the base, so the executor can ask whether the task's work is
+     * already satisfied. Never set for an ordinary run.
+     */
+    allow_unchanged?: boolean;
+    /**
      * EXECUTION E10/E11 — the project's REAL build/test/lint commands, carried
      * structurally on the dispatch command as argv vectors. Optional: a server
      * that predates E10, or a project with no ingested facts, sends nothing and
@@ -478,6 +484,13 @@ export class CommandPolicyVerifier implements RunnerVerifier {
     base_revision: string;
     commands?: readonly VerificationCommand[];
     repository_manifest?: true;
+    /**
+     * Verify the state AT `expected_commit` even though it equals the base —
+     * the "nothing to do" check, where the executor asks whether the task's
+     * work is already satisfied. Never set for an ordinary run, so an agent
+     * that committed nothing still fails the emptiness refusal below.
+     */
+    allow_unchanged?: boolean;
     signal?: AbortSignal;
   }): Promise<RunnerVerificationResult> {
     const refuse = (reason: string): RunnerVerificationResult => ({
@@ -491,7 +504,7 @@ export class CommandPolicyVerifier implements RunnerVerifier {
 
     // An agent that committed nothing has produced nothing to verify. This is
     // checked FIRST so that no policy, however permissive, can green-light it.
-    if (input.expected_commit === input.base_revision) {
+    if (input.expected_commit === input.base_revision && !input.allow_unchanged) {
       return refuse("the run produced no commit, so there is nothing to verify");
     }
     const headBefore = await this.head(input.worktree_path);
@@ -1767,9 +1780,75 @@ export class V2RunnerExecutor {
       // produced no commit. There is nothing to publish and nothing to verify,
       // and calling that a success is the exact dishonesty this phase exists to
       // remove.
+      // The contract types `command` as `string[]` with a runtime `.min(1)`;
+      // the runner's own type is a non-empty tuple, because `execFile` needs a
+      // file argument that provably exists. Narrow here rather than casting: a
+      // vector that somehow arrived empty is dropped, not spawned with
+      // `undefined` as the program name.
+      const dispatchVerificationCommands = command.verification_commands
+        ?.map((entry) => {
+          const [file, ...args] = entry.command;
+          return file ? { name: entry.name, command: [file, ...args] as const } : null;
+        })
+        .filter((entry): entry is VerificationCommand => entry !== null);
       if (commit === effectiveBase) {
         const permissionDenied = runtimeResult.stopReason?.startsWith("permission_denied");
         const runtimeStopped = runtimeResult.outcome !== "completed";
+        // EXEC-NOTHING-TO-DO — "the agent did nothing" and "nothing needed
+        // doing" look identical from the worktree, and failing the second is
+        // how a finished deliverable gets rejected (live: a phase's final
+        // wiring module found its routes already wired by the preceding
+        // modules and the suite green, so it correctly made no commit, and the
+        // run failed). Ask the project's own checks. This can only pass when
+        // the runtime COMPLETED normally and the checks are REAL — a
+        // hygiene-only default (a whitespace lint) can never green-light an
+        // empty run, which is the "green badge that means nothing" E4 removed.
+        if (!permissionDenied && !runtimeStopped) {
+          stage = "verification";
+          const unchanged = await this.verifier.verify({
+            worktree_path: worktree.path,
+            policy_ref: command.verification_policy_ref,
+            expected_commit: commit,
+            base_revision: effectiveBase,
+            allow_unchanged: true,
+            ...(dispatchVerificationCommands && dispatchVerificationCommands.length > 0
+              ? { commands: dispatchVerificationCommands }
+              : {}),
+            ...(command.repository_verification_manifest !== undefined
+              ? { repository_manifest: true as const }
+              : {}),
+            signal: controller.signal,
+          });
+          if (unchanged.passed && !unchanged.hygiene_only) {
+            const note = `no change was required: the task's work is already satisfied at ${commit} and the project's checks pass`;
+            emit({ kind: "run_log", run_id: command.run_id, chunk: note });
+            emit({
+              kind: "verification_result",
+              node_id: command.task_id,
+              commit_sha: commit,
+              passed: true,
+              output_digest: createHash("sha256").update(unchanged.output).digest("hex"),
+              command_results: unchanged.command_results.map((result) => ({
+                name: result.name,
+                command: [...result.command],
+                exit_code: result.exit_code,
+                passed: result.passed,
+                output: result.output,
+              })),
+            });
+            emit({ kind: "run_status", run_id: command.run_id, status: "completed" });
+            return finish({
+              outcome: "succeeded",
+              commit_sha: commit,
+              verification_passed: true,
+              usage: runtimeResult.usage,
+              empty: true,
+              publication: null,
+              session_id: sessionId,
+              reason: note,
+            });
+          }
+        }
         const reason = permissionDenied
           ? `the coding agent produced no commit because ${runtimeResult.detail}`
           : runtimeStopped
@@ -1803,17 +1882,6 @@ export class V2RunnerExecutor {
         });
       }
 
-      // The contract types `command` as `string[]` with a runtime `.min(1)`;
-      // the runner's own type is a non-empty tuple, because `execFile` needs a
-      // file argument that provably exists. Narrow here rather than casting: a
-      // vector that somehow arrived empty is dropped, not spawned with
-      // `undefined` as the program name.
-      const dispatchVerificationCommands = command.verification_commands
-        ?.map((entry) => {
-          const [file, ...args] = entry.command;
-          return file ? { name: entry.name, command: [file, ...args] as const } : null;
-        })
-        .filter((entry): entry is VerificationCommand => entry !== null);
       if (controller.signal.aborted) {
         return await cancelledWithWorktree(runtimeResult.usage);
       }

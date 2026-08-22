@@ -569,7 +569,10 @@ describe("EXECUTION E4 — a run's work is published, and verification is real",
     );
   });
 
-  it("reports an empty run as empty, and publishes nothing", async () => {
+  it("NOTHING TO DO: an empty run whose real checks pass succeeds without publishing", async () => {
+    // Live: a phase's final wiring module found its routes already wired by the
+    // preceding modules and the suite green, so it correctly made no commit —
+    // and the run was failed as "empty", rejecting finished work.
     const h = await harness(cleanup);
     const api = githubApi();
     const events: EventPayloadT[] = [];
@@ -577,6 +580,65 @@ describe("EXECUTION E4 — a run's work is published, and verification is real",
       h,
       idleRuntime,
       PASSING,
+      new GitPublisher({
+        repositorySlug: "acme/widgets",
+        token: "test-token",
+        fetchImpl: api.fetchImpl,
+      }),
+    ).execute(dispatchCommand({ expected_revision: h.base }), (event) => events.push(event));
+
+    expect(result).toMatchObject({
+      outcome: "succeeded",
+      empty: true,
+      verification_passed: true,
+      commit_sha: h.base,
+      publication: null,
+    });
+    expect(result.reason).toContain("no change was required");
+    // Nothing was pushed: there is no work to publish.
+    await expect(
+      git(h.remote, "rev-parse", "refs/heads/norns/task-task-1"),
+    ).rejects.toBeTruthy();
+    expect(api.pulls).toEqual([]);
+  });
+
+  it("NOTHING TO DO cannot be claimed on hygiene-only checks: an idle agent still fails", async () => {
+    // The guard against a green badge that means nothing: with no real project
+    // checks, an empty run is still an empty run.
+    const h = await harness(cleanup);
+    const events: EventPayloadT[] = [];
+    const result = await new V2RunnerExecutor(
+      { id: "runner-1", generation: 3, scratch_root: h.root },
+      h.registry,
+      contextLoader(),
+      new GitWorktreeManager(h.worktreeRoot),
+      new Map([["codex", idleRuntime]]),
+      new CommandPolicyVerifier(
+        new Map([["verification", [{ name: "git-hygiene", command: ["git", "--version"] }]]]),
+      ),
+      undefined,
+      new GitPublisher({
+        repositorySlug: "acme/widgets",
+        token: "test-token",
+        fetchImpl: githubApi().fetchImpl,
+      }),
+    ).execute(dispatchCommand({ expected_revision: h.base }), (event) => events.push(event));
+
+    expect(result).toMatchObject({ outcome: "failed", empty: true, verification_passed: false });
+    expect(result.reason).toContain("produced no commit");
+  });
+
+  it("reports an empty run as empty, and publishes nothing", async () => {
+    // An idle agent whose project checks are RED is the unambiguous empty run:
+    // nothing was produced and nothing is green, so it can never be a success.
+    // (An idle agent whose real checks pass is "nothing to do" — covered above.)
+    const h = await harness(cleanup);
+    const api = githubApi();
+    const events: EventPayloadT[] = [];
+    const result = await executor(
+      h,
+      idleRuntime,
+      FAILING,
       new GitPublisher({
         repositorySlug: "acme/widgets",
         token: "test-token",
