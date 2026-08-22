@@ -21,7 +21,7 @@ esac
 NODE="$RESOURCE_DIR/runtime/$ARCH/node"
 CLI="$RESOURCE_DIR/app/$ARCH/node_modules/@norns/runner/dist/cli.js"
 PACKAGE_BIN="$RESOURCE_DIR/app/$ARCH/node_modules/.bin"
-export PATH="$RESOURCE_DIR/runtime/$ARCH:$PACKAGE_BIN:/usr/bin:/bin:/usr/sbin:/sbin"
+export PATH="$RESOURCE_DIR/runtime/$ARCH:$PACKAGE_BIN:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 if [ ! -x "$NODE" ] || [ ! -f "$CLI" ]; then
   printf '%s\n' "The installed app is incomplete. Reinstall Norns Local Agent." >&2
@@ -108,6 +108,7 @@ install_launch_agent() {
     printf '%s\n' '<key>NORNS_ENABLE_DEVICE_ENROLLMENT</key><string>true</string>'
     printf '%s\n' '<key>NORNS_ENABLE_DEVICE_CONTROL</key><string>true</string>'
     printf '%s\n' '<key>NORNS_ENABLE_DEVICE_EXECUTION</key><string>true</string>'
+    printf '<key>PATH</key><string>%s</string>\n' "$PATH"
     printf '<key>NORNS_LOCAL_AGENT_VERSION</key><string>%s</string>\n' "$AGENT_VERSION"
     printf '%s\n' '</dict>'
     printf '<key>StandardOutPath</key><string>%s/runner.log</string>\n' "$LOG_DIR"

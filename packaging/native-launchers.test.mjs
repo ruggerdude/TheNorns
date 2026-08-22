@@ -60,6 +60,8 @@ assert.doesNotMatch(openCase, /stop_old_agents|kickstart -k/);
 assert.match(agentShell, /NORNS_LOCAL_AGENT_VERSION/);
 assert.match(agentShell, /INSTALLED_SERVICE_VERSION/);
 assert.match(agentShell, /com\.thenorns\.local-agent-menubar/);
+assert.match(agentShell, /\/opt\/homebrew\/bin:\/usr\/local\/bin/);
+assert.match(agentShell, /<key>PATH<\/key><string>%s<\/string>/);
 assert.match(agentShell, /stop\)/);
 
 console.log("native launcher mutual-HMAC and stale-discovery fixtures: OK");
